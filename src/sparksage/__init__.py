@@ -1,5 +1,13 @@
 """SparkSage: structured, question-aligned knowledge chunks for RAG."""
 
+from sparksage.convert import (
+    DEFAULT_EXTENSIONS,
+    ConversionResult,
+    ConverterBackend,
+    FakeConverterBackend,
+    MarkdownConverter,
+    MarkItDownBackend,
+)
 from sparksage.generator import (
     FakeLLMClient,
     IdeaBlockGenerator,
@@ -17,13 +25,19 @@ from sparksage.schema.ideablock import IdeaBlock
 from sparksage.schema.technical import TechnicalBlock
 
 __all__ = [
+    "DEFAULT_EXTENSIONS",
     "BlockStatus",
+    "ConversionResult",
+    "ConverterBackend",
     "EntityRelation",
     "EntityType",
+    "FakeConverterBackend",
+    "FakeLLMClient",
     "IdeaBlock",
     "IdeaBlockGenerator",
-    "FakeLLMClient",
     "LLMClient",
+    "MarkdownConverter",
+    "MarkItDownBackend",
     "OpenAICompatibleClient",
     "SentenceRole",
     "Tag",

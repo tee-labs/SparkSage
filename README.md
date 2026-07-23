@@ -157,6 +157,61 @@ PYTHONPATH=src python3 examples/generate_blocks.py
 
 ---
 
+## Convert any file to Markdown
+
+Before chunking, source documents come in many formats. SparkSage normalizes them
+all to Markdown (the lingua franca downstream generation expects) via a pluggable
+backend built on Microsoft
+[`markitdown`](https://github.com/microsoft/markitdown) — PDF, Word, PowerPoint,
+Excel, HTML, CSV/JSON/XML, images (EXIF + OCR), audio (transcription), EPub, ZIP
+archives and more.
+
+```bash
+pip install 'sparksage[convert]'   # pulls markitdown[all]
+```
+
+```python
+from sparksage import MarkdownConverter
+
+conv = MarkdownConverter()
+
+# single file -> Markdown
+result = conv.convert("report.pdf")
+print(result.markdown)
+
+# whole directory tree -> .md files
+conv.convert_directory("docs/", dest_dir="docs_md/")
+```
+
+The returned [`ConversionResult`](src/sparksage/convert/converter.py) chains
+straight into generation:
+
+```python
+blocks = IdeaBlockGenerator(client).generate(
+    result.markdown, source=result.source_ref,
+)
+```
+
+How it stays robust and dependency-light:
+
+- The conversion core depends only on a small
+  [`ConverterBackend`](src/sparksage/convert/backend.py) protocol, so it is fully
+  unit-testable offline with a deterministic fake — `markitdown` is imported
+  lazily and only when no backend is injected.
+- Batch conversion is **resilient**: a single bad file is logged and skipped
+  rather than aborting the whole run.
+- `convert_directory` filters by a sensible
+  [`DEFAULT_EXTENSIONS`](src/sparksage/convert/converter.py) set (overridable)
+  and recurses by default; `convert_to_file` writes `<name>.md` for each source.
+
+Offline demo (no `markitdown` needed):
+
+```bash
+PYTHONPATH=src python3 examples/convert_files.py
+```
+
+---
+
 ## Project layout
 
 ```
@@ -172,7 +227,10 @@ src/sparksage/
 │   ├── prompts.py      # prompt builder (reads enums -> never drifts)
 │   ├── schema.py       # lenient raw models + enum coercion
 │   └── generator.py    # text -> list[IdeaBlock]  ★
-tests/                  # 53 tests (schema + generation)
+├── convert/
+│   ├── backend.py      # ConverterBackend protocol + MarkItDown + Fake backend
+│   └── converter.py    # any-file -> Markdown (single + batch)  ★
+tests/                  # 80 tests (schema + generation + conversion)
 examples/               # runnable demos
 ```
 
@@ -187,6 +245,7 @@ ruff check src tests                          # lint
 
 - [x] Chunk schema (IdeaBlock + TechnicalBlock) — *first release*
 - [x] LLM-driven generation (text -> many IdeaBlocks via pluggable LLM client)
+- [x] Uniform file-to-Markdown conversion (any format -> Markdown via markitdown)
 - [ ] Distill de-duplication pipeline (embedding + LSH + FAISS kNN + threshold
       iteration + Louvain/BFS + hierarchical LLM merge)
 - [ ] OpenAI-compatible ingest/distill API

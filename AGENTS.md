@@ -48,11 +48,19 @@ PYTHONPATH=src python3 examples/build_chunks.py
   `LLMClient` Protocol — never import a concrete LLM SDK there. New clients
   implement the Protocol; raw model output is coerced through the enums before
   building strict `IdeaBlock`s (see `generator/schema.py`).
+- The conversion core (`convert/converter.py`) depends only on the
+  `ConverterBackend` Protocol — never import `markitdown` there. It is an
+  optional dependency (`pip install 'sparksage[convert]'`), imported lazily only
+  inside `MarkItDownBackend`. `MarkdownConverter` returns a `ConversionResult`
+  whose `.markdown` feeds `IdeaBlockGenerator` and whose `.source_ref` provides
+  provenance.
 
 ## Roadmap context
 
-Implemented now: chunk schema (IdeaBlock + TechnicalBlock) and LLM-driven
-generation (`generator/`: prompt building, JSON extraction, enum coercion).
+Implemented now: chunk schema (IdeaBlock + TechnicalBlock), LLM-driven
+generation (`generator/`: prompt building, JSON extraction, enum coercion), and
+uniform file-to-Markdown conversion (`convert/`: pluggable backend built on
+`markitdown`, single-file + resilient batch directory mode).
 Planned next: Distill de-dup pipeline (embedding + LSH + FAISS + threshold
 iteration + Louvain/BFS + hierarchical LLM merge) and an OpenAI-compatible API.
 Design schema additions so the Distill lifecycle fields (`status`, `parents`,

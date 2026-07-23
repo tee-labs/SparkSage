@@ -34,6 +34,9 @@ dev = [
 llm = [
     "openai>=1.0",
 ]
+convert = [
+    "markitdown[all]>=0.1",
+]
 
 [project.urls]
 Homepage = "https://github.com/tee-labs/SparkSage"
