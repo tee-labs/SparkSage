@@ -37,10 +37,9 @@ jobs:
         uses: anomalyco/opencode/github@latest
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          API_KEY: ${{ secrets.API_KEY }}
+          API_KEY: ${{ secrets.GLM_API_KEY }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           CONTEXT7_API_KEY: ${{ secrets.CONTEXT7_API_KEY }}
-          API_KEY: ${{ secrets.GLM_API_KEY }}
         with:
           use_github_token: true
           model: glm/glm-5.2
