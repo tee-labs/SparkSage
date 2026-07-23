@@ -1,0 +1,2 @@
+# Core schema dependencies
+pydantic>=2.5,<3
