@@ -7,9 +7,10 @@ small, self-contained *knowledge unit* that is aligned to how users ask
 questions. Instead of embedding arbitrary text fragments (which get cut
 mid-sentence and retrieve poorly), SparkSage embeds whole, verified answers.
 
-> Status: **Pre-Alpha**. This repository currently implements the **chunk
-> schema** (the foundational, most innovative layer). The Distill
-> de-duplication pipeline and ingest service are planned.
+> Status: **Pre-Alpha**. This repository implements the **chunk schema**
+> (IdeaBlock + TechnicalBlock) and **LLM-driven generation** (turn free text
+> into many IdeaBlocks). The Distill de-duplication pipeline and ingest service
+> are planned.
 
 ---
 
@@ -108,6 +109,54 @@ PYTHONPATH=src python3 examples/build_chunks.py
 
 ---
 
+## Generate IdeaBlocks from text
+
+SparkSage decomposes a passage of free text into several question-aligned
+IdeaBlocks via an LLM. The generation core depends on a small
+[`LLMClient`](src/sparksage/generator/client.py) protocol, so it works with any
+OpenAI-compatible endpoint (OpenAI, Azure, vLLM, Ollama, GLM, ...) and is fully
+testable offline with a deterministic fake.
+
+```bash
+pip install 'sparksage[llm]'   # pulls the optional 'openai' SDK
+```
+
+```python
+from sparksage import IdeaBlockGenerator, OpenAICompatibleClient
+
+client = OpenAICompatibleClient(api_key="...", model="gpt-4o-mini")
+gen = IdeaBlockGenerator(client)
+
+blocks = gen.generate(
+    "SparkSage replaces naive text slicing with question-aligned chunks ...",
+    source_uri="file://docs/overview.md",
+)
+for b in blocks:
+    print(b.critical_question, "->", b.trusted_answer)
+```
+
+How it stays robust and schema-safe:
+
+- The prompt teaches the model the IdeaBlock format and the **live controlled
+  vocabularies** (`Tag` / `EntityType`) read straight from the enum definitions,
+  so it can never drift from the code.
+- Model output is parsed into [lenient intermediate
+  models](src/sparksage/generator/schema.py), then **coerced** through the
+  vocabularies into strict `IdeaBlock`s. Unknown tags are dropped; the
+  `critical_question` is repaired to end with `?`; oversized answers are skipped
+  (split into more blocks instead of truncating).
+- `strict=True` fails fast on the first malformed block; the default skips bad
+  blocks and reports them via `generate_with_stats()`.
+- Provenance (`source_uri`) is attached to every emitted block.
+
+Offline demo (no API key):
+
+```bash
+PYTHONPATH=src python3 examples/generate_blocks.py
+```
+
+---
+
 ## Project layout
 
 ```
@@ -118,8 +167,13 @@ src/sparksage/
 │   ├── source.py       # provenance (where a block came from)
 │   ├── ideablock.py    # the core question-aligned chunk  ★
 │   └── technical.py    # order-sensitive variant for SOPs/manuals
-tests/                  # 24 tests covering construction, validation, serialization
-examples/               # runnable demo
+├── generator/
+│   ├── client.py       # LLMClient protocol + OpenAI-compatible + Fake client
+│   ├── prompts.py      # prompt builder (reads enums -> never drifts)
+│   ├── schema.py       # lenient raw models + enum coercion
+│   └── generator.py    # text -> list[IdeaBlock]  ★
+tests/                  # 53 tests (schema + generation)
+examples/               # runnable demos
 ```
 
 ## Development
@@ -131,7 +185,8 @@ ruff check src tests                          # lint
 
 ## Roadmap
 
-- [x] Chunk schema (IdeaBlock + TechnicalBlock) — *this release*
+- [x] Chunk schema (IdeaBlock + TechnicalBlock) — *first release*
+- [x] LLM-driven generation (text -> many IdeaBlocks via pluggable LLM client)
 - [ ] Distill de-duplication pipeline (embedding + LSH + FAISS kNN + threshold
       iteration + Louvain/BFS + hierarchical LLM merge)
 - [ ] OpenAI-compatible ingest/distill API

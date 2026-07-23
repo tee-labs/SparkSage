@@ -31,6 +31,9 @@ dev = [
     "pytest-cov>=4.0",
     "ruff>=0.1",
 ]
+llm = [
+    "openai>=1.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/tee-labs/SparkSage"

@@ -44,11 +44,16 @@ PYTHONPATH=src python3 examples/build_chunks.py
 - `IdeaBlock.embedding_text` is the *only* text that should be embedded.
 - Do not add comments unless asked.
 - Keep `trusted_answer` concise (≤ 500 chars) — split into more blocks instead.
+- The generation core (`generator/generator.py`) depends only on the
+  `LLMClient` Protocol — never import a concrete LLM SDK there. New clients
+  implement the Protocol; raw model output is coerced through the enums before
+  building strict `IdeaBlock`s (see `generator/schema.py`).
 
 ## Roadmap context
 
-Implemented now: chunk schema (IdeaBlock + TechnicalBlock). Planned next:
-Distill de-dup pipeline (embedding + LSH + FAISS + threshold iteration +
-Louvain/BFS + hierarchical LLM merge) and an OpenAI-compatible API. Design
-schema additions so the Distill lifecycle fields (`status`, `parents`,
+Implemented now: chunk schema (IdeaBlock + TechnicalBlock) and LLM-driven
+generation (`generator/`: prompt building, JSON extraction, enum coercion).
+Planned next: Distill de-dup pipeline (embedding + LSH + FAISS + threshold
+iteration + Louvain/BFS + hierarchical LLM merge) and an OpenAI-compatible API.
+Design schema additions so the Distill lifecycle fields (`status`, `parents`,
 `confidence`, `embedding`) remain usable.

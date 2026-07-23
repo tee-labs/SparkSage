@@ -1,2 +1,6 @@
 # Core schema dependencies
 pydantic>=2.5,<3
+
+# Optional: LLM-driven block generation against an OpenAI-compatible endpoint.
+# Install with: pip install 'sparksage[llm]'
+# openai>=1.0

@@ -1,5 +1,11 @@
 """SparkSage: structured, question-aligned knowledge chunks for RAG."""
 
+from sparksage.generator import (
+    FakeLLMClient,
+    IdeaBlockGenerator,
+    LLMClient,
+    OpenAICompatibleClient,
+)
 from sparksage.schema.enums import (
     BlockStatus,
     EntityRelation,
@@ -15,6 +21,10 @@ __all__ = [
     "EntityRelation",
     "EntityType",
     "IdeaBlock",
+    "IdeaBlockGenerator",
+    "FakeLLMClient",
+    "LLMClient",
+    "OpenAICompatibleClient",
     "SentenceRole",
     "Tag",
     "TechnicalBlock",
