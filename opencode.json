@@ -5,7 +5,7 @@
       "npm": "@ai-sdk/openai-compatible",
       "name": "glm",
       "options": {
-        "baseURL": "https://open.bigmodel.cn/api/paas/v4",
+        "baseURL": "https://open.bigmodel.cn/api/coding/paas/v4",
         "headers": {
           "Authorization": "Bearer {env:API_KEY}"
         }
