@@ -1,0 +1,26 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "glm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "glm",
+      "options": {
+        "baseURL": "https://open.bigmodel.cn/api/paas/v4",
+        "headers": {
+          "Authorization": "Bearer {env:API_KEY}"
+        }
+      },
+      "models": {
+        "glm-5-turbo": {
+          "name": "glm-5-turbo"
+        },
+        "glm-5.1": {
+          "name": "glm-5.1"
+        },
+        "glm-5.2": {
+          "name": "glm-5.2"
+        }
+      }
+    }
+  }
+}
