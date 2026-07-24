@@ -55,15 +55,39 @@ _logger = logging.getLogger(__name__)
 ENV_API_KEY = "SPARKSAGE_API_KEY"
 ENV_BASE_URL = "SPARKSAGE_BASE_URL"
 ENV_MODEL = "SPARKSAGE_MODEL"
+ENV_STREAM = "SPARKSAGE_STREAM"
 ENV_OPENAI_API_KEY = "OPENAI_API_KEY"
 ENV_OPENAI_BASE_URL = "OPENAI_BASE_URL"
 
 DEFAULT_MODEL = "gpt-4o-mini"
+#: Streaming is on by default -- it is more robust for long generations.
+DEFAULT_STREAM = True
+
+_TRUTHY = {"1", "true", "yes", "on"}
+_FALSY = {"0", "false", "no", "off"}
 
 
 def _env(name: str) -> str | None:
     val = os.environ.get(name)
     return val if val else None
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Parse an environment variable as a boolean.
+
+    Accepts the common truthy/falsy spellings (``1/0``, ``true/false``,
+    ``yes/no``, ``on/off``); case-insensitive. Anything else (or unset) falls
+    back to ``default``.
+    """
+    raw = _env(name)
+    if raw is None:
+        return default
+    val = raw.strip().lower()
+    if val in _TRUTHY:
+        return True
+    if val in _FALSY:
+        return False
+    return default
 
 
 def build_default_service() -> SparkSageService:
@@ -89,6 +113,7 @@ def build_default_service() -> SparkSageService:
     ``SPARKSAGE_API_KEY``         API key (falls back to ``OPENAI_API_KEY``)
     ``SPARKSAGE_BASE_URL``        Base URL (falls back to ``OPENAI_BASE_URL``)
     ``SPARKSAGE_MODEL``           Model id (default ``gpt-4o-mini``)
+    ``SPARKSAGE_STREAM``          Stream the LLM response (default ``true``)
     ``SPARKSAGE_LANGUAGE``        Output language written into each block
     ============================  =========================================
     """
@@ -102,11 +127,12 @@ def build_default_service() -> SparkSageService:
         base_url = _env(ENV_BASE_URL) or _env(ENV_OPENAI_BASE_URL)
         model = _env(ENV_MODEL) or DEFAULT_MODEL
         language = _env("SPARKSAGE_LANGUAGE") or "en"
+        stream = _env_bool(ENV_STREAM, DEFAULT_STREAM)
         client = OpenAICompatibleClient(
-            base_url=base_url, api_key=api_key, model=model
+            base_url=base_url, api_key=api_key, model=model, stream=stream
         )
         generator = IdeaBlockGenerator(client, language=language)
-        _logger.info("generator configured with model=%s", model)
+        _logger.info("generator configured with model=%s stream=%s", model, stream)
     else:
         _logger.warning(
             "no %s/%s set; the /generate route will return 503",
@@ -295,10 +321,12 @@ def run(  # pragma: no cover - thin launcher
 
 __all__ = [
     "DEFAULT_MODEL",
+    "DEFAULT_STREAM",
     "ENV_API_KEY",
     "ENV_BASE_URL",
     "ENV_MODEL",
     "build_default_document_service",
+    "ENV_STREAM",
     "build_default_service",
     "create_app",
     "run",
