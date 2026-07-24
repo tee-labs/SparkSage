@@ -8,8 +8,9 @@ questions. Instead of embedding arbitrary text fragments (which get cut
 mid-sentence and retrieve poorly), SparkSage embeds whole, verified answers.
 
 > Status: **Pre-Alpha**. This repository implements the **chunk schema**
-> (IdeaBlock + TechnicalBlock) and **LLM-driven generation** (turn free text
-> into many IdeaBlocks). The Distill de-duplication pipeline and ingest service
+> (IdeaBlock + TechnicalBlock), **LLM-driven generation** (turn free text
+> into many IdeaBlocks), **file-to-Markdown conversion**, and **customizable
+> text cleaning**. The Distill de-duplication pipeline and ingest service
 > are planned.
 
 ---
@@ -212,6 +213,66 @@ PYTHONPATH=src python3 examples/convert_files.py
 
 ---
 
+## Clean document text
+
+Conversion yields *raw* Markdown faithful to the source bytes — but that text is
+seldom generation-ready: BOMs, mixed line endings, leaked control characters,
+page headers/footers, watermarks, boilerplate, PII. **Which of those are noise
+depends on your business**, so cleaning is built to be customized.
+
+[`TextCleaner`](src/sparksage/clean/cleaner.py) applies a pipeline of tiny,
+composable rules. Rules can be **global** (every document) or
+**source/filename-specific** (PDF footers only, Confluence macros only, ...):
+
+```python
+from sparksage import TextCleaner, RegexReplaceRule
+
+cleaner = TextCleaner()                                     # sensible defaults
+cleaner.add(RegexReplaceRule(r"CONFIDENTIAL", ""))          # every document
+cleaner.add(RegexReplaceRule(r"\b\d{3}-\d{2}-\d{4}\b", "[REDACTED]"))  # PII
+cleaner.add_for("*.pdf", RegexReplaceRule(r"Page \d+ of \d+", ""))     # PDF footers only
+
+cleaned = cleaner.clean(raw_text, source="docs/report.pdf")
+# or chain straight off a ConversionResult:
+cleaned = cleaner.clean_result(conv_result)
+
+blocks = IdeaBlockGenerator(client).generate(
+    cleaned.text, source=cleaned.source_ref,
+)
+```
+
+Built-in rules cover the normalization that helps almost every document
+(`RemoveBomRule`, `NormalizeLineEndingsRule`, `RemoveControlCharsRule`,
+`StripTrailingWhitespaceRule`, `CollapseBlankLinesRule`, `RemoveHtmlCommentsRule`).
+Two escape hatches cover business-specific surgery without writing a class:
+
+- [`RegexReplaceRule`](src/sparksage/clean/rules.py) — pattern-based
+  remove/replace (watermarks, footers, redaction, terminology normalization).
+- [`CallableRule`](src/sparksage/clean/rules.py) — wrap any
+  `(text, source) -> text` function.
+
+For full control, implement the
+[`CleaningRule`](src/sparksage/clean/rules.py) protocol (a single `clean` method)
+and register it. Source routing lives in the
+[`CleaningRegistry`](src/sparksage/clean/registry.py), which matches by glob
+(against both path and basename) or regex.
+
+How it stays robust:
+
+- The cleaning core depends only on the `CleaningRule` protocol and the
+  `CleaningRegistry` dispatcher — pure Python, no external dependencies, fully
+  unit-testable offline.
+- `DEFAULT_RULES` run first (normalize bytes before business logic); custom rules
+  layer on top in registration order. Pass `use_defaults=False` for total control.
+
+Offline demo (convert -> clean -> generate, no API key, no `markitdown`):
+
+```bash
+PYTHONPATH=src python3 examples/clean_text.py
+```
+
+---
+
 ## Project layout
 
 ```
@@ -230,7 +291,11 @@ src/sparksage/
 ├── convert/
 │   ├── backend.py      # ConverterBackend protocol + MarkItDown + Fake backend
 │   └── converter.py    # any-file -> Markdown (single + batch)  ★
-tests/                  # 80 tests (schema + generation + conversion)
+├── clean/
+│   ├── rules.py        # CleaningRule protocol + built-in & configurable rules
+│   ├── registry.py     # source/filename-aware rule routing (glob/regex)
+│   └── cleaner.py      # raw text -> final document text  ★
+tests/                  # 114 tests (schema + generation + conversion + cleaning)
 examples/               # runnable demos
 ```
 
@@ -246,6 +311,7 @@ ruff check src tests                          # lint
 - [x] Chunk schema (IdeaBlock + TechnicalBlock) — *first release*
 - [x] LLM-driven generation (text -> many IdeaBlocks via pluggable LLM client)
 - [x] Uniform file-to-Markdown conversion (any format -> Markdown via markitdown)
+- [x] Customizable text cleaning (business-specific rules, source-aware routing)
 - [ ] Distill de-duplication pipeline (embedding + LSH + FAISS kNN + threshold
       iteration + Louvain/BFS + hierarchical LLM merge)
 - [ ] OpenAI-compatible ingest/distill API

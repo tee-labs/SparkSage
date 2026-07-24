@@ -1,5 +1,14 @@
 """SparkSage: structured, question-aligned knowledge chunks for RAG."""
 
+from sparksage.clean import (
+    DEFAULT_RULES,
+    CallableRule,
+    CleaningRegistry,
+    CleaningResult,
+    CleaningRule,
+    RegexReplaceRule,
+    TextCleaner,
+)
 from sparksage.convert import (
     DEFAULT_EXTENSIONS,
     ConversionResult,
@@ -26,7 +35,12 @@ from sparksage.schema.technical import TechnicalBlock
 
 __all__ = [
     "DEFAULT_EXTENSIONS",
+    "DEFAULT_RULES",
     "BlockStatus",
+    "CallableRule",
+    "CleaningRegistry",
+    "CleaningResult",
+    "CleaningRule",
     "ConversionResult",
     "ConverterBackend",
     "EntityRelation",
@@ -39,9 +53,11 @@ __all__ = [
     "MarkdownConverter",
     "MarkItDownBackend",
     "OpenAICompatibleClient",
+    "RegexReplaceRule",
     "SentenceRole",
     "Tag",
     "TechnicalBlock",
+    "TextCleaner",
 ]
 
 __version__ = "0.1.0"

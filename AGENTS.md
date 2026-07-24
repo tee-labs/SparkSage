@@ -54,13 +54,25 @@ PYTHONPATH=src python3 examples/build_chunks.py
   inside `MarkItDownBackend`. `MarkdownConverter` returns a `ConversionResult`
   whose `.markdown` feeds `IdeaBlockGenerator` and whose `.source_ref` provides
   provenance.
+- The cleaning core (`clean/cleaner.py`) depends only on the `CleaningRule`
+  Protocol and the `CleaningRegistry` dispatcher — never import a third-party
+  cleaning library there. It is pure stdlib and needs no optional dependency.
+  `TextCleaner` sits between conversion and generation: feed the
+  `ConversionResult.markdown` (via `clean_result`) and emit a `CleaningResult`
+  whose `.text` feeds `IdeaBlockGenerator` and whose `.source_ref` provides
+  provenance. `source` is both provenance *and* the key for source/filename-aware
+  rule routing (`add_for`), since cleaning is strongly business-dependent.
+  Built-in rules are normalization only; business logic goes in custom rules
+  registered on a `TextCleaner` instance.
 
 ## Roadmap context
 
 Implemented now: chunk schema (IdeaBlock + TechnicalBlock), LLM-driven
-generation (`generator/`: prompt building, JSON extraction, enum coercion), and
+generation (`generator/`: prompt building, JSON extraction, enum coercion),
 uniform file-to-Markdown conversion (`convert/`: pluggable backend built on
-`markitdown`, single-file + resilient batch directory mode).
+`markitdown`, single-file + resilient batch directory mode), and customizable
+text cleaning (`clean/`: composable `CleaningRule`s, source/filename-aware
+routing via `CleaningRegistry`, sits between conversion and generation).
 Planned next: Distill de-dup pipeline (embedding + LSH + FAISS + threshold
 iteration + Louvain/BFS + hierarchical LLM merge) and an OpenAI-compatible API.
 Design schema additions so the Distill lifecycle fields (`status`, `parents`,
