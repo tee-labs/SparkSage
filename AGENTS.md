@@ -98,6 +98,27 @@ PYTHONPATH=src python3 examples/build_chunks.py
   import (libraries must not mutate global logging state as a side effect).
   New sub-packages should `logging.getLogger(__name__)` under the `sparksage`
   namespace so they are covered by the single level.
+- The query-processing core (`query/`) is the query-time counterpart of the
+  ingest pipeline. It depends only on two protocols — `IntentClassifier` and
+  `QueryRewriter` — and **reuses the existing `LLMClient` protocol** (never
+  import a concrete LLM SDK or invent a new client abstraction there). Both
+  protocols ship an LLM default (`LLMIntentClassifier` / `LLMQueryRewriter`) and
+  a no-LLM rule-based alternative (`RuleIntentClassifier` / `RuleQueryRewriter`)
+  for the cost-control "high-frequency patterns hit a rule first" pattern.
+  `QueryProcessor` (`processor.py`) is the framework-agnostic orchestrator:
+  classify → intercept (out-of-domain / below `min_confidence`) → rewrite, with
+  the reject set / confidence floor / canned reply as *configuration*. The
+  lenient→strict two-stage pattern is reused verbatim from `generator/`: raw LLM
+  output is parsed into lenient `RawIntent` / `RawRewrite` (`extra="ignore"`),
+  then coerced through the `QueryIntent` enum (`schema/enums.py` — the single
+  source of truth) into strict `IntentResult` / `RewriteResult`
+  (`extra="forbid"`). The prompts (`prompts.py`) read the `QueryIntent`
+  vocabulary live from the enum, so extending it widens what the model may emit
+  with no prompt edit. Multi-turn anaphora resolution is first-class:
+  `ConversationContext` (`context.py`) is baked into the rewrite system prompt.
+  This is **not** wired to the web layer yet — a future `/api/v1/query` route
+  will be a thin wrapper, mirroring how `SparkSageService` wraps the ingest
+  pipeline.
 
 ## Roadmap context
 
@@ -107,11 +128,16 @@ uniform file-to-Markdown conversion (`convert/`: pluggable backend built on
 `markitdown`, single-file + resilient batch directory mode), customizable
 text cleaning (`clean/`: composable `CleaningRule`s, source/filename-aware
 routing via `CleaningRegistry`, sits between conversion and generation), and a
-WEB API (`api/`: framework-agnostic `SparkSageService` orchestration +
-FastAPI app factory exposing `/api/v1/convert` and `/api/v1/generate`), and
-`.env`-based configuration (`config.py`: zero-dependency loader, env vars
-override the file).
+  WEB API (`api/`: framework-agnostic `SparkSageService` orchestration +
+  FastAPI app factory exposing `/api/v1/convert` and `/api/v1/generate`),
+  `.env`-based configuration (`config.py`: zero-dependency loader, env vars
+  override the file), and query-time intent recognition + rewriting
+  (`query/`: pluggable `IntentClassifier` / `QueryRewriter` protocols reusing
+  `LLMClient`, LLM + rule-based implementations, lenient→strict `QueryIntent`
+  coercion, `QueryProcessor` orchestration with interception policy — not yet
+  wired to the web layer).
 Planned next: Distill de-dup pipeline (embedding + LSH + FAISS + threshold
-iteration + Louvain/BFS + hierarchical LLM merge) and an OpenAI-compatible API.
+iteration + Louvain/BFS + hierarchical LLM merge), an OpenAI-compatible API,
+and a `/api/v1/query` route wrapping `QueryProcessor`.
 Design schema additions so the Distill lifecycle fields (`status`, `parents`,
 `confidence`, `embedding`) remain usable.

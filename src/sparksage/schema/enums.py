@@ -95,3 +95,21 @@ class BlockStatus(str, Enum):
     ACTIVE = "ACTIVE"
     MERGED = "MERGED"
     ARCHIVED = "ARCHIVED"
+
+
+class QueryIntent(str, Enum):
+    """Coarse intent of a user query, used by query-time intent recognition.
+
+    The query pipeline classifies a query into exactly one intent so it can
+    *intercept before retrieval*: out-of-domain questions are rejected early
+    (saving an LLM rewrite call), comparisons are split into sub-queries, and
+    so on. This vocabulary is the single source of truth -- the intent/rewrite
+    prompts read it straight from here, so adding a member automatically widens
+    what the model is allowed to emit.
+    """
+
+    FINANCIAL_DATA = "financial_data"
+    BUSINESS_ANALYSIS = "business_analysis"
+    COMPARISON = "comparison"
+    TREND = "trend"
+    OUT_OF_DOMAIN = "out_of_domain"
