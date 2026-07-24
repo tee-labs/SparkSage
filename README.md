@@ -279,6 +279,8 @@ SparkSage exposes the two core capabilities over a small HTTP API:
 
 * `POST /api/v1/convert` — upload a file, get back Markdown (optionally cleaned).
 * `POST /api/v1/generate` — upload a file, get back a list of IdeaBlocks.
+* `GET /api/v1/health` — liveness probe; reports the version and whether
+  generation is configured. Used by the Docker `HEALTHCHECK`.
 
 The API layer is a thin shell over a framework-agnostic
 [`SparkSageService`](src/sparksage/api/pipeline.py) that wires convert → clean →
@@ -368,6 +370,82 @@ Offline demo (no API key, no `markitdown`, exercises both routes via TestClient)
 ```bash
 PYTHONPATH=src python3 examples/serve_api.py
 ```
+
+---
+
+## Deploy with Docker
+
+The repository ships a production-ready [`Dockerfile`](Dockerfile) that builds
+the library and serves the WEB API over uvicorn. The image is built as a
+non-root, multi-stage image with the `convert` + `llm` extras pre-installed, so
+both `/convert` and `/generate` work out of the box — only secrets need to be
+provided at run time.
+
+### Build & run
+
+```bash
+# build the image (Python 3.11 by default; override with a build arg)
+docker build -t sparksage:latest .
+docker build --build-arg PYTHON_VERSION=3.12 -t sparksage:latest .
+
+# run it, mounting secrets via an env-file (recommended):
+docker run --rm -p 8000:8000 --env-file .env sparksage:latest
+
+# or pass individual variables:
+docker run --rm -p 8000:8000 \
+  -e SPARKSAGE_API_KEY=sk-... \
+  -e SPARKSAGE_MODEL=gpt-4o-mini \
+  sparksage:latest
+```
+
+The API is then live at `http://localhost:8000` (interactive docs at `/docs`),
+and [`/api/v1/health`](#serve-the-web-api) reports whether generation is
+configured.
+
+> No key? The container still starts and serves `/convert` and `/health`;
+> `/generate` returns a clear `503` instead of crashing.
+
+### Docker Compose
+
+For local stacks or self-hosting, drop this in `docker-compose.yml`:
+
+```yaml
+services:
+  sparksage:
+    build: .
+    image: sparksage:latest
+    container_name: sparksage
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    restart: unless-stopped
+```
+
+```bash
+docker compose up --build -d
+docker compose logs -f sparksage
+```
+
+### What the image gives you
+
+- **Multi-stage build** — a `builder` stage wheels the package; a slim
+  `runtime` stage installs only the wheel + extras. Source code stays out of
+  the final layer and the image stays small.
+- **Non-root runtime** — the server runs as a dedicated `sparksage` user
+  (uid/gid `1001`), so a process breakout never starts as root.
+- **Pre-bundled extras** — `sparksage[api,convert,llm]` is installed, so PDF /
+  DOCX / PPTX / … conversion and OpenAI-compatible generation work without any
+  extra `pip install` inside the container.
+- **Built-in health check** — `HEALTHCHECK` polls `/api/v1/health` every 30s,
+  so orchestrators (Docker Compose, Swarm, Kubernetes) get liveness for free.
+- **Secrets never baked in** — [`.dockerignore`](.dockerignore) excludes
+  `.env` / `.env.*` from the build context; secrets are injected at run time,
+  matching the [12-factor](https://12factor.net/config) convention (see
+  [Configuration](#configuration)).
+- **Run as a library, not a server** — the default `CMD` launches the API, but
+  you can override the entrypoint to use the image as a CLI tool, e.g.
+  `docker run --rm sparksage:latest python -c "import sparksage; ..."`.
 
 ---
 
