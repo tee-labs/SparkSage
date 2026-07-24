@@ -30,6 +30,12 @@ from sparksage.convert import (
     MarkdownConverter,
     MarkItDownBackend,
 )
+from sparksage.embed import (
+    BlockEmbedder,
+    EmbeddingClient,
+    FakeEmbeddingClient,
+    OpenAIEmbeddingClient,
+)
 from sparksage.generator import (
     FakeLLMClient,
     IdeaBlockGenerator,
@@ -57,6 +63,7 @@ __all__ = [
     "DEFAULT_EXTENSIONS",
     "DEFAULT_LOG_LEVEL",
     "DEFAULT_RULES",
+    "BlockEmbedder",
     "BlockStatus",
     "CallableRule",
     "CleaningRegistry",
@@ -66,11 +73,13 @@ __all__ = [
     "ConvertResponse",
     "ConversionResult",
     "ConverterBackend",
+    "EmbeddingClient",
     "ENV_LOG_LEVEL",
     "EntityRelation",
     "EntityType",
     "EnvParseError",
     "FakeConverterBackend",
+    "FakeEmbeddingClient",
     "FakeLLMClient",
     "GenerateOutput",
     "GenerateResponse",
@@ -84,6 +93,7 @@ __all__ = [
     "MarkdownConverter",
     "MarkItDownBackend",
     "OpenAICompatibleClient",
+    "OpenAIEmbeddingClient",
     "RegexReplaceRule",
     "SentenceRole",
     "ServiceError",

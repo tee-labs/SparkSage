@@ -64,6 +64,21 @@ PYTHONPATH=src python3 examples/build_chunks.py
   rule routing (`add_for`), since cleaning is strongly business-dependent.
   Built-in rules are normalization only; business logic goes in custom rules
   registered on a `TextCleaner` instance.
+- The embedding core (`embed/`) depends only on the `EmbeddingClient` Protocol
+  — never import `openai` or `numpy` there. `OpenAIEmbeddingClient` is an
+  optional dependency (`pip install 'sparksage[embed]'`), imported lazily only
+  inside itself (it batches at 1000 inputs/request over a `ThreadPoolExecutor`
+  and L2-normalizes by default so cosine = dot product). The core
+  (`BlockEmbedder` in `embed/indexer.py`) is pure stdlib and unit-testable with
+  the deterministic `FakeEmbeddingClient` (signed feature-hashing over n-grams,
+  zero dependencies, gives non-trivial similarity for overlapping texts).
+  Embeddings are produced from `IdeaBlock.embedding_text` only (the three-field
+  `name + "\n" + critical_question + "\n" + trusted_answer` concatenation).
+  `embed_blocks` fills the `.embedding` field in place; `vectors_for` returns a
+  `{block_id: vector}` dict without mutating blocks — the contract a vector store
+  / the future Distill pipeline consumes (vectors stay off the objects so large
+  corpora stay memory-light). Vector dimension is fixed per model and probed
+  lazily on the first `embed_batch` when not known statically.
 - The API orchestration core (`api/pipeline.py` → `SparkSageService`) is
   framework-agnostic — never import FastAPI or any web framework there. It wires
   the existing `MarkdownConverter` / `TextCleaner` / `IdeaBlockGenerator` together
@@ -106,12 +121,17 @@ generation (`generator/`: prompt building, JSON extraction, enum coercion),
 uniform file-to-Markdown conversion (`convert/`: pluggable backend built on
 `markitdown`, single-file + resilient batch directory mode), customizable
 text cleaning (`clean/`: composable `CleaningRule`s, source/filename-aware
-routing via `CleaningRegistry`, sits between conversion and generation), and a
-WEB API (`api/`: framework-agnostic `SparkSageService` orchestration +
-FastAPI app factory exposing `/api/v1/convert` and `/api/v1/generate`), and
-`.env`-based configuration (`config.py`: zero-dependency loader, env vars
-override the file).
-Planned next: Distill de-dup pipeline (embedding + LSH + FAISS + threshold
-iteration + Louvain/BFS + hierarchical LLM merge) and an OpenAI-compatible API.
-Design schema additions so the Distill lifecycle fields (`status`, `parents`,
-`confidence`, `embedding`) remain usable.
+routing via `CleaningRegistry`, sits between conversion and generation),
+dense-vector embedding (`embed/`: pluggable `EmbeddingClient` Protocol,
+`BlockEmbedder` fills `IdeaBlock.embedding` from `embedding_text`,
+deterministic `FakeEmbeddingClient` for tests, `OpenAIEmbeddingClient` with
+batching + concurrency as an optional dep), and a WEB API (`api/`:
+framework-agnostic `SparkSageService` orchestration + FastAPI app factory
+exposing `/api/v1/convert` and `/api/v1/generate`), and `.env`-based
+configuration (`config.py`: zero-dependency loader, env vars override the
+file).
+Planned next: Distill de-dup pipeline (LSH + FAISS + threshold iteration +
+Louvain/BFS + hierarchical LLM merge, consuming the `embed` vectors + the
+schema lifecycle fields) and an OpenAI-compatible API. Design schema additions
+so the Distill lifecycle fields (`status`, `parents`, `confidence`,
+`embedding`) remain usable.
