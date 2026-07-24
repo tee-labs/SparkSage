@@ -34,6 +34,7 @@ import logging
 import os
 from typing import Annotated, Any
 
+from sparksage.api.documents import register_document_routes
 from sparksage.api.pipeline import (
     GenerationNotConfiguredError,
     SparkSageService,
@@ -42,6 +43,9 @@ from sparksage.clean.cleaner import TextCleaner
 from sparksage.config import load_dotenv
 from sparksage.convert.backend import MarkItDownBackend
 from sparksage.convert.converter import MarkdownConverter
+from sparksage.documents.keyword_extract import FrequencyKeywordExtractor
+from sparksage.documents.service import DocumentService
+from sparksage.documents.store import InMemoryDocumentStore
 from sparksage.generator.client import OpenAICompatibleClient
 from sparksage.generator.generator import GenerationError, IdeaBlockGenerator
 
@@ -141,15 +145,46 @@ def build_default_service() -> SparkSageService:
     )
 
 
-def create_app(service: SparkSageService | None = None) -> Any:
+def build_default_document_service(
+    converter: MarkdownConverter | None = None,
+    cleaner: TextCleaner | None = None,
+) -> DocumentService:
+    """Wire a production :class:`DocumentService` from configuration.
+
+    Reuses the same conversion + cleaning stack as
+    :func:`build_default_service`. Conversion is required (documents are parsed
+    from Markdown); the keyword extractor and in-memory store need no API key,
+    so document management works **LLM-free** even when ``/generate`` returns
+    ``503``. Pass a shared ``converter`` / ``cleaner`` to avoid constructing a
+    second ``markitdown`` instance.
+    """
+    converter = converter or MarkdownConverter(backend=MarkItDownBackend())
+    cleaner = cleaner or TextCleaner()
+    return DocumentService(
+        converter=converter,
+        cleaner=cleaner,
+        extractor=FrequencyKeywordExtractor(),
+        store=InMemoryDocumentStore(),
+    )
+
+
+def create_app(
+    service: SparkSageService | None = None,
+    document_service: DocumentService | None = None,
+) -> Any:
     """Create and configure a FastAPI application.
 
     Parameters
     ----------
     service:
-        A pre-built :class:`SparkSageService`. When omitted,
-        :func:`build_default_service` is used (which reads env vars). Inject a
-        custom service (e.g. with fakes) for testing.
+        A pre-built :class:`SparkSageService` for the convert/generate routes.
+        When omitted, :func:`build_default_service` is used. Inject a custom
+        service (e.g. with fakes) for testing.
+    document_service:
+        A pre-built :class:`DocumentService` for the knowledge-document CRUD +
+        tag-management routes. When omitted,
+        :func:`build_default_document_service` is used. The document routes work
+        without any LLM API key.
 
     Raises
     ------
@@ -175,11 +210,18 @@ def create_app(service: SparkSageService | None = None) -> Any:
 
     svc = service if service is not None else build_default_service()
 
+    doc_svc = (
+        document_service
+        if document_service is not None
+        else build_default_document_service()
+    )
+
     app = FastAPI(
         title="SparkSage API",
         description=(
             "Turn any uploaded file into Markdown (optionally cleaned) or into a "
-            "list of question-aligned IdeaBlocks."
+            "list of question-aligned IdeaBlocks, and manage a knowledge base of "
+            "tagged documents over REST."
         ),
         version=__version__,
     )
@@ -248,7 +290,10 @@ def create_app(service: SparkSageService | None = None) -> Any:
             raise HTTPException(status_code=422, detail=_detail(exc)) from exc
         return to_generate_response(out)
 
+    register_document_routes(app, doc_svc)
+
     app.state.service = svc
+    app.state.document_service = doc_svc
     return app
 
 
@@ -280,6 +325,7 @@ __all__ = [
     "ENV_API_KEY",
     "ENV_BASE_URL",
     "ENV_MODEL",
+    "build_default_document_service",
     "ENV_STREAM",
     "build_default_service",
     "create_app",
