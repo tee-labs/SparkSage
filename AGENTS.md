@@ -64,6 +64,21 @@ PYTHONPATH=src python3 examples/build_chunks.py
   rule routing (`add_for`), since cleaning is strongly business-dependent.
   Built-in rules are normalization only; business logic goes in custom rules
   registered on a `TextCleaner` instance.
+- The documents core (`documents/`) is the *document*-granularity counterpart to
+  the chunk-oriented IdeaBlock core. It is pure stdlib (no optional deps) and
+  depends only on small Protocols: `KeywordExtractor` (auto-tagging) and
+  `DocumentStore` (persistence). `DocumentService` composes the existing
+  `MarkdownConverter` / `TextCleaner` and adds deterministic Markdown parsing
+  (`markdown_parser`: H1 title + first-paragraph summary) plus keyword
+  extraction (`keyword_extract`: position-weighted TF over headings/body with
+  English+Chinese stop words, Latin words/phrases and CJK unigrams/bigrams).
+  Document tags are **free-form strings** (not the controlled `Tag` enum);
+  `TagSource` (`USER`/`AUTO`/`MIXED`) records how each tag set was produced.
+  The `documents` package must never import from `api` — `api` is the outermost
+  layer and depends on `documents`, never the reverse (hence the small temp-file
+  helper is duplicated in `service.py` rather than imported from `api/pipeline`).
+  `InMemoryDocumentStore` is for demos/tests/single-process; production
+  implements `DocumentStore` against a DB/search engine.
 - The API orchestration core (`api/pipeline.py` → `SparkSageService`) is
   framework-agnostic — never import FastAPI or any web framework there. It wires
   the existing `MarkdownConverter` / `TextCleaner` / `IdeaBlockGenerator` together
@@ -72,9 +87,14 @@ PYTHONPATH=src python3 examples/build_chunks.py
   original extension; provenance is swapped back to the original filename via
   `dataclasses.replace`). FastAPI is an optional dependency (`pip install
   'sparksage[api]'`), imported lazily only inside `api/app.py:create_app`.
-  `create_app(service=...)` accepts an injected service (for tests); when omitted
-  it builds one from env vars (`SPARKSAGE_API_KEY` / `OPENAI_API_KEY`). If no API
-  key is set, `/generate` returns `503` while `/convert` works LLM-free. Note:
+`create_app(service=...)` accepts an injected service (for tests); when omitted
+it builds one from env vars (`SPARKSAGE_API_KEY` / `OPENAI_API_KEY`). If no API
+key is set, `/generate` returns `503` while `/convert` and the whole
+`/api/v1/documents` management surface (CRUD + auto-tagging) work LLM-free.
+`create_app` also accepts an injected `document_service` (built from
+`build_default_document_service()` otherwise, which needs `markitdown` but no
+API key); the document routes are registered by `register_document_routes` in
+`api/documents.py` (same lazy-FastAPI pattern as `app.py`). Note:
   `app.py` deliberately omits `from __future__ import annotations` so FastAPI can
   resolve the lazily-imported route-parameter types (`UploadFile`/`File`/`Form`)
   via eager annotation evaluation.
@@ -94,11 +114,16 @@ generation (`generator/`: prompt building, JSON extraction, enum coercion),
 uniform file-to-Markdown conversion (`convert/`: pluggable backend built on
 `markitdown`, single-file + resilient batch directory mode), customizable
 text cleaning (`clean/`: composable `CleaningRule`s, source/filename-aware
-routing via `CleaningRegistry`, sits between conversion and generation), and a
-WEB API (`api/`: framework-agnostic `SparkSageService` orchestration +
-FastAPI app factory exposing `/api/v1/convert` and `/api/v1/generate`), and
-`.env`-based configuration (`config.py`: zero-dependency loader, env vars
-override the file).
+routing via `CleaningRegistry`, sits between conversion and generation), a
+knowledge-document management service (`documents/`: `Document` model,
+deterministic Markdown title/summary parsing, keyword-extraction auto-tagger
+behind a `KeywordExtractor` Protocol, pluggable `DocumentStore` +
+`InMemoryDocumentStore`, `DocumentService` orchestration), a WEB API
+(`api/`: framework-agnostic `SparkSageService` + `DocumentService`
+orchestration + FastAPI app factory exposing `/api/v1/convert`,
+`/api/v1/generate`, `/api/v1/documents` (CRUD + tag management) and
+`/api/v1/tags`), and `.env`-based configuration (`config.py`: zero-dependency
+loader, env vars override the file).
 Planned next: Distill de-dup pipeline (embedding + LSH + FAISS + threshold
 iteration + Louvain/BFS + hierarchical LLM merge) and an OpenAI-compatible API.
 Design schema additions so the Distill lifecycle fields (`status`, `parents`,

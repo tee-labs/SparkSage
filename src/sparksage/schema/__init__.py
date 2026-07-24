@@ -7,6 +7,7 @@ from sparksage.schema.enums import (
     EntityType,
     SentenceRole,
     Tag,
+    TagSource,
 )
 from sparksage.schema.ideablock import IdeaBlock
 from sparksage.schema.technical import TechnicalBlock
@@ -19,5 +20,6 @@ __all__ = [
     "IdeaBlock",
     "SentenceRole",
     "Tag",
+    "TagSource",
     "TechnicalBlock",
 ]

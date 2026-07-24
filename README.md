@@ -10,8 +10,11 @@ mid-sentence and retrieve poorly), SparkSage embeds whole, verified answers.
 > Status: **Pre-Alpha**. This repository implements the **chunk schema**
 > (IdeaBlock + TechnicalBlock), **LLM-driven generation** (turn free text
 > into many IdeaBlocks), **file-to-Markdown conversion**, **customizable
-> text cleaning**, and a **WEB API** exposing convert / generate over HTTP.
-> The Distill de-duplication pipeline is planned.
+> text cleaning**, a **knowledge-document management service** (upload,
+> auto-extract title/summary/tags, store, CRUD over REST — with a built-in
+> keyword-extraction auto-tagger), and a **WEB API** exposing convert /
+> generate / documents over HTTP. The Distill de-duplication pipeline is
+> planned.
 
 ---
 
@@ -273,16 +276,81 @@ PYTHONPATH=src python3 examples/clean_text.py
 
 ---
 
+## Manage knowledge documents
+
+SparkSage's core is *chunk*-oriented (the IdeaBlock), but a knowledge-management
+platform works at the *document* granularity. The `documents` package adds
+exactly that: upload a Markdown document, auto-extract its **title / summary /
+body / tags**, store it, and manage it over CRUD — all **without an LLM**.
+
+The headline feature: **when a document ships without tags, the system
+auto-generates them from content using a keyword-extraction algorithm**
+([`FrequencyKeywordExtractor`](src/sparksage/documents/keyword_extract.py),
+pure stdlib — no API key, fully deterministic).
+
+```python
+from sparksage import DocumentService, MarkdownConverter
+
+service = DocumentService(converter=MarkdownConverter())   # needs 'markitdown'
+
+# upload WITHOUT tags -> auto-tagged from content
+doc = service.upload(b"...", "onboarding.md")
+print(doc.title, doc.summary, doc.tags)        # tags auto-generated
+print(doc.tag_source)                          # TagSource.AUTO
+
+# upload WITH tags -> user tags win
+doc = service.upload(b"...", "design.md", tags=["architecture"])
+print(doc.tag_source)                          # TagSource.USER
+
+# CRUD + tag management
+service.get(doc.id)
+service.list(tag="architecture")
+service.add_tags(doc.id, ["review"])
+service.extract_tags(doc.id, top_n=5)          # (re)run keyword extraction
+service.update(doc.id, title="New title")
+service.delete(doc.id)
+```
+
+How it stays pluggable and dependency-light:
+
+- The store is a [`DocumentStore`](src/sparksage/documents/store.py) Protocol —
+  [`InMemoryDocumentStore`](src/sparksage/documents/store.py) ships for demos /
+  tests / single-process deployments; implement the Protocol against a database
+  or search engine for production without touching the service or HTTP layers.
+- The keyword extractor is a [`KeywordExtractor`](src/sparksage/documents/keyword_extract.py)
+  Protocol — swap in TextRank / YAKE / jieba without changing callers. The
+  default ranks terms by **position-weighted term frequency** (Markdown headings
+  outrank body prose), filters stop words (English + Chinese), scores both Latin
+  words/phrases and CJK unigrams/bigrams, and drops unigrams already covered by
+  a higher-ranked phrase.
+- `TagSource` (`USER` / `AUTO` / `MIXED`) records how each document's tag set
+  was produced, so the management UI can show provenance and decide whether to
+  re-run extraction.
+- The service is framework-agnostic (no HTTP imports) and fully unit-testable
+  with [`FakeConverterBackend`](src/sparksage/convert/backend.py).
+
+Offline demo (no API key, no `markitdown`):
+
+```bash
+PYTHONPATH=src python3 examples/manage_documents.py
+```
+
+---
+
 ## Serve the WEB API
 
-SparkSage exposes the two core capabilities over a small HTTP API:
+SparkSage exposes the core capabilities over a small HTTP API:
 
 * `POST /api/v1/convert` — upload a file, get back Markdown (optionally cleaned).
 * `POST /api/v1/generate` — upload a file, get back a list of IdeaBlocks.
+* `/api/v1/documents` (+ `/api/v1/tags`) — knowledge-document CRUD and tag
+  management (auto-tagging from content when no tags are supplied). **Works
+  LLM-free.**
 
-The API layer is a thin shell over a framework-agnostic
-[`SparkSageService`](src/sparksage/api/pipeline.py) that wires convert → clean →
-generate together. FastAPI is an *optional* dependency.
+The API layer is a thin shell over framework-agnostic services
+([`SparkSageService`](src/sparksage/api/pipeline.py),
+[`DocumentService`](src/sparksage/documents/service.py)). FastAPI is an
+*optional* dependency.
 
 ```bash
 pip install 'sparksage[api]'          # fastapi + uvicorn + python-multipart
@@ -313,6 +381,16 @@ curl -F "file=@report.pdf" -F "clean=true" \
 # 2) file -> IdeaBlock list
 curl -F "file=@report.pdf" -F "with_stats=true" \
      http://localhost:8000/api/v1/generate
+
+# 3) upload a document, auto-tag it from content (no tags supplied)
+curl -F "file=@onboarding.md" \
+     http://localhost:8000/api/v1/documents
+
+# 4) list / filter / manage
+curl "http://localhost:8000/api/v1/documents?tag=onboarding&limit=20"
+curl http://localhost:8000/api/v1/tags
+curl -X POST http://localhost:8000/api/v1/documents/<id>/tags:auto \
+     -H 'content-type: application/json' -d '{"top_n": 5}'
 ```
 
 `POST /api/v1/convert` returns:
@@ -347,6 +425,31 @@ curl -F "file=@report.pdf" -F "with_stats=true" \
   "stats": {"raw_block_count": 1, "emitted": 1, "skipped": 0, "errors": []}
 }
 ```
+
+`POST /api/v1/documents` (auto-tagged, no tags supplied) returns:
+
+```json
+{
+  "document": {
+    "id": "b3e1...c4",
+    "title": "Onboarding Guide",
+    "summary": "This guide explains the onboarding workflow for new engineers.",
+    "content": "# Onboarding Guide\n\nThis guide explains ...",
+    "tags": ["onboarding", "onboarding guide", "workflow"],
+    "tag_source": "AUTO",
+    "source": {"uri": "onboarding.md", "title": "Onboarding Guide"},
+    "language": "en",
+    "version": 1,
+    "created_at": "2026-07-24T04:30:00Z",
+    "updated_at": "2026-07-24T04:30:00Z"
+  }
+}
+```
+
+The full document surface (all under `/api/v1`): `POST /documents`,
+`GET /documents` (`?tag=&limit=&offset=`), `GET/PATCH/DELETE /documents/{id}`,
+`POST /documents/{id}/tags`, `POST /documents/{id}/tags:auto`,
+`DELETE /documents/{id}/tags/{tag}`, and `GET /tags`.
 
 How it stays testable and pluggable:
 
@@ -440,7 +543,7 @@ avoids the quoting/injection bugs a real shell parser would introduce. See
 src/sparksage/
 ├── config.py          # .env loader (stdlib; env vars take priority over file)
 ├── schema/
-│   ├── enums.py        # controlled vocabularies (Tag, EntityType, SentenceRole, ...)
+│   ├── enums.py        # controlled vocabularies (Tag, TagSource, EntityType, ...)
 │   ├── entity.py       # named things a block references
 │   ├── source.py       # provenance (where a block came from)
 │   ├── ideablock.py    # the core question-aligned chunk  ★
@@ -457,11 +560,18 @@ src/sparksage/
 │   ├── rules.py        # CleaningRule protocol + built-in & configurable rules
 │   ├── registry.py     # source/filename-aware rule routing (glob/regex)
 │   └── cleaner.py      # raw text -> final document text  ★
+├── documents/
+│   ├── schema.py       # Document model (title/summary/body/tags)  ★
+│   ├── markdown_parser.py  # deterministic title + summary extraction
+│   ├── keyword_extract.py  # keyword-extraction algorithm + Protocol  ★
+│   ├── store.py        # DocumentStore protocol + InMemoryDocumentStore
+│   └── service.py      # convert -> parse -> tag -> store orchestration  ★
 ├── api/
 │   ├── pipeline.py     # SparkSageService: convert→clean→generate orchestration  ★
+│   ├── documents.py    # document CRUD + tag-management routes  ★
 │   ├── schemas.py      # request/response Pydantic models (no fastapi)
 │   └── app.py          # FastAPI app factory + routes (lazy fastapi import)
-tests/                  # schema + generation + conversion + cleaning + api + config
+tests/                  # schema + generation + conversion + cleaning + documents + api + config
 examples/               # runnable demos
 ```
 
@@ -478,7 +588,9 @@ ruff check src tests                          # lint
 - [x] LLM-driven generation (text -> many IdeaBlocks via pluggable LLM client)
 - [x] Uniform file-to-Markdown conversion (any format -> Markdown via markitdown)
 - [x] Customizable text cleaning (business-specific rules, source-aware routing)
-- [x] WEB API (FastAPI: file → Markdown, file → IdeaBlock list)
+- [x] Knowledge-document management (upload, auto title/summary/tags, CRUD,
+      keyword-extraction auto-tagger — LLM-free)
+- [x] WEB API (FastAPI: file → Markdown, file → IdeaBlock list, document CRUD)
 - [x] `.env` configuration (built-in loader, env vars override file)
 - [ ] Distill de-duplication pipeline (embedding + LSH + FAISS kNN + threshold
       iteration + Louvain/BFS + hierarchical LLM merge)

@@ -95,3 +95,18 @@ class BlockStatus(str, Enum):
     ACTIVE = "ACTIVE"
     MERGED = "MERGED"
     ARCHIVED = "ARCHIVED"
+
+
+class TagSource(str, Enum):
+    """How a document's tags were populated.
+
+    Document tags are free-form strings (unlike the controlled
+    :class:`IdeaBlock` :class:`Tag` vocabulary), because the knowledge-management
+    workflow lets users tag freely *and* lets the system auto-generate tags from
+    content. This enum records which path produced the current tag set so the
+    management UI can show provenance and decide whether to re-run extraction.
+    """
+
+    USER = "USER"
+    AUTO = "AUTO"
+    MIXED = "MIXED"

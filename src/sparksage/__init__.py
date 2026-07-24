@@ -1,8 +1,14 @@
 """SparkSage: structured, question-aligned knowledge chunks for RAG."""
 
 from sparksage.api import (
+    AddTagsRequest,
+    AutoTagRequest,
     ConvertOutput,
     ConvertResponse,
+    DocumentCreateResponse,
+    DocumentListResponse,
+    DocumentOut,
+    DocumentUpdateRequest,
     GenerateOutput,
     GenerateResponse,
     GenerationNotConfiguredError,
@@ -11,6 +17,8 @@ from sparksage.api import (
     ServiceError,
     SourceInfo,
     SparkSageService,
+    TagCount,
+    TagsResponse,
 )
 from sparksage.clean import (
     DEFAULT_RULES,
@@ -30,6 +38,18 @@ from sparksage.convert import (
     MarkdownConverter,
     MarkItDownBackend,
 )
+from sparksage.documents import (
+    DEFAULT_AUTO_TAG_COUNT,
+    DEFAULT_STOP_WORDS,
+    Document,
+    DocumentNotFoundError,
+    DocumentService,
+    DocumentServiceError,
+    DocumentStore,
+    FrequencyKeywordExtractor,
+    InMemoryDocumentStore,
+    KeywordExtractor,
+)
 from sparksage.generator import (
     FakeLLMClient,
     IdeaBlockGenerator,
@@ -42,13 +62,18 @@ from sparksage.schema.enums import (
     EntityType,
     SentenceRole,
     Tag,
+    TagSource,
 )
 from sparksage.schema.ideablock import IdeaBlock
 from sparksage.schema.technical import TechnicalBlock
 
 __all__ = [
+    "DEFAULT_AUTO_TAG_COUNT",
     "DEFAULT_EXTENSIONS",
     "DEFAULT_RULES",
+    "DEFAULT_STOP_WORDS",
+    "AddTagsRequest",
+    "AutoTagRequest",
     "BlockStatus",
     "CallableRule",
     "CleaningRegistry",
@@ -58,11 +83,21 @@ __all__ = [
     "ConvertResponse",
     "ConversionResult",
     "ConverterBackend",
+    "Document",
+    "DocumentCreateResponse",
+    "DocumentListResponse",
+    "DocumentNotFoundError",
+    "DocumentOut",
+    "DocumentService",
+    "DocumentServiceError",
+    "DocumentStore",
+    "DocumentUpdateRequest",
     "EntityRelation",
     "EntityType",
     "EnvParseError",
     "FakeConverterBackend",
     "FakeLLMClient",
+    "FrequencyKeywordExtractor",
     "GenerateOutput",
     "GenerateResponse",
     "GenerationNotConfiguredError",
@@ -70,6 +105,8 @@ __all__ = [
     "HealthResponse",
     "IdeaBlock",
     "IdeaBlockGenerator",
+    "InMemoryDocumentStore",
+    "KeywordExtractor",
     "LLMClient",
     "MarkdownConverter",
     "MarkItDownBackend",
@@ -80,6 +117,9 @@ __all__ = [
     "SourceInfo",
     "SparkSageService",
     "Tag",
+    "TagCount",
+    "TagSource",
+    "TagsResponse",
     "TechnicalBlock",
     "TextCleaner",
     "load_dotenv",
