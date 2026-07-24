@@ -79,6 +79,22 @@ PYTHONPATH=src python3 examples/build_chunks.py
   / the future Distill pipeline consumes (vectors stay off the objects so large
   corpora stay memory-light). Vector dimension is fixed per model and probed
   lazily on the first `embed_batch` when not known statically.
+- The retrieval/persistence core (`embed/store.py` + `embed/persist.py`) depends
+  only on the `VectorStore` Protocol (`dimension` / `add` / `search` /
+  `__contains__` / `__len__`) — never import `numpy` or `faiss` there (those are
+  deferred to the future `[distill]` group, where an approximate FAISS-backed
+  `VectorStore` earns its weight on million-vector corpora). `InMemoryVectorStore`
+  is pure stdlib: brute-force exact kNN, score = dot product (cosine, since every
+  `EmbeddingClient` L2-normalizes by default), vectors stored by value (copied on
+  add so callers can't corrupt the index). It is **text-agnostic** — index vectors
+  keyed by an opaque `block_id` string, and embed the query text yourself via one
+  `embed_batch` call; this keeps retrieval decoupled from embedding exactly as the
+  generator is decoupled from the LLM client. Feed it `BlockEmbedder.vectors_for`
+  output via `add_many`; `search` returns `SearchHit`s sorted best-first.
+  `save_store` / `load_store` persist a store to a **zero-dependency JSON** file
+  (`{format, version, dimension, vectors}`) so embeddings survive restarts; the
+  loader validates the format marker + version and fails fast on foreign/corrupt/
+  future-version files rather than guessing.
 - The API orchestration core (`api/pipeline.py` → `SparkSageService`) is
   framework-agnostic — never import FastAPI or any web framework there. It wires
   the existing `MarkdownConverter` / `TextCleaner` / `IdeaBlockGenerator` together
@@ -125,7 +141,10 @@ routing via `CleaningRegistry`, sits between conversion and generation),
 dense-vector embedding (`embed/`: pluggable `EmbeddingClient` Protocol,
 `BlockEmbedder` fills `IdeaBlock.embedding` from `embedding_text`,
 deterministic `FakeEmbeddingClient` for tests, `OpenAIEmbeddingClient` with
-batching + concurrency as an optional dep), and a WEB API (`api/`:
+batching + concurrency as an optional dep; in-memory retrieval via a
+`VectorStore` Protocol + brute-force `InMemoryVectorStore` kNN (pure stdlib,
+consumes `vectors_for`), and `save_store`/`load_store` JSON persistence so
+embeddings survive restarts), and a WEB API (`api/`:
 framework-agnostic `SparkSageService` orchestration + FastAPI app factory
 exposing `/api/v1/convert` and `/api/v1/generate`), and `.env`-based
 configuration (`config.py`: zero-dependency loader, env vars override the

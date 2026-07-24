@@ -34,7 +34,12 @@ from sparksage.embed import (
     BlockEmbedder,
     EmbeddingClient,
     FakeEmbeddingClient,
+    InMemoryVectorStore,
     OpenAIEmbeddingClient,
+    SearchHit,
+    VectorStore,
+    load_store,
+    save_store,
 )
 from sparksage.generator import (
     FakeLLMClient,
@@ -88,6 +93,7 @@ __all__ = [
     "HealthResponse",
     "IdeaBlock",
     "IdeaBlockGenerator",
+    "InMemoryVectorStore",
     "LLMClient",
     "LogLevelError",
     "MarkdownConverter",
@@ -95,6 +101,7 @@ __all__ = [
     "OpenAICompatibleClient",
     "OpenAIEmbeddingClient",
     "RegexReplaceRule",
+    "SearchHit",
     "SentenceRole",
     "ServiceError",
     "SourceInfo",
@@ -102,10 +109,13 @@ __all__ = [
     "Tag",
     "TechnicalBlock",
     "TextCleaner",
+    "VectorStore",
     "configure_logging",
     "load_dotenv",
+    "load_store",
     "parse_env_file",
     "parse_level",
+    "save_store",
 ]
 
 __version__ = "0.1.0"

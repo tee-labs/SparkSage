@@ -10,8 +10,9 @@ mid-sentence and retrieve poorly), SparkSage embeds whole, verified answers.
 > Status: **Pre-Alpha**. This repository implements the **chunk schema**
 > (IdeaBlock + TechnicalBlock), **LLM-driven generation** (turn free text
 > into many IdeaBlocks), **file-to-Markdown conversion**, **customizable
-> text cleaning**, and a **WEB API** exposing convert / generate over HTTP.
-> The Distill de-duplication pipeline is planned.
+> text cleaning**, **dense-vector embedding + retrieval**, and a **WEB API**
+> exposing convert / generate over HTTP. The Distill de-duplication pipeline
+> is planned.
 
 ---
 
@@ -269,6 +270,77 @@ Offline demo (convert -> clean -> generate, no API key, no `markitdown`):
 
 ```bash
 PYTHONPATH=src python3 examples/clean_text.py
+```
+
+---
+
+## Embed & retrieve IdeaBlocks
+
+Once you have IdeaBlocks, vectorize them and search by similarity. Only
+[`embedding_text`](src/sparksage/schema/ideablock.py) (name + question + answer)
+is ever embedded, so a whole, verified answer is what gets matched.
+
+```bash
+pip install 'sparksage[embed]'   # pulls the optional 'openai' SDK
+```
+
+```python
+from sparksage import (
+    BlockEmbedder,
+    InMemoryVectorStore,
+    OpenAIEmbeddingClient,
+)
+
+client = OpenAIEmbeddingClient(api_key="...", model="text-embedding-3-small")
+embedder = BlockEmbedder(client)
+
+# vectors_for() returns {block_id: vector} WITHOUT mutating the blocks
+# (keeps large corpora memory-light and vectors off the objects).
+vectors = embedder.vectors_for(blocks)
+
+store = InMemoryVectorStore(dimension=client.dimension)
+store.add_many(vectors)
+
+# embed a free-text query, then kNN-search the store
+query_vec = embedder.embed_texts(["how do I deploy sparksage?"])[0]
+for hit in store.search(query_vec, k=5):
+    print(hit.score, hit.block_id)
+```
+
+The store is **text-agnostic**: it indexes vectors keyed by an opaque
+`block_id` string and computes pure dot products (cosine, since every client
+L2-normalizes). Embedding a query is one `embed_texts` call — retrieval stays
+decoupled from embedding, exactly like the generator is decoupled from the LLM
+client.
+
+How it stays dependency-light and pluggable:
+
+- The retrieval core depends only on the small
+  [`VectorStore`](src/sparksage/embed/store.py) Protocol (`dimension` / `add` /
+  `search`), so it is fully unit-testable offline with
+  [`FakeEmbeddingClient`](src/sparksage/embed/client.py). The brute-force
+  [`InMemoryVectorStore`](src/sparksage/embed/store.py) is pure stdlib (no
+  `numpy` / `faiss` — those are deferred to the future `[distill]` extra, where
+  an approximate index earns its weight on million-vector corpora).
+- Vectors are stored by value (copied on add), so callers can't corrupt the
+  index. `search` returns [`SearchHit`](src/sparksage/embed/store.py)s sorted
+  best-first.
+- [`save_store`](src/sparksage/embed/persist.py) / [`load_store`](src/sparksage/embed/persist.py)
+  persist a store to a **zero-dependency JSON** file so embeddings survive
+  restarts; the loader validates the format marker + version and fails fast on
+  corrupt / foreign files rather than guessing.
+
+```python
+from sparksage import save_store, load_store
+
+save_store(store, "corpus.json")     # embeddings to disk
+store = load_store("corpus.json")    # reload next run (same VectorStore)
+```
+
+Offline demo (embed -> index -> search -> persist -> reload, no API key):
+
+```bash
+PYTHONPATH=src python3 examples/search_blocks.py
 ```
 
 ---
@@ -541,6 +613,11 @@ src/sparksage/
 │   ├── rules.py        # CleaningRule protocol + built-in & configurable rules
 │   ├── registry.py     # source/filename-aware rule routing (glob/regex)
 │   └── cleaner.py      # raw text -> final document text  ★
+├── embed/
+│   ├── client.py       # EmbeddingClient protocol + OpenAI + Fake client
+│   ├── indexer.py      # BlockEmbedder: blocks -> vectors (fills .embedding)  ★
+│   ├── store.py        # VectorStore protocol + InMemoryVectorStore kNN  ★
+│   └── persist.py      # save_store / load_store (zero-dep JSON)
 ├── api/
 │   ├── pipeline.py     # SparkSageService: convert→clean→generate orchestration  ★
 │   ├── schemas.py      # request/response Pydantic models (no fastapi)
@@ -564,6 +641,8 @@ ruff check src tests                          # lint
 - [x] Customizable text cleaning (business-specific rules, source-aware routing)
 - [x] WEB API (FastAPI: file → Markdown, file → IdeaBlock list)
 - [x] `.env` configuration (built-in loader, env vars override file)
+- [x] Dense-vector embedding & retrieval (pluggable `EmbeddingClient` +
+      in-memory kNN `VectorStore` + JSON persistence, pure stdlib)
 - [ ] Distill de-duplication pipeline (embedding + LSH + FAISS kNN + threshold
       iteration + Louvain/BFS + hierarchical LLM merge)
 - [ ] OpenAI-compatible ingest/distill API
