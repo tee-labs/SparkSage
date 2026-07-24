@@ -39,6 +39,7 @@ from sparksage.api.pipeline import (
     SparkSageService,
 )
 from sparksage.clean.cleaner import TextCleaner
+from sparksage.config import load_dotenv
 from sparksage.convert.backend import MarkItDownBackend
 from sparksage.convert.converter import MarkdownConverter
 from sparksage.generator.client import OpenAICompatibleClient
@@ -62,7 +63,14 @@ def _env(name: str) -> str | None:
 
 
 def build_default_service() -> SparkSageService:
-    """Wire a production :class:`SparkSageService` from environment variables.
+    """Wire a production :class:`SparkSageService` from configuration.
+
+    Configuration is read from environment variables. Values may be supplied
+    directly (container / CI / system env) **or** via a ``.env`` file in the
+    current working directory -- :func:`load_dotenv` is called first, but real
+    environment variables always take priority over the file (12-factor). See
+    :mod:`sparksage.config` for the supported ``.env`` syntax and a template at
+    ``.env.example`` in the repo root.
 
     * Converter: a :class:`MarkdownConverter` over :class:`MarkItDownBackend`
       (requires ``pip install 'sparksage[convert]'``).
@@ -80,6 +88,7 @@ def build_default_service() -> SparkSageService:
     ``SPARKSAGE_LANGUAGE``        Output language written into each block
     ============================  =========================================
     """
+    load_dotenv()
     converter = MarkdownConverter(backend=MarkItDownBackend())
     cleaner = TextCleaner()
 

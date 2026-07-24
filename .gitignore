@@ -30,5 +30,10 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Local environment files (secrets). Keep .env.example tracked as a template.
+.env
+.env.*
+!.env.example
+
 # Node (legacy opencode lockfile tracked separately)
 node_modules/

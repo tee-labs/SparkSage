@@ -78,6 +78,14 @@ PYTHONPATH=src python3 examples/build_chunks.py
   `app.py` deliberately omits `from __future__ import annotations` so FastAPI can
   resolve the lazily-imported route-parameter types (`UploadFile`/`File`/`Form`)
   via eager annotation evaluation.
+- Configuration (`config.py`) is pure stdlib — never import `python-dotenv` or
+  any env-loading library. `load_dotenv()` is called once at the top of
+  `build_default_service()`; it reads `.env` from the CWD but **real env vars
+  always win** (`override=False`), matching 12-factor. The parser supports only
+  the well-defined `.env` subset (`KEY=VALUE`, quotes, `export`, `#` comments)
+  and deliberately does NOT do shell expansion (`$VAR`/`$(...)`/backticks) or
+  multi-line values. `.env` is git-ignored; commit `.env.example` as a template
+  only.
 
 ## Roadmap context
 
@@ -88,7 +96,9 @@ uniform file-to-Markdown conversion (`convert/`: pluggable backend built on
 text cleaning (`clean/`: composable `CleaningRule`s, source/filename-aware
 routing via `CleaningRegistry`, sits between conversion and generation), and a
 WEB API (`api/`: framework-agnostic `SparkSageService` orchestration +
-FastAPI app factory exposing `/api/v1/convert` and `/api/v1/generate`).
+FastAPI app factory exposing `/api/v1/convert` and `/api/v1/generate`), and
+`.env`-based configuration (`config.py`: zero-dependency loader, env vars
+override the file).
 Planned next: Distill de-dup pipeline (embedding + LSH + FAISS + threshold
 iteration + Louvain/BFS + hierarchical LLM merge) and an OpenAI-compatible API.
 Design schema additions so the Distill lifecycle fields (`status`, `parents`,

@@ -298,6 +298,9 @@ export SPARKSAGE_MODEL=gpt-4o-mini                 # optional
 uvicorn sparksage.api.app:create_app --factory --port 8000
 ```
 
+Prefer a `.env` file? See [Configuration](#configuration) — a built-in loader
+(`cp .env.example .env`) means no `python-dotenv` dependency.
+
 Interactive docs are auto-generated at `http://localhost:8000/docs`.
 
 ### Call the endpoints
@@ -368,10 +371,74 @@ PYTHONPATH=src python3 examples/serve_api.py
 
 ---
 
+## Configuration
+
+SparkSage reads settings from **environment variables**. You can set them the
+usual way (`export ...`, container env, CI secrets), **or** drop them in a
+`.env` file in the working directory — a zero-dependency `.env` loader is built
+in (no `python-dotenv` required).
+
+### Priority (highest first)
+
+1. Real environment variables already set in the process (container / CI /
+   system). These **always win**.
+2. Values from the `.env` file (only fill in variables that are *not* already
+   set).
+
+This is the [12-factor](https://12factor.net/config) convention: deploy-time
+secrets override the local file, so the same `.env` is safe to commit-ish
+defaults while production injects real credentials.
+
+### Quick start with `.env`
+
+```bash
+cp .env.example .env       # template is committed; .env itself is git-ignored
+# edit .env:  SPARKSAGE_API_KEY=sk-...
+uvicorn sparksage.api.app:create_app --factory --port 8000
+```
+
+The server calls `load_dotenv()` once on startup, so any `.env` in the CWD is
+picked up automatically. You can also load it explicitly from Python:
+
+```python
+from sparksage import load_dotenv
+
+load_dotenv()                       # reads ./.env, env vars take priority
+load_dotenv("/etc/sparksage.env")   # explicit path
+load_dotenv(override=True)          # let the file clobber real env vars
+```
+
+### Recognized variables
+
+`SPARKSAGE_*` take priority over the `OPENAI_*` fallbacks.
+
+| Variable              | Purpose                                              |
+| --------------------- | ---------------------------------------------------- |
+| `SPARKSAGE_API_KEY`   | API key (falls back to `OPENAI_API_KEY`)             |
+| `SPARKSAGE_BASE_URL`  | OpenAI-compatible base URL (Azure/vLLM/Ollama/GLM…)  |
+| `SPARKSAGE_MODEL`     | Model id (default `gpt-4o-mini`)                     |
+| `SPARKSAGE_LANGUAGE`  | BCP-47 code written into each block (e.g. `en`, `zh`)|
+
+### Supported `.env` syntax
+
+The built-in parser implements the well-defined subset of `.env` syntax —
+`KEY=VALUE`, single/double quotes, `export` prefix, and `#` comments (a `#` is
+only a comment when preceded by whitespace, so URLs like
+`https://host/#anchor` stay intact). Shell expansion (`$VAR`, `$(...)`,
+backticks) and multi-line values are **not** interpreted on purpose — that
+avoids the quoting/injection bugs a real shell parser would introduce. See
+[`sparksage.config`](src/sparksage/config.py) for details.
+
+> Keep secrets out of git: `.env` is git-ignored. Commit `.env.example` as a
+> template only.
+
+---
+
 ## Project layout
 
 ```
 src/sparksage/
+├── config.py          # .env loader (stdlib; env vars take priority over file)
 ├── schema/
 │   ├── enums.py        # controlled vocabularies (Tag, EntityType, SentenceRole, ...)
 │   ├── entity.py       # named things a block references
@@ -394,7 +461,7 @@ src/sparksage/
 │   ├── pipeline.py     # SparkSageService: convert→clean→generate orchestration  ★
 │   ├── schemas.py      # request/response Pydantic models (no fastapi)
 │   └── app.py          # FastAPI app factory + routes (lazy fastapi import)
-tests/                  # 151 tests (schema + generation + conversion + cleaning + api)
+tests/                  # schema + generation + conversion + cleaning + api + config
 examples/               # runnable demos
 ```
 
@@ -412,6 +479,7 @@ ruff check src tests                          # lint
 - [x] Uniform file-to-Markdown conversion (any format -> Markdown via markitdown)
 - [x] Customizable text cleaning (business-specific rules, source-aware routing)
 - [x] WEB API (FastAPI: file → Markdown, file → IdeaBlock list)
+- [x] `.env` configuration (built-in loader, env vars override file)
 - [ ] Distill de-duplication pipeline (embedding + LSH + FAISS kNN + threshold
       iteration + Louvain/BFS + hierarchical LLM merge)
 - [ ] OpenAI-compatible ingest/distill API

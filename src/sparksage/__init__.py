@@ -21,6 +21,7 @@ from sparksage.clean import (
     RegexReplaceRule,
     TextCleaner,
 )
+from sparksage.config import EnvParseError, load_dotenv, parse_env_file
 from sparksage.convert import (
     DEFAULT_EXTENSIONS,
     ConversionResult,
@@ -59,6 +60,7 @@ __all__ = [
     "ConverterBackend",
     "EntityRelation",
     "EntityType",
+    "EnvParseError",
     "FakeConverterBackend",
     "FakeLLMClient",
     "GenerateOutput",
@@ -80,6 +82,8 @@ __all__ = [
     "Tag",
     "TechnicalBlock",
     "TextCleaner",
+    "load_dotenv",
+    "parse_env_file",
 ]
 
 __version__ = "0.1.0"
