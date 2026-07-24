@@ -501,6 +501,7 @@ load_dotenv(override=True)          # let the file clobber real env vars
 | `SPARKSAGE_MODEL`     | Model id (default `gpt-4o-mini`)                     |
 | `SPARKSAGE_STREAM`    | Stream the LLM response (default `true`)             |
 | `SPARKSAGE_LANGUAGE`  | BCP-47 code written into each block (e.g. `en`, `zh`)|
+| `SPARKSAGE_LOG_LEVEL` | `sparksage` logger verbosity (default `WARNING`; `INFO`/`DEBUG` for analysis) |
 
 ### Supported `.env` syntax
 
