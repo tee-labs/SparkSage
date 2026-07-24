@@ -9,9 +9,9 @@ mid-sentence and retrieve poorly), SparkSage embeds whole, verified answers.
 
 > Status: **Pre-Alpha**. This repository implements the **chunk schema**
 > (IdeaBlock + TechnicalBlock), **LLM-driven generation** (turn free text
-> into many IdeaBlocks), **file-to-Markdown conversion**, and **customizable
-> text cleaning**. The Distill de-duplication pipeline and ingest service
-> are planned.
+> into many IdeaBlocks), **file-to-Markdown conversion**, **customizable
+> text cleaning**, and a **WEB API** exposing convert / generate over HTTP.
+> The Distill de-duplication pipeline is planned.
 
 ---
 
@@ -273,6 +273,101 @@ PYTHONPATH=src python3 examples/clean_text.py
 
 ---
 
+## Serve the WEB API
+
+SparkSage exposes the two core capabilities over a small HTTP API:
+
+* `POST /api/v1/convert` — upload a file, get back Markdown (optionally cleaned).
+* `POST /api/v1/generate` — upload a file, get back a list of IdeaBlocks.
+
+The API layer is a thin shell over a framework-agnostic
+[`SparkSageService`](src/sparksage/api/pipeline.py) that wires convert → clean →
+generate together. FastAPI is an *optional* dependency.
+
+```bash
+pip install 'sparksage[api]'          # fastapi + uvicorn + python-multipart
+pip install 'sparksage[convert]'      # markitdown for real file conversion
+pip install 'sparksage[llm]'          # openai SDK for real generation
+```
+
+### Run the server
+
+```bash
+export SPARKSAGE_API_KEY=sk-...                    # or OPENAI_API_KEY
+export SPARKSAGE_MODEL=gpt-4o-mini                 # optional
+uvicorn sparksage.api.app:create_app --factory --port 8000
+```
+
+Interactive docs are auto-generated at `http://localhost:8000/docs`.
+
+### Call the endpoints
+
+```bash
+# 1) file -> Markdown (optional cleaning)
+curl -F "file=@report.pdf" -F "clean=true" \
+     http://localhost:8000/api/v1/convert
+
+# 2) file -> IdeaBlock list
+curl -F "file=@report.pdf" -F "with_stats=true" \
+     http://localhost:8000/api/v1/generate
+```
+
+`POST /api/v1/convert` returns:
+
+```json
+{
+  "markdown": "# Report\n\nRevenue grew 12% ...",
+  "title": "Annual Report",
+  "source": {"uri": "report.pdf", "title": "Annual Report"},
+  "cleaned": true
+}
+```
+
+`POST /api/v1/generate` returns:
+
+```json
+{
+  "blocks": [
+    {
+      "name": "Revenue growth",
+      "critical_question": "How did revenue change?",
+      "trusted_answer": "Revenue grew 12% year over year.",
+      "tags": ["IMPORTANT"],
+      "keywords": ["revenue"],
+      "source": {"uri": "report.pdf"},
+      "status": "draft",
+      "language": "en"
+    }
+  ],
+  "source": {"uri": "report.pdf", "title": "Annual Report"},
+  "cleaned": true,
+  "stats": {"raw_block_count": 1, "emitted": 1, "skipped": 0, "errors": []}
+}
+```
+
+How it stays testable and pluggable:
+
+- The orchestration lives entirely in
+  [`SparkSageService`](src/sparksage/api/pipeline.py) — no HTTP imports — so it
+  is fully unit-testable offline with fakes. The FastAPI layer only does
+  upload/serialization.
+- `create_app(service=...)` accepts an injected service (for tests); when
+  omitted it builds one from env vars (`SPARKSAGE_API_KEY` / `OPENAI_API_KEY`).
+- If no API key is set, `/generate` returns a clear `503` instead of crashing;
+  `/convert` works independently of any LLM.
+- Uploaded bytes are written to a short-lived temp file carrying the original
+  extension (so the backend picks the right format handler), and provenance is
+  set back to the *original* filename — keeping cleaning-rule routing and
+  `source.uri` meaningful.
+
+Offline demo (no API key, no `markitdown`, exercises both routes via TestClient):
+
+```bash
+PYTHONPATH=src python3 examples/serve_api.py
+```
+
+---
+
 ## Project layout
 
 ```
@@ -295,7 +390,11 @@ src/sparksage/
 │   ├── rules.py        # CleaningRule protocol + built-in & configurable rules
 │   ├── registry.py     # source/filename-aware rule routing (glob/regex)
 │   └── cleaner.py      # raw text -> final document text  ★
-tests/                  # 114 tests (schema + generation + conversion + cleaning)
+├── api/
+│   ├── pipeline.py     # SparkSageService: convert→clean→generate orchestration  ★
+│   ├── schemas.py      # request/response Pydantic models (no fastapi)
+│   └── app.py          # FastAPI app factory + routes (lazy fastapi import)
+tests/                  # 151 tests (schema + generation + conversion + cleaning + api)
 examples/               # runnable demos
 ```
 
@@ -312,6 +411,7 @@ ruff check src tests                          # lint
 - [x] LLM-driven generation (text -> many IdeaBlocks via pluggable LLM client)
 - [x] Uniform file-to-Markdown conversion (any format -> Markdown via markitdown)
 - [x] Customizable text cleaning (business-specific rules, source-aware routing)
+- [x] WEB API (FastAPI: file → Markdown, file → IdeaBlock list)
 - [ ] Distill de-duplication pipeline (embedding + LSH + FAISS kNN + threshold
       iteration + Louvain/BFS + hierarchical LLM merge)
 - [ ] OpenAI-compatible ingest/distill API

@@ -64,15 +64,31 @@ PYTHONPATH=src python3 examples/build_chunks.py
   rule routing (`add_for`), since cleaning is strongly business-dependent.
   Built-in rules are normalization only; business logic goes in custom rules
   registered on a `TextCleaner` instance.
+- The API orchestration core (`api/pipeline.py` → `SparkSageService`) is
+  framework-agnostic — never import FastAPI or any web framework there. It wires
+  the existing `MarkdownConverter` / `TextCleaner` / `IdeaBlockGenerator` together
+  and owns only temp-file management for uploaded bytes (the converter backends
+  detect format from the file *extension*, so the temp file must carry the
+  original extension; provenance is swapped back to the original filename via
+  `dataclasses.replace`). FastAPI is an optional dependency (`pip install
+  'sparksage[api]'`), imported lazily only inside `api/app.py:create_app`.
+  `create_app(service=...)` accepts an injected service (for tests); when omitted
+  it builds one from env vars (`SPARKSAGE_API_KEY` / `OPENAI_API_KEY`). If no API
+  key is set, `/generate` returns `503` while `/convert` works LLM-free. Note:
+  `app.py` deliberately omits `from __future__ import annotations` so FastAPI can
+  resolve the lazily-imported route-parameter types (`UploadFile`/`File`/`Form`)
+  via eager annotation evaluation.
 
 ## Roadmap context
 
 Implemented now: chunk schema (IdeaBlock + TechnicalBlock), LLM-driven
 generation (`generator/`: prompt building, JSON extraction, enum coercion),
 uniform file-to-Markdown conversion (`convert/`: pluggable backend built on
-`markitdown`, single-file + resilient batch directory mode), and customizable
+`markitdown`, single-file + resilient batch directory mode), customizable
 text cleaning (`clean/`: composable `CleaningRule`s, source/filename-aware
-routing via `CleaningRegistry`, sits between conversion and generation).
+routing via `CleaningRegistry`, sits between conversion and generation), and a
+WEB API (`api/`: framework-agnostic `SparkSageService` orchestration +
+FastAPI app factory exposing `/api/v1/convert` and `/api/v1/generate`).
 Planned next: Distill de-dup pipeline (embedding + LSH + FAISS + threshold
 iteration + Louvain/BFS + hierarchical LLM merge) and an OpenAI-compatible API.
 Design schema additions so the Distill lifecycle fields (`status`, `parents`,

@@ -37,6 +37,17 @@ llm = [
 convert = [
     "markitdown[all]>=0.1",
 ]
+api = [
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.20",
+    "python-multipart>=0.0.5",
+]
+api-dev = [
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.20",
+    "python-multipart>=0.0.5",
+    "httpx>=0.24",
+]
 
 [project.urls]
 Homepage = "https://github.com/tee-labs/SparkSage"
