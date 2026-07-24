@@ -36,6 +36,13 @@ from sparksage.generator import (
     LLMClient,
     OpenAICompatibleClient,
 )
+from sparksage.logging_config import (
+    DEFAULT_LOG_LEVEL,
+    ENV_LOG_LEVEL,
+    LogLevelError,
+    configure_logging,
+    parse_level,
+)
 from sparksage.schema.enums import (
     BlockStatus,
     EntityRelation,
@@ -48,6 +55,7 @@ from sparksage.schema.technical import TechnicalBlock
 
 __all__ = [
     "DEFAULT_EXTENSIONS",
+    "DEFAULT_LOG_LEVEL",
     "DEFAULT_RULES",
     "BlockStatus",
     "CallableRule",
@@ -58,6 +66,7 @@ __all__ = [
     "ConvertResponse",
     "ConversionResult",
     "ConverterBackend",
+    "ENV_LOG_LEVEL",
     "EntityRelation",
     "EntityType",
     "EnvParseError",
@@ -71,6 +80,7 @@ __all__ = [
     "IdeaBlock",
     "IdeaBlockGenerator",
     "LLMClient",
+    "LogLevelError",
     "MarkdownConverter",
     "MarkItDownBackend",
     "OpenAICompatibleClient",
@@ -82,8 +92,10 @@ __all__ = [
     "Tag",
     "TechnicalBlock",
     "TextCleaner",
+    "configure_logging",
     "load_dotenv",
     "parse_env_file",
+    "parse_level",
 ]
 
 __version__ = "0.1.0"

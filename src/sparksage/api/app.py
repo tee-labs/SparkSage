@@ -44,6 +44,7 @@ from sparksage.convert.backend import MarkItDownBackend
 from sparksage.convert.converter import MarkdownConverter
 from sparksage.generator.client import OpenAICompatibleClient
 from sparksage.generator.generator import GenerationError, IdeaBlockGenerator
+from sparksage.logging_config import ENV_LOG_LEVEL, configure_logging
 
 _logger = logging.getLogger(__name__)
 
@@ -111,9 +112,11 @@ def build_default_service() -> SparkSageService:
     ``SPARKSAGE_MODEL``           Model id (default ``gpt-4o-mini``)
     ``SPARKSAGE_STREAM``          Stream the LLM response (default ``true``)
     ``SPARKSAGE_LANGUAGE``        Output language written into each block
+    ``SPARKSAGE_LOG_LEVEL``       ``sparksage`` logger verbosity (default ``WARNING``)
     ============================  =========================================
     """
     load_dotenv()
+    configure_logging()
     converter = MarkdownConverter(backend=MarkItDownBackend())
     cleaner = TextCleaner()
 
@@ -279,9 +282,11 @@ __all__ = [
     "DEFAULT_STREAM",
     "ENV_API_KEY",
     "ENV_BASE_URL",
+    "ENV_LOG_LEVEL",
     "ENV_MODEL",
     "ENV_STREAM",
     "build_default_service",
+    "configure_logging",
     "create_app",
     "run",
 ]

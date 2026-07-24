@@ -86,6 +86,18 @@ PYTHONPATH=src python3 examples/build_chunks.py
   and deliberately does NOT do shell expansion (`$VAR`/`$(...)`/backticks) or
   multi-line values. `.env` is git-ignored; commit `.env.example` as a template
   only.
+- Logging (`logging_config.py`) is pure stdlib and reads exactly one env var,
+  `SPARKSAGE_LOG_LEVEL` (default `WARNING`), via `configure_logging()`.
+  `build_default_service()` calls it right after `load_dotenv()` so `.env` and
+  real env vars both feed it (12-factor). It sets the level on the `sparksage`
+  logger only (never the root logger) and installs a single `StreamHandler`
+  **only when nobody else has configured logging** (`root.hasHandlers()` is
+  false) — so under uvicorn/gunicorn records propagate to the host's handlers
+  with no duplicate output, while in a plain script `SPARKSAGE_LOG_LEVEL=DEBUG`
+  Just Works. It is idempotent (never stacks handlers) and is never called on
+  import (libraries must not mutate global logging state as a side effect).
+  New sub-packages should `logging.getLogger(__name__)` under the `sparksage`
+  namespace so they are covered by the single level.
 
 ## Roadmap context
 
