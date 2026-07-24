@@ -1,0 +1,16 @@
+# Core schema dependencies
+pydantic>=2.5,<3
+
+# Optional: LLM-driven block generation against an OpenAI-compatible endpoint.
+# Install with: pip install 'sparksage[llm]'
+# openai>=1.0
+
+# Optional: uniform file-to-Markdown conversion (PDF/DOCX/PPTX/XLSX/HTML/...).
+# Powered by Microsoft markitdown. Install with: pip install 'sparksage[convert]'
+# markitdown[all]>=0.1
+
+# Optional: WEB API (FastAPI convert / generate endpoints).
+# Install with: pip install 'sparksage[api]'
+# fastapi>=0.100
+# uvicorn[standard]>=0.20
+# python-multipart>=0.0.5

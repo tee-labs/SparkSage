@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sparksage"
+version = "0.1.0"
+description = "SparkSage - structured, question-aligned knowledge chunks for high-quality RAG"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "SparkSage Contributors" }]
+keywords = ["rag", "chunking", "knowledge", "ideablock", "retrieval", "llm"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "pydantic>=2.5,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.1",
+]
+llm = [
+    "openai>=1.0",
+]
+convert = [
+    "markitdown[all]>=0.1",
+]
+api = [
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.20",
+    "python-multipart>=0.0.5",
+]
+api-dev = [
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.20",
+    "python-multipart>=0.0.5",
+    "httpx>=0.24",
+]
+
+[project.urls]
+Homepage = "https://github.com/tee-labs/SparkSage"
+Repository = "https://github.com/tee-labs/SparkSage"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra -q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
