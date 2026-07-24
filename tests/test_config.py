@@ -270,3 +270,44 @@ def test_build_default_service_env_var_beats_dotenv(
 
     svc = build_default_service()
     assert svc.has_generator
+
+
+# ---------------------------------------------------------------------------- #
+# _env_bool (stream / boolean env-var parsing)
+# ---------------------------------------------------------------------------- #
+@pytest.mark.parametrize("raw", ["1", "true", "TRUE", "True", "yes", "on"])
+def test_env_bool_truthy(raw: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from sparksage.api.app import _env_bool
+
+    monkeypatch.setenv("SPARKSAGE_TEST_BOOL", raw)
+    assert _env_bool("SPARKSAGE_TEST_BOOL", default=False) is True
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "False", "no", "off"])
+def test_env_bool_falsy(raw: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from sparksage.api.app import _env_bool
+
+    monkeypatch.setenv("SPARKSAGE_TEST_BOOL", raw)
+    assert _env_bool("SPARKSAGE_TEST_BOOL", default=True) is False
+
+
+def test_env_bool_unset_returns_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sparksage.api.app import _env_bool
+
+    monkeypatch.delenv("SPARKSAGE_TEST_BOOL", raising=False)
+    assert _env_bool("SPARKSAGE_TEST_BOOL", default=True) is True
+    assert _env_bool("SPARKSAGE_TEST_BOOL", default=False) is False
+
+
+def test_env_bool_empty_returns_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sparksage.api.app import _env_bool
+
+    monkeypatch.setenv("SPARKSAGE_TEST_BOOL", "")
+    assert _env_bool("SPARKSAGE_TEST_BOOL", default=True) is True
+
+
+def test_env_bool_unrecognized_returns_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sparksage.api.app import _env_bool
+
+    monkeypatch.setenv("SPARKSAGE_TEST_BOOL", "maybe")
+    assert _env_bool("SPARKSAGE_TEST_BOOL", default=True) is True

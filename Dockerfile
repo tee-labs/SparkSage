@@ -12,8 +12,9 @@
 #
 # Env vars (SPARKSAGE_* take priority over OPENAI_*):
 #   SPARKSAGE_API_KEY   API key (falls back to OPENAI_API_KEY)
-#   SPARKSAGE_BASE_URL  OpenAI-compatible base URL
+#   SPARKSAGE_BASE_URL  OpenAI-compatible base URL (custom endpoint)
 #   SPARKSAGE_MODEL     Model id (default gpt-4o-mini)
+#   SPARKSAGE_STREAM    Stream the LLM response (default true)
 #   SPARKSAGE_LANGUAGE  BCP-47 code written into every block
 
 ARG PYTHON_VERSION=3.11

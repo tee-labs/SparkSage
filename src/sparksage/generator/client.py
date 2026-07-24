@@ -41,7 +41,14 @@ class OpenAICompatibleClient:
     """LLM client backed by an OpenAI-compatible Chat Completions endpoint.
 
     Works with OpenAI, Azure OpenAI, vLLM, Ollama's OpenAI shim, BigModel/GLM,
-    and anything else that speaks the ``chat.completions`` protocol.
+    and anything else that speaks the ``chat.completions`` protocol. Point it at
+    a self-hosted / non-OpenAI endpoint via ``base_url``.
+
+    By default requests are made in *streaming* mode (``stream=True``) and the
+    streamed deltas are accumulated into the returned string. This is more
+    robust for long generations (fewer timeouts) and is the behaviour the API
+    layer enables. Disable it with ``stream=False`` or override it per call via
+    ``complete(..., stream=False)``.
 
     The ``openai`` package is an *optional* dependency -- install it with
     ``pip install 'sparksage[llm]'``.
@@ -53,6 +60,7 @@ class OpenAICompatibleClient:
         api_key: str | None = None,
         model: str = "gpt-4o-mini",
         timeout: float | None = None,
+        stream: bool = True,
         **client_kwargs: Any,
     ) -> None:
         try:
@@ -66,6 +74,7 @@ class OpenAICompatibleClient:
             base_url=base_url, api_key=api_key, timeout=timeout, **client_kwargs
         )
         self._model = model
+        self._stream = stream
 
     def complete(
         self,
@@ -76,15 +85,26 @@ class OpenAICompatibleClient:
         response_format: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> str:
+        stream = bool(kwargs.pop("stream", self._stream))
         request: dict[str, Any] = {
             "model": model or self._model,
             "messages": messages,
             "temperature": temperature,
+            "stream": stream,
         }
         if response_format is not None:
             request["response_format"] = response_format
         request.update(kwargs)
         response = self._client.chat.completions.create(**request)
+        if stream:
+            parts: list[str] = []
+            for chunk in response:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    parts.append(delta)
+            return "".join(parts)
         return response.choices[0].message.content or ""
 
 

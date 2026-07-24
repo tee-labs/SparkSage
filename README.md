@@ -297,6 +297,8 @@ pip install 'sparksage[llm]'          # openai SDK for real generation
 ```bash
 export SPARKSAGE_API_KEY=sk-...                    # or OPENAI_API_KEY
 export SPARKSAGE_MODEL=gpt-4o-mini                 # optional
+export SPARKSAGE_BASE_URL=https://your-endpoint/v1 # custom endpoint (optional)
+export SPARKSAGE_STREAM=true                       # stream mode (default)
 uvicorn sparksage.api.app:create_app --factory --port 8000
 ```
 
@@ -394,7 +396,9 @@ docker run --rm -p 8000:8000 --env-file .env sparksage:latest
 # or pass individual variables:
 docker run --rm -p 8000:8000 \
   -e SPARKSAGE_API_KEY=sk-... \
+  -e SPARKSAGE_BASE_URL=https://your-endpoint/v1 \
   -e SPARKSAGE_MODEL=gpt-4o-mini \
+  -e SPARKSAGE_STREAM=true \
   sparksage:latest
 ```
 
@@ -495,6 +499,7 @@ load_dotenv(override=True)          # let the file clobber real env vars
 | `SPARKSAGE_API_KEY`   | API key (falls back to `OPENAI_API_KEY`)             |
 | `SPARKSAGE_BASE_URL`  | OpenAI-compatible base URL (Azure/vLLM/Ollama/GLM…)  |
 | `SPARKSAGE_MODEL`     | Model id (default `gpt-4o-mini`)                     |
+| `SPARKSAGE_STREAM`    | Stream the LLM response (default `true`)             |
 | `SPARKSAGE_LANGUAGE`  | BCP-47 code written into each block (e.g. `en`, `zh`)|
 
 ### Supported `.env` syntax
