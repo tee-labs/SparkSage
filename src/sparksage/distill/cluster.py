@@ -30,7 +30,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from sparksage.embed.similarity import SimilarityPair, find_similar_pairs
+from sparksage.embed.similarity import (
+    CandidateReducer,
+    SimilarityPair,
+    find_similar_pairs,
+)
 
 #: Corpora at or above this size earn a Louvain pass (modularity community
 #: detection) instead of plain connected components. The crossover is empirical:
@@ -163,9 +167,11 @@ class ConnectedComponentsBackend:
     Computes near-duplicate pairs with
     :func:`~sparksage.embed.similarity.find_similar_pairs` (exact brute force,
     pure stdlib) then unions their endpoints. Deterministic, dependency-free,
-    ``O(n²·d)`` dominated by the pair scan -- fine for thousands of blocks. For
-    larger corpora, swap in :class:`LouvainClusteringBackend` (or a future
-    FAISS/LSH-backed candidate reducer under ``[distill]``).
+    ``O(n^2 * d)`` dominated by the pair scan -- fine for thousands of blocks.
+    For larger corpora, pass a ``candidate_reducer`` (e.g.
+    :class:`~sparksage.distill.lsh.LSHCandidateReducer`) to skip the all-pairs
+    scan and only verify LSH-colliding candidates, or swap in
+    :class:`LouvainClusteringBackend` for modularity-based community detection.
 
     Parameters
     ----------
@@ -174,16 +180,30 @@ class ConnectedComponentsBackend:
         when no pair clears ``threshold``), but callers usually ignore clusters
         below 2. Kept as an attribute so introspection is cheap. Defaults to 1
         (return everything; the pipeline filters).
+    candidate_reducer:
+        Optional :class:`~sparksage.embed.similarity.CandidateReducer` forwarded
+        to :func:`~sparksage.embed.similarity.find_similar_pairs` to pre-filter
+        the comparison set. ``None`` (default) runs the exact all-pairs scan.
     """
 
-    def __init__(self, min_cluster_size: int = 1) -> None:
+    def __init__(
+        self,
+        min_cluster_size: int = 1,
+        *,
+        candidate_reducer: CandidateReducer | None = None,
+    ) -> None:
         if min_cluster_size < 1:
             raise ValueError("min_cluster_size must be >= 1")
         self._min_cluster_size = min_cluster_size
+        self._candidate_reducer = candidate_reducer
 
     @property
     def min_cluster_size(self) -> int:
         return self._min_cluster_size
+
+    @property
+    def candidate_reducer(self) -> CandidateReducer | None:
+        return self._candidate_reducer
 
     def cluster(
         self,
@@ -194,7 +214,9 @@ class ConnectedComponentsBackend:
         ids = list(vectors.keys())
         if not ids:
             return []
-        pairs = find_similar_pairs(vectors, threshold=threshold)
+        pairs = find_similar_pairs(
+            vectors, threshold=threshold, candidate_reducer=self._candidate_reducer
+        )
         return _build_clusters(ids, pairs)
 
 
@@ -216,10 +238,26 @@ class LouvainClusteringBackend:
     resolution:
         Louvain resolution parameter (higher -> more, smaller communities).
         Defaults to ``1.0`` (standard modularity).
+    candidate_reducer:
+        Optional :class:`~sparksage.embed.similarity.CandidateReducer` forwarded
+        to :func:`~sparksage.embed.similarity.find_similar_pairs` so the
+        pair-graph construction also benefits from LSH pre-filtering on
+        million-vector corpora. ``None`` (default) runs the exact all-pairs
+        scan.
     """
 
-    def __init__(self, *, resolution: float = 1.0) -> None:
+    def __init__(
+        self,
+        *,
+        resolution: float = 1.0,
+        candidate_reducer: CandidateReducer | None = None,
+    ) -> None:
         self._resolution = resolution
+        self._candidate_reducer = candidate_reducer
+
+    @property
+    def candidate_reducer(self) -> CandidateReducer | None:
+        return self._candidate_reducer
 
     def _import_graph(self) -> tuple[object, object]:
         try:
@@ -245,7 +283,9 @@ class LouvainClusteringBackend:
         ids = list(vectors.keys())
         if not ids:
             return []
-        pairs = find_similar_pairs(vectors, threshold=threshold)
+        pairs = find_similar_pairs(
+            vectors, threshold=threshold, candidate_reducer=self._candidate_reducer
+        )
 
         graph = nx.Graph()  # type: ignore[attr-defined]
         graph.add_nodes_from(ids)

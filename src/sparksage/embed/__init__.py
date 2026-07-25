@@ -33,7 +33,11 @@ from sparksage.embed.persist import (
     load_store,
     save_store,
 )
-from sparksage.embed.similarity import SimilarityPair, find_similar_pairs
+from sparksage.embed.similarity import (
+    CandidateReducer,
+    SimilarityPair,
+    find_similar_pairs,
+)
 from sparksage.embed.store import (
     InMemoryVectorStore,
     SearchHit,
@@ -46,6 +50,7 @@ __all__ = [
     "STORE_FORMAT",
     "STORE_VERSION",
     "BlockEmbedder",
+    "CandidateReducer",
     "EmbeddingClient",
     "FakeEmbeddingClient",
     "InMemoryVectorStore",
