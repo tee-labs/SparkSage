@@ -64,6 +64,48 @@ PYTHONPATH=src python3 examples/build_chunks.py
   rule routing (`add_for`), since cleaning is strongly business-dependent.
   Built-in rules are normalization only; business logic goes in custom rules
   registered on a `TextCleaner` instance.
+- The embedding core (`embed/`) depends only on the `EmbeddingClient` Protocol
+  — never import `openai` or `numpy` there. `OpenAIEmbeddingClient` is an
+  optional dependency (`pip install 'sparksage[embed]'`), imported lazily only
+  inside itself (it batches at 1000 inputs/request over a `ThreadPoolExecutor`
+  and L2-normalizes by default so cosine = dot product). The core
+  (`BlockEmbedder` in `embed/indexer.py`) is pure stdlib and unit-testable with
+  the deterministic `FakeEmbeddingClient` (signed feature-hashing over n-grams,
+  zero dependencies, gives non-trivial similarity for overlapping texts).
+  Embeddings are produced from `IdeaBlock.embedding_text` only (the three-field
+  `name + "\n" + critical_question + "\n" + trusted_answer` concatenation).
+  `embed_blocks` fills the `.embedding` field in place; `vectors_for` returns a
+  `{block_id: vector}` dict without mutating blocks — the contract a vector store
+  / the future Distill pipeline consumes (vectors stay off the objects so large
+  corpora stay memory-light). Vector dimension is fixed per model and probed
+  lazily on the first `embed_batch` when not known statically.
+- The retrieval/persistence core (`embed/store.py` + `embed/persist.py`) depends
+  only on the `VectorStore` Protocol (`dimension` / `add` / `search` /
+  `__contains__` / `__len__`) — never import `numpy` or `faiss` there (those are
+  deferred to the future `[distill]` group, where an approximate FAISS-backed
+  `VectorStore` earns its weight on million-vector corpora). `InMemoryVectorStore`
+  is pure stdlib: brute-force exact kNN, score = dot product (cosine, since every
+  `EmbeddingClient` L2-normalizes by default), vectors stored by value (copied on
+  add so callers can't corrupt the index). It is **text-agnostic** — index vectors
+  keyed by an opaque `block_id` string, and embed the query text yourself via one
+  `embed_batch` call; this keeps retrieval decoupled from embedding exactly as the
+  generator is decoupled from the LLM client. Feed it `BlockEmbedder.vectors_for`
+  output via `add_many`; `search` returns `SearchHit`s sorted best-first.
+  `save_store` / `load_store` persist a store to a **zero-dependency JSON** file
+  (`{format, version, dimension, vectors}`) so embeddings survive restarts; the
+  loader validates the format marker + version and fails fast on foreign/corrupt/
+  future-version files rather than guessing.
+- The de-dup bridge (`embed/similarity.py`) depends only on the same
+  `{block_id: vector}` contract — never import `numpy` or `faiss` there.
+  `find_similar_pairs` is the all-pairs counterpart to the store's one-to-many
+  `search`: brute-force exact `O(n²·d)` dot products over `vectors_for` /
+  `InMemoryVectorStore.vectors` output, returning `SimilarityPair`s (ids
+  normalized so `a <= b`; each unordered pair once; sorted by score desc then
+  `(a, b)` for determinism) at or above a `[0, 1]` threshold. This is the
+  first, dependency-free step of the future Distill pipeline (clustering /
+  Louvain / LLM-merge stay in the planned `distill/` package under the
+  `[distill]` group, where approximate LSH+FAISS candidate reduction earns its
+  weight at million-vector scale).
 - The API orchestration core (`api/pipeline.py` → `SparkSageService`) is
   framework-agnostic — never import FastAPI or any web framework there. It wires
   the existing `MarkdownConverter` / `TextCleaner` / `IdeaBlockGenerator` together
@@ -127,17 +169,26 @@ generation (`generator/`: prompt building, JSON extraction, enum coercion),
 uniform file-to-Markdown conversion (`convert/`: pluggable backend built on
 `markitdown`, single-file + resilient batch directory mode), customizable
 text cleaning (`clean/`: composable `CleaningRule`s, source/filename-aware
-routing via `CleaningRegistry`, sits between conversion and generation), and a
-  WEB API (`api/`: framework-agnostic `SparkSageService` orchestration +
-  FastAPI app factory exposing `/api/v1/convert` and `/api/v1/generate`),
-  `.env`-based configuration (`config.py`: zero-dependency loader, env vars
-  override the file), and query-time intent recognition + rewriting
-  (`query/`: pluggable `IntentClassifier` / `QueryRewriter` protocols reusing
-  `LLMClient`, LLM + rule-based implementations, lenient→strict `QueryIntent`
-  coercion, `QueryProcessor` orchestration with interception policy — not yet
-  wired to the web layer).
-Planned next: Distill de-dup pipeline (embedding + LSH + FAISS + threshold
-iteration + Louvain/BFS + hierarchical LLM merge), an OpenAI-compatible API,
+routing via `CleaningRegistry`, sits between conversion and generation),
+dense-vector embedding (`embed/`: pluggable `EmbeddingClient` Protocol,
+`BlockEmbedder` fills `IdeaBlock.embedding` from `embedding_text`,
+deterministic `FakeEmbeddingClient` for tests, `OpenAIEmbeddingClient` with
+batching + concurrency as an optional dep; in-memory retrieval via a
+`VectorStore` Protocol + brute-force `InMemoryVectorStore` kNN (pure stdlib,
+consumes `vectors_for`), `save_store`/`load_store` JSON persistence so
+embeddings survive restarts, and `find_similar_pairs` all-pairs near-duplicate
+detection (pure stdlib, the first dependency-free step of Distill)), a WEB API
+(`api/`: framework-agnostic `SparkSageService` orchestration + FastAPI app
+factory exposing `/api/v1/convert` and `/api/v1/generate`), `.env`-based
+configuration (`config.py`: zero-dependency loader, env vars override the
+file), and query-time intent recognition + rewriting (`query/`: pluggable
+`IntentClassifier` / `QueryRewriter` protocols reusing `LLMClient`, LLM +
+rule-based implementations, lenient→strict `QueryIntent` coercion,
+`QueryProcessor` orchestration with interception policy — not yet wired to
+the web layer).
+Planned next: Distill de-dup pipeline (LSH + FAISS + threshold iteration +
+Louvain/BFS + hierarchical LLM merge, building on `find_similar_pairs` /
+the `embed` vectors + the schema lifecycle fields), an OpenAI-compatible API,
 and a `/api/v1/query` route wrapping `QueryProcessor`.
 Design schema additions so the Distill lifecycle fields (`status`, `parents`,
 `confidence`, `embedding`) remain usable.
