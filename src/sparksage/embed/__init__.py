@@ -12,6 +12,9 @@ The produced vectors feed retrieval:
 * :class:`InMemoryVectorStore` is a dependency-free kNN store -- add the
   ``{block_id: vector}`` mapping from :meth:`~BlockEmbedder.vectors_for` and
   :meth:`~InMemoryVectorStore.search` returns the most similar block ids.
+* :func:`find_similar_pairs` is the all-pairs counterpart -- given the same
+  ``{block_id: vector}`` mapping it returns the near-duplicate pairs (cosine
+  >= threshold), the first step of the planned Distill de-dup pipeline.
 * :func:`save_store` / :func:`load_store` persist a store to JSON so embeddings
   survive across restarts.
 """
@@ -30,6 +33,7 @@ from sparksage.embed.persist import (
     load_store,
     save_store,
 )
+from sparksage.embed.similarity import SimilarityPair, find_similar_pairs
 from sparksage.embed.store import (
     InMemoryVectorStore,
     SearchHit,
@@ -47,7 +51,9 @@ __all__ = [
     "InMemoryVectorStore",
     "OpenAIEmbeddingClient",
     "SearchHit",
+    "SimilarityPair",
     "VectorStore",
+    "find_similar_pairs",
     "load_store",
     "save_store",
 ]

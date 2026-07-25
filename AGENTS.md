@@ -95,6 +95,17 @@ PYTHONPATH=src python3 examples/build_chunks.py
   (`{format, version, dimension, vectors}`) so embeddings survive restarts; the
   loader validates the format marker + version and fails fast on foreign/corrupt/
   future-version files rather than guessing.
+- The de-dup bridge (`embed/similarity.py`) depends only on the same
+  `{block_id: vector}` contract — never import `numpy` or `faiss` there.
+  `find_similar_pairs` is the all-pairs counterpart to the store's one-to-many
+  `search`: brute-force exact `O(n²·d)` dot products over `vectors_for` /
+  `InMemoryVectorStore.vectors` output, returning `SimilarityPair`s (ids
+  normalized so `a <= b`; each unordered pair once; sorted by score desc then
+  `(a, b)` for determinism) at or above a `[0, 1]` threshold. This is the
+  first, dependency-free step of the future Distill pipeline (clustering /
+  Louvain / LLM-merge stay in the planned `distill/` package under the
+  `[distill]` group, where approximate LSH+FAISS candidate reduction earns its
+  weight at million-vector scale).
 - The API orchestration core (`api/pipeline.py` → `SparkSageService`) is
   framework-agnostic — never import FastAPI or any web framework there. It wires
   the existing `MarkdownConverter` / `TextCleaner` / `IdeaBlockGenerator` together
@@ -143,14 +154,16 @@ dense-vector embedding (`embed/`: pluggable `EmbeddingClient` Protocol,
 deterministic `FakeEmbeddingClient` for tests, `OpenAIEmbeddingClient` with
 batching + concurrency as an optional dep; in-memory retrieval via a
 `VectorStore` Protocol + brute-force `InMemoryVectorStore` kNN (pure stdlib,
-consumes `vectors_for`), and `save_store`/`load_store` JSON persistence so
-embeddings survive restarts), and a WEB API (`api/`:
+consumes `vectors_for`), `save_store`/`load_store` JSON persistence so
+embeddings survive restarts, and `find_similar_pairs` all-pairs near-duplicate
+detection (pure stdlib, the first dependency-free step of Distill)), and a WEB
+API (`api/`:
 framework-agnostic `SparkSageService` orchestration + FastAPI app factory
 exposing `/api/v1/convert` and `/api/v1/generate`), and `.env`-based
 configuration (`config.py`: zero-dependency loader, env vars override the
 file).
 Planned next: Distill de-dup pipeline (LSH + FAISS + threshold iteration +
-Louvain/BFS + hierarchical LLM merge, consuming the `embed` vectors + the
-schema lifecycle fields) and an OpenAI-compatible API. Design schema additions
-so the Distill lifecycle fields (`status`, `parents`, `confidence`,
-`embedding`) remain usable.
+Louvain/BFS + hierarchical LLM merge, building on `find_similar_pairs` /
+the `embed` vectors + the schema lifecycle fields) and an OpenAI-compatible
+API. Design schema additions so the Distill lifecycle fields (`status`,
+`parents`, `confidence`, `embedding`) remain usable.

@@ -337,6 +337,27 @@ save_store(store, "corpus.json")     # embeddings to disk
 store = load_store("corpus.json")    # reload next run (same VectorStore)
 ```
 
+### Find near-duplicate blocks
+
+The store answers "what's most similar to *this query*?" — but Distill also
+needs "which blocks are duplicates of *each other*?". That is the all-pairs
+counterpart:
+
+```python
+from sparksage import find_similar_pairs
+
+# vectors is the same {block_id: vector} dict from vectors_for() above
+for pair in find_similar_pairs(vectors, threshold=0.6):
+    print(f"{pair.score:.3f}  {pair.a} ~ {pair.b}")
+```
+
+`find_similar_pairs` is pure stdlib (`O(n²·d)`, fine for thousands of blocks),
+returns each unordered pair once (`a <= b`), sorted by score then by id for
+determinism. It is the first dependency-free step of the Distill de-dup
+pipeline; approximate LSH + FAISS candidate reduction takes over at
+million-vector scale under the future `[distill]` extra. Clustering itself
+(connected components / Louvain) is intentionally left to `distill/`.
+
 Offline demo (embed -> index -> search -> persist -> reload, no API key):
 
 ```bash
@@ -617,6 +638,7 @@ src/sparksage/
 │   ├── client.py       # EmbeddingClient protocol + OpenAI + Fake client
 │   ├── indexer.py      # BlockEmbedder: blocks -> vectors (fills .embedding)  ★
 │   ├── store.py        # VectorStore protocol + InMemoryVectorStore kNN  ★
+│   ├── similarity.py   # find_similar_pairs: all-pairs near-duplicate detection  ★
 │   └── persist.py      # save_store / load_store (zero-dep JSON)
 ├── api/
 │   ├── pipeline.py     # SparkSageService: convert→clean→generate orchestration  ★
@@ -642,9 +664,10 @@ ruff check src tests                          # lint
 - [x] WEB API (FastAPI: file → Markdown, file → IdeaBlock list)
 - [x] `.env` configuration (built-in loader, env vars override file)
 - [x] Dense-vector embedding & retrieval (pluggable `EmbeddingClient` +
-      in-memory kNN `VectorStore` + JSON persistence, pure stdlib)
-- [ ] Distill de-duplication pipeline (embedding + LSH + FAISS kNN + threshold
-      iteration + Louvain/BFS + hierarchical LLM merge)
+      in-memory kNN `VectorStore` + all-pairs near-duplicate detection +
+      JSON persistence, pure stdlib)
+- [ ] Distill de-duplication pipeline (LSH + FAISS kNN + threshold iteration
+      + Louvain/BFS + hierarchical LLM merge)
 - [ ] OpenAI-compatible ingest/distill API
 - [ ] Reproducible benchmark suite
 
