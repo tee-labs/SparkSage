@@ -81,9 +81,8 @@ PYTHONPATH=src python3 examples/build_chunks.py
   lazily on the first `embed_batch` when not known statically.
 - The retrieval/persistence core (`embed/store.py` + `embed/persist.py`) depends
   only on the `VectorStore` Protocol (`dimension` / `add` / `search` /
-  `__contains__` / `__len__`) — never import `numpy` or `faiss` there (those are
-  deferred to the future `[distill]` group, where an approximate FAISS-backed
-  `VectorStore` earns its weight on million-vector corpora). `InMemoryVectorStore`
+  `__contains__` / `__len__`) — never import `numpy` or `faiss` there.
+  `InMemoryVectorStore`
   is pure stdlib: brute-force exact kNN, score = dot product (cosine, since every
   `EmbeddingClient` L2-normalizes by default), vectors stored by value (copied on
   add so callers can't corrupt the index). It is **text-agnostic** — index vectors
@@ -95,6 +94,24 @@ PYTHONPATH=src python3 examples/build_chunks.py
   (`{format, version, dimension, vectors}`) so embeddings survive restarts; the
   loader validates the format marker + version and fails fast on foreign/corrupt/
   future-version files rather than guessing.
+- The concrete `VectorStore` backends (`embed/backends/`) each implement the same
+  Protocol and lazily import their own SDK inside `__init__` (with a clear
+  `ImportError` pointing at the extra), so the core stays zero-dependency —
+  install only the backend you need. `FaissVectorStore`
+  (`faiss_store.py`, under the `[distill]` extra via `faiss-cpu` + `numpy`) wraps
+  an exact inner-product `IndexFlatIP` behind an `IndexIDMap2` so opaque string
+  `block_id`s map to FAISS's int64 ids; overwrites remove + re-insert (no in-place
+  update on a flat index). `ChromaVectorStore` (`chroma_store.py`, `[chroma]`
+  extra) wraps a ChromaDB collection (`cosine` space; `PersistentClient` from a
+  `path=`, an injected `client=`, or an ephemeral in-process client by default)
+  and reports score = `1 - distance` so it matches the dot-product convention.
+  `PgvectorVectorStore` (`pgvector_store.py`, `[pgvector]` extra) owns a
+  Postgres `vector(d)` table over a `psycopg` (v3) connection — vectors go in as
+  the pgvector text form `[a,b,c]` (no separate `pgvector` python adapter needed),
+  the table name is regex-validated since it can't be SQL-parameterized, and the
+  `cosine` operator (`<=>`) is the default. All three assume L2-normalized vectors
+  and return `SearchHit` scores directly comparable to
+  `InMemoryVectorStore.search`.
 - The de-dup bridge (`embed/similarity.py`) depends only on the same
   `{block_id: vector}` contract — never import `numpy` or `faiss` there.
   `find_similar_pairs` is the all-pairs counterpart to the store's one-to-many
@@ -261,7 +278,12 @@ batching + concurrency as an optional dep; in-memory retrieval via a
 consumes `vectors_for`), `save_store`/`load_store` JSON persistence so
 embeddings survive restarts, and `find_similar_pairs` all-pairs near-duplicate
 detection (pure stdlib, the first dependency-free step of Distill, now with a
-pluggable `CandidateReducer` Protocol for million-vector corpora)), a WEB API
+pluggable `CandidateReducer` Protocol for million-vector corpora), production
+`VectorStore` backends (`embed/backends/`: `FaissVectorStore` exact IP index
+under `[distill]`, `ChromaVectorStore` collection under `[chroma]`,
+`PgvectorVectorStore` Postgres+pgvector table under `[pgvector]` — each lazily
+imports its own SDK so the core stays zero-dependency, all return dot-product-
+comparable scores)), a WEB API
 (`api/`: framework-agnostic `SparkSageService` orchestration + FastAPI app
 factory exposing `/api/v1/convert` and `/api/v1/generate`), `.env`-based
 configuration (`config.py`: zero-dependency loader, env vars override the
@@ -285,8 +307,6 @@ future `/api/v1/distill` route), and a reproducible benchmark suite (`bench/`:
 `RecursiveCharSplitter` baseline over the same queries/ground truth, hit@k /
 MRR + token efficiency, zero-dependency HTML report).
 Planned next: an OpenAI-compatible API, a `/api/v1/query` route wrapping
-`QueryProcessor`, a `/api/v1/distill` route wrapping `JobManager`, and a
-FAISS-backed `VectorStore` under a future `[distill]` accelerator for
-million-vector corpora.
+`QueryProcessor`, and a `/api/v1/distill` route wrapping `JobManager`.
 Design schema additions so the Distill lifecycle fields (`status`, `parents`,
 `confidence`, `embedding`) remain usable.
