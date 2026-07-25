@@ -321,8 +321,15 @@ How it stays dependency-light and pluggable:
   `search`), so it is fully unit-testable offline with
   [`FakeEmbeddingClient`](src/sparksage/embed/client.py). The brute-force
   [`InMemoryVectorStore`](src/sparksage/embed/store.py) is pure stdlib (no
-  `numpy` / `faiss` — those are deferred to the future `[distill]` extra, where
-  an approximate index earns its weight on million-vector corpora).
+  `numpy` / `faiss`). Production backends in
+  [`embed/backends/`](src/sparksage/embed/backends/) each lazily import their own
+  SDK so the core stays zero-dependency — install only what you need:
+  [`FaissVectorStore`](src/sparksage/embed/backends/faiss_store.py) (exact
+  inner-product index, `[distill]` extra),
+  [`ChromaVectorStore`](src/sparksage/embed/backends/chroma_store.py) (`[chroma]`)
+  and [`PgvectorVectorStore`](src/sparksage/embed/backends/pgvector_store.py)
+  (`[pgvector]`, Supabase/Postgres). All three assume L2-normalized vectors and
+  return scores directly comparable to `InMemoryVectorStore.search`.
 - Vectors are stored by value (copied on add), so callers can't corrupt the
   index. `search` returns [`SearchHit`](src/sparksage/embed/store.py)s sorted
   best-first.
@@ -502,6 +509,20 @@ pip install 'sparksage[api]'          # fastapi + uvicorn + python-multipart
 pip install 'sparksage[convert]'      # markitdown for real file conversion
 pip install 'sparksage[llm]'          # openai SDK for real generation
 ```
+
+#### Vector-store backends
+
+The default `InMemoryVectorStore` needs no dependencies. For production-scale
+retrieval, install the backend you need:
+
+```bash
+pip install 'sparksage[distill]'      # FaissVectorStore (faiss-cpu + numpy)
+pip install 'sparksage[chroma]'       # ChromaVectorStore (ChromaDB, local-dev-first)
+pip install 'sparksage[pgvector]'     # PgvectorVectorStore (psycopg v3 + Postgres)
+```
+
+All three implement the same `VectorStore` Protocol, so you swap them in
+wherever an `InMemoryVectorStore` is used.
 
 ### Run the server
 

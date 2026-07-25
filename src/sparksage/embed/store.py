@@ -97,9 +97,12 @@ class InMemoryVectorStore:
     Searches are exact k-nearest-neighbour over a plain dict of vectors:
     compute the dot product of the query against every stored vector, then keep
     the top ``k``. This is ``O(n * d)`` per query -- fine for thousands of
-    blocks; for millions, swap in a FAISS-backed :class:`VectorStore` (planned
-    under the ``[distill]`` extra). The core never pays that cost until it needs
-    to, and stays unit-testable with zero dependencies meanwhile.
+    blocks; for millions, swap in a production backend such as
+    :class:`~sparksage.embed.backends.FaissVectorStore` (under the ``[distill]``
+    extra), :class:`~sparksage.embed.backends.ChromaVectorStore` (``[chroma]``)
+    or :class:`~sparksage.embed.backends.PgvectorVectorStore` (``[pgvector]``).
+    The core never pays that cost until it needs to, and stays unit-testable
+    with zero dependencies meanwhile.
 
     Vectors are stored **by value** (copied on add) so later mutation of the
     caller's list cannot corrupt the index. Keys are opaque strings; pass the

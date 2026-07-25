@@ -19,6 +19,12 @@ The produced vectors feed retrieval:
   survive across restarts.
 """
 
+from sparksage.embed.backends import (
+    DEFAULT_CHROMA_SPACE,
+    ChromaVectorStore,
+    FaissVectorStore,
+    PgvectorVectorStore,
+)
 from sparksage.embed.client import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_MAX_WORKERS,
@@ -46,15 +52,19 @@ from sparksage.embed.store import (
 
 __all__ = [
     "DEFAULT_BATCH_SIZE",
+    "DEFAULT_CHROMA_SPACE",
     "DEFAULT_MAX_WORKERS",
     "STORE_FORMAT",
     "STORE_VERSION",
     "BlockEmbedder",
     "CandidateReducer",
+    "ChromaVectorStore",
     "EmbeddingClient",
+    "FaissVectorStore",
     "FakeEmbeddingClient",
     "InMemoryVectorStore",
     "OpenAIEmbeddingClient",
+    "PgvectorVectorStore",
     "SearchHit",
     "SimilarityPair",
     "VectorStore",
