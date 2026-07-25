@@ -51,6 +51,11 @@ api-dev = [
     "python-multipart>=0.0.5",
     "httpx>=0.24",
 ]
+distill = [
+    "numpy>=1.24",
+    "networkx>=3.0",
+    "python-louvain>=0.16",
+]
 
 [project.urls]
 Homepage = "https://github.com/tee-labs/SparkSage"
