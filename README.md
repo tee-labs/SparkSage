@@ -10,9 +10,10 @@ mid-sentence and retrieve poorly), SparkSage embeds whole, verified answers.
 > Status: **Pre-Alpha**. This repository implements the **chunk schema**
 > (IdeaBlock + TechnicalBlock), **LLM-driven generation** (turn free text
 > into many IdeaBlocks), **file-to-Markdown conversion**, **customizable
-> text cleaning**, **dense-vector embedding + retrieval**, and a **WEB API**
-> exposing convert / generate over HTTP. The Distill de-duplication pipeline
-> is planned.
+> text cleaning**, **dense-vector embedding + retrieval**, the **Distill
+> de-duplication pipeline** (detect → cluster → LLM-merge → lifecycle
+> write-back), a **measurable benchmark suite** (IdeaBlock vs naive chunking
+> on your own data), and a **WEB API** exposing convert / generate over HTTP.
 
 ---
 
@@ -355,13 +356,130 @@ for pair in find_similar_pairs(vectors, threshold=0.6):
 returns each unordered pair once (`a <= b`), sorted by score then by id for
 determinism. It is the first dependency-free step of the Distill de-dup
 pipeline; approximate LSH + FAISS candidate reduction takes over at
-million-vector scale under the future `[distill]` extra. Clustering itself
-(connected components / Louvain) is intentionally left to `distill/`.
+million-vector scale under the `[distill]` extra.
 
 Offline demo (embed -> index -> search -> persist -> reload, no API key):
 
 ```bash
 PYTHONPATH=src python3 examples/search_blocks.py
+```
+
+---
+
+## De-duplicate with Distill
+
+Once a corpus is embedded, near-duplicates creep in -- the same fact re-stated
+across documents, slight rewordings of one answer, a copy-pasted procedure.
+**Distill** collapses them into a smaller set of canonical, more complete
+IdeaBlocks. It is built on the existing building blocks rather than new ones:
+
+- candidate detection reuses `find_similar_pairs`;
+- clustering is a protocol with a pure-stdlib default (union-find connected
+  components) and an optional Louvain backend under `[distill]`;
+- the merge step reuses the existing `LLMClient` protocol;
+- lifecycle write-back uses the schema fields that already exist for this
+  purpose -- `status` / `parents` / `confidence`.
+
+```python
+from sparksage import BlockEmbedder, OpenAIEmbeddingClient, OpenAICompatibleClient
+from sparksage.distill import DistillPipeline, BlockMerger
+
+embedder = BlockEmbedder(OpenAIEmbeddingClient(api_key="..."))
+merger = BlockMerger(OpenAICompatibleClient(api_key="...", model="gpt-4o-mini"))
+pipe = DistillPipeline(embedder=embedder, merger=merger)
+
+result = pipe.run(blocks)
+print(f"{len(blocks)} -> {len(result.survivors)} blocks ({result.reduction:.1%} dedup)")
+
+# result.survivors   -> canonical merged + untouched singletons, all ACTIVE
+# result.merged_out  -> folded blocks, status=MERGED (kept for audit/rollback)
+# result.stats       -> per-iteration diagnostics (threshold, pairs, clusters)
+```
+
+The pipeline runs **iterative threshold refinement**: start permissive (default
+`0.55`), merge the obvious duplicates, re-embed the canonical blocks, then
+tighten by `+0.01`/round (cap `0.98`, ~4 rounds). This collapses *chains* of
+near-duplicates a single pass would miss, while never merging below the
+tightened bar. Clusters larger than the per-call budget (default 20) are
+**hierarchically partitioned** by their strongest intra-cluster edges, merged
+bottom-up, and merged again -- so even a 10k-block cluster never exceeds one LLM
+context per call.
+
+How it stays dependency-light and pluggable:
+
+- The pipeline depends only on three protocols -- `EmbeddingClient` (via
+  `BlockEmbedder`), `LLMClient` (via `BlockMerger`), and `ClusteringBackend` --
+  so it is fully unit-testable offline with `FakeEmbeddingClient` /
+  `FakeLLMClient`. `numpy` / `networkx` / `python-louvain` belong to the optional
+  `[distill]` extra and are imported lazily inside `LouvainClusteringBackend`.
+- Merged-away blocks get `status=MERGED`; canonical blocks get `status=ACTIVE`,
+  `parents` = the merged UUIDs, and `confidence` = the cluster's mean pairwise
+  similarity. Nothing leaves the IdeaBlock data model.
+- The merge step is **resilient**: in non-strict mode (default), one bad LLM
+  output falls back to promoting a member rather than aborting a 100k-block run.
+
+For very large corpora (≥ ~1000 blocks), install the acceleration deps and let
+the pipeline auto-select a Louvain backend:
+
+```bash
+pip install 'sparksage[distill]'   # numpy + networkx + python-louvain
+```
+
+Offline demo (no API key; scripted FakeLLMClient does a real merge):
+
+```bash
+PYTHONPATH=src python3 examples/distill_blocks.py
+```
+
+---
+
+## Benchmark IdeaBlock vs naive chunking
+
+The adoption-blocking question -- *"is the question-aligned IdeaBlock design
+actually better than the recursive-character splitter everyone uses?"* -- is
+answered **measurably, on your own corpus**. The benchmark reuses the existing
+`BlockEmbedder` and `InMemoryVectorStore` and adds only a dependency-free
+reimplementation of the LangChain recursive splitter as the baseline:
+
+```python
+from sparksage import BlockEmbedder, OpenAIEmbeddingClient
+from sparksage.bench import BenchmarkRunner
+
+runner = BenchmarkRunner(
+    embedder=BlockEmbedder(OpenAIEmbeddingClient(api_key="...")),
+)
+report = runner.run(my_blocks)
+
+print(report.summary())
+open("benchmark.html", "w").write(report.to_html())   # self-contained report
+```
+
+The runner builds **two indexes over the same corpus** -- one vector per
+IdeaBlock vs one vector per naive chunk -- runs the **same queries** (each
+block's `critical_question`, ground truth = the block itself) against both, and
+scores top-k retrieval (**hit@k**, **MRR**, mean top score) + token efficiency.
+The comparison is fair by construction: same embedder, same queries, same ground
+truth -- only the chunking strategy differs.
+
+`BenchmarkReport.to_html()` renders a self-contained HTML page (no external
+CSS/JS, no template engine) with the side-by-side metrics, improvement factors,
+and configuration snapshot -- the "prove the ROI on your own data" artifact,
+shareable as a single file. Plug a real tokenizer via
+`BenchmarkRunner(token_counter=...)` for absolute token numbers.
+
+How it stays dependency-light:
+
+- The runner is pure stdlib + the embedding client you already have -- no
+  LangChain, no metric library, no template engine. It runs offline with
+  `FakeEmbeddingClient`.
+- `RecursiveCharSplitter` is a faithful reimplementation of the
+  `RecursiveCharacterTextSplitter` (the LangChain default), so the baseline is
+  reproducible without any extra install.
+
+Offline demo (no API key):
+
+```bash
+PYTHONPATH=src python3 examples/run_benchmark.py
 ```
 
 ---
@@ -640,6 +758,17 @@ src/sparksage/
 │   ├── store.py        # VectorStore protocol + InMemoryVectorStore kNN  ★
 │   ├── similarity.py   # find_similar_pairs: all-pairs near-duplicate detection  ★
 │   └── persist.py      # save_store / load_store (zero-dep JSON)
+├── distill/
+│   ├── cluster.py      # ClusteringBackend protocol + union-find + Louvain  ★
+│   ├── merge.py        # BlockMerger: cluster -> one canonical block (LLMClient)  ★
+│   ├── prompts.py      # merge prompt (reads enums -> never drifts)
+│   ├── schema.py       # lenient raw merge model + coercion
+│   └── pipeline.py     # DistillPipeline: iterative refine + hierarchical merge  ★
+├── bench/
+│   ├── baselines.py    # RecursiveCharSplitter (LangChain-default reimpl.)  ★
+│   ├── metrics.py      # hit@k / MRR / token-efficiency (pure stdlib)
+│   ├── report.py       # BenchmarkReport + zero-dep HTML renderer  ★
+│   └── runner.py       # BenchmarkRunner: IdeaBlock vs naive on your corpus  ★
 ├── api/
 │   ├── pipeline.py     # SparkSageService: convert→clean→generate orchestration  ★
 │   ├── schemas.py      # request/response Pydantic models (no fastapi)
@@ -666,10 +795,12 @@ ruff check src tests                          # lint
 - [x] Dense-vector embedding & retrieval (pluggable `EmbeddingClient` +
       in-memory kNN `VectorStore` + all-pairs near-duplicate detection +
       JSON persistence, pure stdlib)
-- [ ] Distill de-duplication pipeline (LSH + FAISS kNN + threshold iteration
-      + Louvain/BFS + hierarchical LLM merge)
+- [x] Distill de-duplication pipeline (iterative threshold refinement +
+      union-find/Louvain clustering + hierarchical LLM merge + lifecycle
+      write-back, pure stdlib core + optional `[distill]` acceleration)
+- [x] Reproducible benchmark suite (IdeaBlock vs naive recursive splitter,
+      hit@k/MRR + token efficiency, zero-dependency HTML report)
 - [ ] OpenAI-compatible ingest/distill API
-- [ ] Reproducible benchmark suite
 
 ## License
 

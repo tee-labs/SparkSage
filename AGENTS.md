@@ -102,10 +102,52 @@ PYTHONPATH=src python3 examples/build_chunks.py
   `InMemoryVectorStore.vectors` output, returning `SimilarityPair`s (ids
   normalized so `a <= b`; each unordered pair once; sorted by score desc then
   `(a, b)` for determinism) at or above a `[0, 1]` threshold. This is the
-  first, dependency-free step of the future Distill pipeline (clustering /
-  Louvain / LLM-merge stay in the planned `distill/` package under the
-  `[distill]` group, where approximate LSH+FAISS candidate reduction earns its
-  weight at million-vector scale).
+  first, dependency-free step of the Distill pipeline (clustering /
+  Louvain / LLM-merge live in the `distill/` package, where approximate
+  LSH+FAISS candidate reduction will earn its weight at million-vector scale
+  under a future `[distill]` accelerator).
+- The Distill de-dup core (`distill/`) depends only on three protocols — the
+  existing `EmbeddingClient` (via `BlockEmbedder`), the existing `LLMClient`
+  (via `BlockMerger`), and a new `ClusteringBackend` (`cluster.py`) — never
+  import `numpy`, `networkx`, or `python-louvain` in the core. The default
+  `ConnectedComponentsBackend` is pure stdlib (union-find over
+  `find_similar_pairs` output); `LouvainClusteringBackend` is an optional
+  dependency (`pip install 'sparksage[distill]'`), imported lazily only inside
+  itself and auto-selected via `select_clustering_backend` only for corpora ≥
+  `LOUVAIN_THRESHOLD` (1000). `partition_by_strongest_edges` powers the
+  hierarchical merge: a cluster larger than the per-call budget is recursively
+  split by its strongest intra-cluster edges (union-find until `~sqrt(N)*2`
+  groups remain, with an even-slice fallback so the group count is *always* ≤
+  target — guaranteeing strict reduction and no infinite recursion). The merge
+  step (`merge.py`) reuses the lenient→strict pattern from `generator/schema`
+  (`RawMergedBlock` → `coerce_merged_block`) and reuses the generator's tag /
+  entity-type mapping helpers so the controlled vocabularies stay the single
+  source of truth. `DistillPipeline` (`pipeline.py`) is the framework-agnostic
+  orchestrator: iterative threshold refinement (`0.55` start, `+0.01`/round,
+  cap `0.98`, ~4 rounds), re-embedding canonical blocks between rounds so
+  near-duplicate *chains* collapse, with lifecycle write-back through the
+  schema's existing fields (merged-away → `status=MERGED`; canonical →
+  `status=ACTIVE`, `parents` = merged UUIDs, `confidence` = cluster mean
+  similarity). `BlockMerger.merge_calls` / `.fallbacks` counters feed
+  `DistillStats`; non-strict mode (default) falls back to promoting a member
+  on a bad LLM output rather than aborting a large run.
+- The benchmark core (`bench/`) depends only on the existing `BlockEmbedder`
+  and `InMemoryVectorStore` — never import LangChain, a metric library, or a
+  template engine there. `RecursiveCharSplitter` (`baselines.py`) is a
+  faithful, dependency-free reimplementation of the `RecursiveCharacterTextSplitter`
+  (the LangChain default); it is the baseline everyone compares against, shipped
+  so the benchmark is reproducible without an extra install. `BenchmarkRunner`
+  (`runner.py`) builds two indexes over the *same* corpus (one vector per
+  IdeaBlock vs one vector per naive chunk), runs the *same* queries (each
+  block's `critical_question`, ground truth = the block's own id / the chunks
+  derived from it) against both, and scores top-k retrieval (`evaluate_retrieval`
+  in `metrics.py`: hit@k, MRR, mean top score) + token efficiency
+  (`token_stats` / `approx_tokens` with a `len/4` heuristic, overridable via
+  `token_counter=`). `BenchmarkReport.to_html()` (`report.py`) renders a
+  self-contained HTML page (inlined CSS, no externals, no template engine) —
+  the "prove the ROI on your own data" artifact. The comparison is fair by
+  construction: same embedder, same queries, same ground truth — only the
+  chunking strategy differs.
 - The API orchestration core (`api/pipeline.py` → `SparkSageService`) is
   framework-agnostic — never import FastAPI or any web framework there. It wires
   the existing `MarkdownConverter` / `TextCleaner` / `IdeaBlockGenerator` together
@@ -185,10 +227,17 @@ file), and query-time intent recognition + rewriting (`query/`: pluggable
 `IntentClassifier` / `QueryRewriter` protocols reusing `LLMClient`, LLM +
 rule-based implementations, lenient→strict `QueryIntent` coercion,
 `QueryProcessor` orchestration with interception policy — not yet wired to
-the web layer).
-Planned next: Distill de-dup pipeline (LSH + FAISS + threshold iteration +
-Louvain/BFS + hierarchical LLM merge, building on `find_similar_pairs` /
-the `embed` vectors + the schema lifecycle fields), an OpenAI-compatible API,
-and a `/api/v1/query` route wrapping `QueryProcessor`.
+the web layer), the end-to-end Distill de-dup pipeline (`distill/`:
+`DistillPipeline` with iterative threshold refinement + hierarchical LLM
+merge + lifecycle write-back via `status`/`parents`/`confidence`, pure stdlib
+`ClusteringBackend` (union-find) + lazy `LouvainClusteringBackend` under
+`[distill]`, reusing `find_similar_pairs` + `BlockEmbedder` + `LLMClient`
+via `BlockMerger`), and a reproducible benchmark suite (`bench/`:
+`BenchmarkRunner` comparing IdeaBlock vs a dependency-free
+`RecursiveCharSplitter` baseline over the same queries/ground truth, hit@k /
+MRR + token efficiency, zero-dependency HTML report).
+Planned next: an OpenAI-compatible API, a `/api/v1/query` route wrapping
+`QueryProcessor`, and approximate LSH+FAISS candidate reduction under a
+future `[distill]` accelerator for million-vector corpora.
 Design schema additions so the Distill lifecycle fields (`status`, `parents`,
 `confidence`, `embedding`) remain usable.
