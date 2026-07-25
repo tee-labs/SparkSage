@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from sparksage.distill.cluster import (
@@ -42,7 +43,11 @@ from sparksage.distill.cluster import (
 )
 from sparksage.distill.merge import BlockMerger
 from sparksage.embed.indexer import BlockEmbedder
-from sparksage.embed.similarity import SimilarityPair, find_similar_pairs
+from sparksage.embed.similarity import (
+    CandidateReducer,
+    SimilarityPair,
+    find_similar_pairs,
+)
 from sparksage.schema.enums import BlockStatus
 from sparksage.schema.ideablock import IdeaBlock
 
@@ -70,6 +75,13 @@ DEFAULT_MIN_CLUSTER_SIZE: int = 2
 #: then the canonical blocks are merged again -- so even a 10k-block cluster
 #: never exceeds one LLM context worth of members per call.
 DEFAULT_MAX_CLUSTER_SIZE: int = 20
+
+#: Type alias for the optional per-iteration progress callback. Invoked with a
+#: :class:`DistillProgress` snapshot at the start of each iteration and again
+#: once it completes (carrying the :class:`DistillIteration` snapshot). Used by
+#: :class:`~sparksage.distill.job.DistillJob` to surface percent / phase /
+#: iteration diagnostics to a polling client, but any callable will do.
+ProgressCallback = Callable[["DistillProgress"], None]
 
 
 # --------------------------------------------------------------------------- #
@@ -104,6 +116,51 @@ class DistillIteration:
     merge_clusters: int
     blocks_merged: int
     canonical_emitted: int
+
+
+@dataclass(frozen=True)
+class DistillProgress:
+    """Live progress snapshot emitted by :meth:`DistillPipeline.run` per iteration.
+
+    Mirrors the `{percent, phase, details}` shape a polling job client expects.
+    :class:`~sparksage.distill.job.DistillJob` translates this into its public
+    :class:`~sparksage.distill.job.JobSnapshot`, but any caller can subscribe by
+    passing ``on_progress=`` to :meth:`DistillPipeline.run`.
+
+    Attributes
+    ----------
+    iteration:
+        1-based index of the iteration this snapshot describes (``0`` before the
+        first iteration starts, ``max_iterations`` once finalized).
+    max_iterations:
+        The hard cap on rounds, so ``percent = iteration / max_iterations``.
+    threshold:
+        Similarity threshold in effect for this iteration.
+    active_blocks:
+        Number of blocks in the active set at emission time.
+    phase:
+        ``"running"`` while iterations execute, ``"done"`` once the run finishes
+        (whether it merged anything, exited early, or ran every round).
+    snapshot:
+        The fully-populated :class:`DistillIteration` when ``phase == "running"``
+        and emitted at iteration end; ``None`` for the start-of-iteration and
+        final ``"done"`` emissions.
+    """
+
+    iteration: int
+    max_iterations: int
+    threshold: float
+    active_blocks: int
+    phase: str
+    snapshot: DistillIteration | None = None
+
+    @property
+    def percent(self) -> float:
+        """Completion fraction in ``[0, 1]`` based on ``iteration / max_iterations``."""
+        if self.max_iterations <= 0:
+            return 1.0 if self.phase == "done" else 0.0
+        ratio = self.iteration / self.max_iterations
+        return 1.0 if self.phase == "done" else min(1.0, max(0.0, ratio))
 
 
 @dataclass
@@ -213,6 +270,7 @@ class DistillPipeline:
         merger: BlockMerger,
         *,
         clustering_backend: ClusteringBackend | None = None,
+        candidate_reducer: CandidateReducer | None = None,
         start_threshold: float = DEFAULT_START_THRESHOLD,
         threshold_step: float = DEFAULT_THRESHOLD_STEP,
         max_threshold: float = DEFAULT_MAX_THRESHOLD,
@@ -222,11 +280,13 @@ class DistillPipeline:
     ) -> None:
         self._embedder = embedder
         self._merger = merger
-        self._backend: ClusteringBackend = (
-            clustering_backend
-            if clustering_backend is not None
-            else ConnectedComponentsBackend()
-        )
+        self._candidate_reducer = candidate_reducer
+        if clustering_backend is not None:
+            self._backend: ClusteringBackend = clustering_backend
+        else:
+            self._backend = ConnectedComponentsBackend(
+                candidate_reducer=candidate_reducer
+            )
         self._start_threshold = self._validate_threshold(start_threshold, "start_threshold")
         self._threshold_step = self._validate_step(threshold_step)
         self._max_threshold = self._validate_threshold(max_threshold, "max_threshold")
@@ -239,6 +299,11 @@ class DistillPipeline:
         if max_cluster_size < 1:
             raise ValueError("max_cluster_size must be >= 1")
         self._max_cluster_size = int(max_cluster_size)
+
+    @property
+    def candidate_reducer(self) -> CandidateReducer | None:
+        """The candidate reducer this pipeline was built with (``None`` = brute force)."""
+        return self._candidate_reducer
 
     @staticmethod
     def _validate_threshold(value: float, name: str) -> float:
@@ -261,16 +326,52 @@ class DistillPipeline:
     # ------------------------------------------------------------------ #
     # public API
     # ------------------------------------------------------------------ #
-    def run(self, blocks: list[IdeaBlock]) -> DistillResult:
+    def run(
+        self,
+        blocks: list[IdeaBlock],
+        *,
+        on_progress: ProgressCallback | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> DistillResult:
         """Run iterative Distill de-duplication on ``blocks``.
 
         Returns a :class:`DistillResult`. The input list is *not* mutated --
         merged-away copies carry ``status=MERGED`` in ``result.merged_out``, and
         canonical/singleton survivors (all ``status=ACTIVE``) are in
         ``result.survivors``.
+
+        Parameters
+        ----------
+        on_progress:
+            Optional callback invoked with a :class:`DistillProgress` snapshot at
+            the start of each iteration (``phase="running"``, ``snapshot=None``)
+            and again once the iteration completes (carrying the
+            :class:`DistillIteration` snapshot). A final ``phase="done"`` event
+            is emitted when the run finishes. The callback is called inline from
+            the running thread, so it should be cheap (e.g. store the snapshot
+            on a shared field and let a polling client read it). Primarily used
+            by :class:`~sparksage.distill.job.DistillJob`.
+        is_cancelled:
+            Optional predicate polled at the start of each iteration; when it
+            returns ``True`` the run stops early and returns the partial result
+            computed so far (the caller -- typically
+            :class:`~sparksage.distill.job.DistillJob` -- decides how to label
+            that outcome). ``None`` (default) means the run is never cancelled.
+            Used for cooperative cancellation of long-running distill runs
+            (Python cannot kill the worker thread, so the pipeline must poll).
         """
         stats = DistillStats(input_blocks=len(blocks))
         if not blocks:
+            if on_progress is not None:
+                on_progress(
+                    DistillProgress(
+                        iteration=0,
+                        max_iterations=self._max_iterations,
+                        threshold=self._start_threshold,
+                        active_blocks=0,
+                        phase="done",
+                    )
+                )
             return DistillResult(stats=stats, reduction=0.0)
 
         active: list[IdeaBlock] = [
@@ -282,24 +383,51 @@ class DistillPipeline:
         calls_before = self._merger.merge_calls
 
         for i in range(1, self._max_iterations + 1):
+            if is_cancelled is not None and is_cancelled():
+                _logger.info(
+                    "distill cancelled before iteration %d after %d prior round(s)",
+                    i,
+                    len(stats.iterations),
+                )
+                break
             id_to_block = {str(b.id): b for b in active}
+            if on_progress is not None:
+                on_progress(
+                    DistillProgress(
+                        iteration=i,
+                        max_iterations=self._max_iterations,
+                        threshold=threshold,
+                        active_blocks=len(active),
+                        phase="running",
+                    )
+                )
             vectors = self._embedder.vectors_for(active)
-            pairs = find_similar_pairs(vectors, threshold=threshold)
+            pairs = self._pairs(vectors, threshold)
             clusters = self._backend.cluster(vectors, threshold=threshold)
 
             merge_clusters = [c for c in clusters if c.size >= self._min_cluster_size]
             if not merge_clusters:
-                stats.iterations.append(
-                    DistillIteration(
-                        iteration=i,
-                        threshold=threshold,
-                        active_blocks=len(active),
-                        candidate_pairs=len(pairs),
-                        merge_clusters=0,
-                        blocks_merged=0,
-                        canonical_emitted=0,
-                    )
+                snap = DistillIteration(
+                    iteration=i,
+                    threshold=threshold,
+                    active_blocks=len(active),
+                    candidate_pairs=len(pairs),
+                    merge_clusters=0,
+                    blocks_merged=0,
+                    canonical_emitted=0,
                 )
+                stats.iterations.append(snap)
+                if on_progress is not None:
+                    on_progress(
+                        DistillProgress(
+                            iteration=i,
+                            max_iterations=self._max_iterations,
+                            threshold=threshold,
+                            active_blocks=len(active),
+                            phase="running",
+                            snapshot=snap,
+                        )
+                    )
                 _logger.debug(
                     "distill iter %d: no cluster >= %d at threshold %.3f; stopping",
                     i,
@@ -338,17 +466,27 @@ class DistillPipeline:
             singletons = [id_to_block[mid] for mid in singleton_ids if mid in id_to_block]
             active = singletons + new_active
 
-            stats.iterations.append(
-                DistillIteration(
-                    iteration=i,
-                    threshold=threshold,
-                    active_blocks=len(id_to_block),
-                    candidate_pairs=len(pairs),
-                    merge_clusters=len(merge_clusters),
-                    blocks_merged=round_merged,
-                    canonical_emitted=len(new_active),
-                )
+            snap = DistillIteration(
+                iteration=i,
+                threshold=threshold,
+                active_blocks=len(id_to_block),
+                candidate_pairs=len(pairs),
+                merge_clusters=len(merge_clusters),
+                blocks_merged=round_merged,
+                canonical_emitted=len(new_active),
             )
+            stats.iterations.append(snap)
+            if on_progress is not None:
+                on_progress(
+                    DistillProgress(
+                        iteration=i,
+                        max_iterations=self._max_iterations,
+                        threshold=threshold,
+                        active_blocks=len(active),
+                        phase="running",
+                        snapshot=snap,
+                    )
+                )
             _logger.info(
                 "distill iter %d: threshold=%.3f pairs=%d clusters=%d merged=%d -> %d canonical",
                 i,
@@ -367,11 +505,38 @@ class DistillPipeline:
         reduction = 0.0
         if stats.input_blocks > 0:
             reduction = 1.0 - (len(active) / stats.input_blocks)
+        if on_progress is not None:
+            on_progress(
+                DistillProgress(
+                    iteration=len(stats.iterations),
+                    max_iterations=self._max_iterations,
+                    threshold=self._start_threshold,
+                    active_blocks=len(active),
+                    phase="done",
+                )
+            )
         return DistillResult(
             survivors=active,
             merged_out=merged_out,
             stats=stats,
             reduction=reduction,
+        )
+
+    def _pairs(
+        self,
+        vectors: dict[str, list[float]],
+        threshold: float,
+    ) -> list[SimilarityPair]:
+        """Find near-duplicate pairs, honouring the configured ``candidate_reducer``.
+
+        Centralised so the main loop, the clustering backend, and the
+        hierarchical merge all share one code path. The backend also receives
+        the reducer through its constructor (it builds its own pairs from
+        ``vectors``), so this helper matters for the hierarchical sub-clustering
+        calls that bypass the backend.
+        """
+        return find_similar_pairs(
+            vectors, threshold=threshold, candidate_reducer=self._candidate_reducer
         )
 
     # ------------------------------------------------------------------ #
@@ -424,7 +589,7 @@ class DistillPipeline:
                 canonicals.append(self._merger.merge_cluster(group_blocks, confidence=1.0))
             else:
                 sub_vectors = self._embedder.vectors_for(group_blocks)
-                sub_pairs = find_similar_pairs(sub_vectors, threshold=threshold)
+                sub_pairs = self._pairs(sub_vectors, threshold)
                 canonicals.append(
                     self._hierarchical_merge(
                         group_blocks, threshold, sub_pairs, depth=depth + 1
@@ -436,7 +601,7 @@ class DistillPipeline:
         if len(canonicals) <= self._max_cluster_size:
             return self._merger.merge_cluster(canonicals, confidence=1.0)
         canonical_vectors = self._embedder.vectors_for(canonicals)
-        canonical_pairs = find_similar_pairs(canonical_vectors, threshold=threshold)
+        canonical_pairs = self._pairs(canonical_vectors, threshold)
         return self._hierarchical_merge(
             canonicals, threshold, canonical_pairs, depth=depth + 1
         )
@@ -451,6 +616,8 @@ __all__ = [
     "DEFAULT_THRESHOLD_STEP",
     "DistillIteration",
     "DistillPipeline",
+    "DistillProgress",
     "DistillResult",
     "DistillStats",
+    "ProgressCallback",
 ]

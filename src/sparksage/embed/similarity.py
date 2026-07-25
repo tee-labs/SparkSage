@@ -10,9 +10,12 @@ schema's ``parents`` / ``status`` / ``confidence`` lifecycle fields).
 
 Like :class:`~sparksage.embed.store.InMemoryVectorStore`, this is pure Python
 (no ``numpy`` / ``faiss``) -- ``O(n^2 * d)`` is fine for thousands of blocks.
-For million-vector corpora the planned approximate index under ``[distill]``
-(LSH candidate reduction + FAISS kNN) takes over; until then this exact
-brute-force version keeps the core unit-testable with
+For million-vector corpora an approximate candidate reducer (e.g. the LSH
+reducer shipped under ``[distill]`` in :mod:`sparksage.distill.lsh`) takes
+over: it cheaply proposes a small set of *candidate* pairs, which
+:func:`find_similar_pairs` then verifies with exact dot products. Pass any
+object implementing :class:`CandidateReducer` as ``candidate_reducer=`` -- the
+exact brute-force path stays the default so the core stays unit-testable with
 :class:`~sparksage.embed.client.FakeEmbeddingClient` and zero dependencies.
 
 Vectors are assumed L2-normalized (every
@@ -22,17 +25,49 @@ store relies on. Feed it the ``{block_id: vector}`` mapping returned by
 :meth:`~sparksage.embed.indexer.BlockEmbedder.vectors_for` (or
 :meth:`~sparksage.embed.store.InMemoryVectorStore.vectors` from a persisted
 store); clustering itself (connected components / Louvain) is intentionally
-left to the future ``distill/`` package -- this module stops at the pair list.
+left to the ``distill/`` package -- this module stops at the pair list.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
 
 
 def _dot(a: list[float], b: list[float]) -> float:
     """Pure-Python dot product (no numpy needed)."""
     return sum(x * y for x, y in zip(a, b, strict=True))
+
+
+@runtime_checkable
+class CandidateReducer(Protocol):
+    """Cheap proposer of *candidate* near-duplicate id pairs.
+
+    Implementations (e.g. :class:`~sparksage.distill.lsh.LSHCandidateReducer`)
+    trade exactness for speed: instead of the ``O(n²·d)`` all-pairs scan they
+    project vectors into hash buckets and only emit pairs that collide in at
+    least one bucket. :func:`find_similar_pairs` still does the *exact* dot
+    product on every candidate, so a reducer can only *drop* true duplicates
+    (lowering recall), never invent false positives (precision stays 1.0).
+
+    The protocol deliberately takes no ``threshold``: threshold tuning lives
+    on the verification side; the reducer's job is purely to pre-filter the
+    comparison set.
+    """
+
+    def candidate_pairs(
+        self,
+        vectors: dict[str, list[float]],
+    ) -> Iterator[tuple[str, str]]:
+        """Yield unordered ``(a, b)`` id pairs that *might* be near-duplicates.
+
+        Each pair MUST be yielded with ``a <= b`` lexicographically so dedup is
+        straightforward. Pairs whose ids are unknown to ``vectors`` are
+        silently skipped by the verifier. Duplicates across calls/yields are
+        allowed -- :func:`find_similar_pairs` dedupes internally.
+        """
+        ...
 
 
 @dataclass(frozen=True)
@@ -62,6 +97,7 @@ def find_similar_pairs(
     *,
     threshold: float = 0.5,
     top_k: int | None = None,
+    candidate_reducer: CandidateReducer | None = None,
 ) -> list[SimilarityPair]:
     """Return all near-duplicate block pairs whose similarity >= ``threshold``.
 
@@ -87,6 +123,14 @@ def find_similar_pairs(
     top_k:
         If given, return only the ``top_k`` highest-scoring pairs (after the
         ``threshold`` filter). ``None`` returns every pair above threshold.
+    candidate_reducer:
+        Optional :class:`CandidateReducer` used to pre-filter the comparison
+        set for million-vector corpora. When supplied, only the emitted
+        candidate pairs are *verified* with exact dot products (the rest are
+        assumed to be below ``threshold``). ``None`` (default) runs the exact
+        ``O(n²·d)`` all-pairs scan. Precision is always 1.0: a reducer can
+        only drop true positives (lowering recall), never introduce false
+        positives, because every returned pair is still exact-verified.
 
     Returns
     -------
@@ -142,6 +186,23 @@ def find_similar_pairs(
 
     assert dimension is not None  # narrowed: len(ids) >= 2 implies >= 1 entry
 
+    if candidate_reducer is not None:
+        pairs = _verify_candidates(vectors, candidate_reducer.candidate_pairs(vectors), threshold)
+    else:
+        pairs = _brute_force_pairs(vectors, ids, threshold)
+
+    pairs.sort(key=lambda p: (-p.score, p.a, p.b))
+    if top_k is not None:
+        pairs = pairs[:top_k]
+    return pairs
+
+
+def _brute_force_pairs(
+    vectors: dict[str, list[float]],
+    ids: list[str],
+    threshold: float,
+) -> list[SimilarityPair]:
+    """Exact all-pairs scan -- the default ``O(n²·d)`` path."""
     pairs: list[SimilarityPair] = []
     n = len(ids)
     for i in range(n):
@@ -153,8 +214,33 @@ def find_similar_pairs(
             if score >= threshold:
                 a, b = (id_i, id_j) if id_i <= id_j else (id_j, id_i)
                 pairs.append(SimilarityPair(a=a, b=b, score=score))
+    return pairs
 
-    pairs.sort(key=lambda p: (-p.score, p.a, p.b))
-    if top_k is not None:
-        pairs = pairs[:top_k]
+
+def _verify_candidates(
+    vectors: dict[str, list[float]],
+    candidates: Iterable[tuple[str, str]],
+    threshold: float,
+) -> list[SimilarityPair]:
+    """Exact-verify a candidate stream and keep those whose dot product clears ``threshold``.
+
+    Precision stays 1.0 -- only real dot products are emitted -- but recall
+    depends entirely on the candidate generator. Pairs whose ids are not in
+    ``vectors`` are skipped, and each unordered pair is verified at most once
+    (the candidate stream may yield duplicates across hash tables).
+    """
+    seen: set[tuple[str, str]] = set()
+    pairs: list[SimilarityPair] = []
+    for a, b in candidates:
+        if a > b:
+            a, b = b, a
+        key = (a, b)
+        if key in seen:
+            continue
+        seen.add(key)
+        if a not in vectors or b not in vectors:
+            continue
+        score = _dot(vectors[a], vectors[b])
+        if score >= threshold:
+            pairs.append(SimilarityPair(a=a, b=b, score=score))
     return pairs

@@ -101,11 +101,15 @@ PYTHONPATH=src python3 examples/build_chunks.py
   `search`: brute-force exact `O(n²·d)` dot products over `vectors_for` /
   `InMemoryVectorStore.vectors` output, returning `SimilarityPair`s (ids
   normalized so `a <= b`; each unordered pair once; sorted by score desc then
-  `(a, b)` for determinism) at or above a `[0, 1]` threshold. This is the
-  first, dependency-free step of the Distill pipeline (clustering /
-  Louvain / LLM-merge live in the `distill/` package, where approximate
-  LSH+FAISS candidate reduction will earn its weight at million-vector scale
-  under a future `[distill]` accelerator).
+  `(a, b)` for determinism) at or above a `[0, 1]` threshold. For million-vector
+  corpora pass a `CandidateReducer` (`candidate_reducer=` kwarg): it cheaply
+  proposes a small set of *candidate* pairs (e.g. via LSH bucketing) and
+  `find_similar_pairs` still does the exact dot-product verification, so
+  **precision stays 1.0** — a reducer can only drop true duplicates (lowering
+  recall), never invent false positives. This is the dependency-free step of the
+  Distill pipeline; clustering / Louvain / LLM-merge live in the `distill/`
+  package, where the pure-stdlib `LSHCandidateReducer` (random-hyperplane LSH)
+  accelerates the scan at million-vector scale under the `[distill]` extra.
 - The Distill de-dup core (`distill/`) depends only on three protocols — the
   existing `EmbeddingClient` (via `BlockEmbedder`), the existing `LLMClient`
   (via `BlockMerger`), and a new `ClusteringBackend` (`cluster.py`) — never
@@ -114,7 +118,9 @@ PYTHONPATH=src python3 examples/build_chunks.py
   `find_similar_pairs` output); `LouvainClusteringBackend` is an optional
   dependency (`pip install 'sparksage[distill]'`), imported lazily only inside
   itself and auto-selected via `select_clustering_backend` only for corpora ≥
-  `LOUVAIN_THRESHOLD` (1000). `partition_by_strongest_edges` powers the
+  `LOUVAIN_THRESHOLD` (1000). Both backends accept a `candidate_reducer=`
+  (forwarded to `find_similar_pairs`) so a million-vector corpus can skip the
+  `O(n²·d)` all-pairs scan. `partition_by_strongest_edges` powers the
   hierarchical merge: a cluster larger than the per-call budget is recursively
   split by its strongest intra-cluster edges (union-find until `~sqrt(N)*2`
   groups remain, with an even-slice fallback so the group count is *always* ≤
@@ -128,9 +134,44 @@ PYTHONPATH=src python3 examples/build_chunks.py
   near-duplicate *chains* collapse, with lifecycle write-back through the
   schema's existing fields (merged-away → `status=MERGED`; canonical →
   `status=ACTIVE`, `parents` = merged UUIDs, `confidence` = cluster mean
-  similarity). `BlockMerger.merge_calls` / `.fallbacks` counters feed
-  `DistillStats`; non-strict mode (default) falls back to promoting a member
-  on a bad LLM output rather than aborting a large run.
+  similarity). It accepts an optional `candidate_reducer=` (plumbed into both
+  the default backend and the hierarchical sub-cluster pair scan) and emits
+  `DistillProgress` snapshots via an `on_progress=` callback (called inline from
+  the worker thread at each iteration boundary; also polls an `is_cancelled=`
+  predicate for cooperative cancellation). `BlockMerger.merge_calls` /
+  `.fallbacks` counters feed `DistillStats`; non-strict mode (default) falls
+  back to promoting a member on a bad LLM output rather than aborting a large
+  run.
+- The LSH candidate reducer (`distill/lsh.py`) is the `[distill]` accelerator
+  for million-vector dedup. `LSHCandidateReducer` implements the
+  `embed.similarity.CandidateReducer` protocol with random-hyperplane LSH:
+  pure stdlib (Gaussian hyperplanes via `random.Random`, sign-of-dot-product
+  hashing, no `numpy`), so it stays fully unit-testable offline like the rest
+  of the core. Defaults (`num_hyperplanes=6`, `num_tables=20`, `seed=42`) give
+  ~89% recall at cosine 0.55 (the Distill start) and 97%+ across the tightened
+  regime; `theoretical_recall(s)` is the closed-form recall curve for tuning.
+  `select_candidate_reducer` auto-enables it only for corpora ≥
+  `LSH_ACTIVATION_THRESHOLD` (5000) — below that the exact brute force wins.
+  Precision is always 1.0 because `find_similar_pairs` exact-verifies every
+  candidate via dot product.
+- The async Distill job layer (`distill/job.py`) wraps `DistillPipeline` in a
+  pollable state machine (`DistillJob`: `queued → running → success | failed |
+  timeout | cancelled`) for long-running dedup runs (minutes on 10k blocks,
+  hours on a million). It depends only on the existing pipeline plus stdlib
+  (`threading`, `asyncio`) — never import a job queue or task framework there.
+  `run_sync()` drives the pipeline in the caller thread; `start()` runs it in a
+  worker thread via `asyncio.to_thread` (the blocking LLM/embedding I/O stays
+  off the event loop), with optional `timeout=`. The pipeline's `on_progress`
+  callback (invoked from the worker) updates a lock-protected `JobSnapshot`
+  (percent / phase / iteration / threshold / active_blocks / candidate_pairs /
+  ...); `cancel()` flips a cooperative predicate the pipeline polls at iteration
+  boundaries, so cancelled/timed-out runs wind down promptly (Python cannot kill
+  the worker thread, so cancellation is cooperative — the partial result is
+  retained on the snapshot). `JobManager` is the in-process registry a future
+  `/api/v1/distill` route will wrap: `submit()` returns immediately (autostarts
+  in a background thread / loop task), `snapshot(id)` backs `GET /jobs/{id}`,
+  `wait_for(id)` / `gather(ids)` back long-poll / batch flush. Intentionally
+  in-process so the layer stays unit-testable with the deterministic fakes.
 - The benchmark core (`bench/`) depends only on the existing `BlockEmbedder`
   and `InMemoryVectorStore` — never import LangChain, a metric library, or a
   template engine there. `RecursiveCharSplitter` (`baselines.py`) is a
@@ -219,7 +260,8 @@ batching + concurrency as an optional dep; in-memory retrieval via a
 `VectorStore` Protocol + brute-force `InMemoryVectorStore` kNN (pure stdlib,
 consumes `vectors_for`), `save_store`/`load_store` JSON persistence so
 embeddings survive restarts, and `find_similar_pairs` all-pairs near-duplicate
-detection (pure stdlib, the first dependency-free step of Distill)), a WEB API
+detection (pure stdlib, the first dependency-free step of Distill, now with a
+pluggable `CandidateReducer` Protocol for million-vector corpora)), a WEB API
 (`api/`: framework-agnostic `SparkSageService` orchestration + FastAPI app
 factory exposing `/api/v1/convert` and `/api/v1/generate`), `.env`-based
 configuration (`config.py`: zero-dependency loader, env vars override the
@@ -232,12 +274,19 @@ the web layer), the end-to-end Distill de-dup pipeline (`distill/`:
 merge + lifecycle write-back via `status`/`parents`/`confidence`, pure stdlib
 `ClusteringBackend` (union-find) + lazy `LouvainClusteringBackend` under
 `[distill]`, reusing `find_similar_pairs` + `BlockEmbedder` + `LLMClient`
-via `BlockMerger`), and a reproducible benchmark suite (`bench/`:
+via `BlockMerger`; the pure-stdlib `LSHCandidateReducer` (random-hyperplane
+LSH) accelerates the pair scan at million-vector scale while keeping
+precision 1.0, auto-enabled via `select_candidate_reducer` for corpora ≥ 5000;
+the async job layer (`DistillJob` / `JobManager`) wraps the pipeline in a
+pollable `queued → running → success | failed | timeout | cancelled` state
+machine with progress callbacks + cooperative cancellation, ready for a
+future `/api/v1/distill` route), and a reproducible benchmark suite (`bench/`:
 `BenchmarkRunner` comparing IdeaBlock vs a dependency-free
 `RecursiveCharSplitter` baseline over the same queries/ground truth, hit@k /
 MRR + token efficiency, zero-dependency HTML report).
 Planned next: an OpenAI-compatible API, a `/api/v1/query` route wrapping
-`QueryProcessor`, and approximate LSH+FAISS candidate reduction under a
-future `[distill]` accelerator for million-vector corpora.
+`QueryProcessor`, a `/api/v1/distill` route wrapping `JobManager`, and a
+FAISS-backed `VectorStore` under a future `[distill]` accelerator for
+million-vector corpora.
 Design schema additions so the Distill lifecycle fields (`status`, `parents`,
 `confidence`, `embedding`) remain usable.
