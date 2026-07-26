@@ -1,0 +1,92 @@
+"""Hybrid retrieval + rank fusion + re-ranking for RAG.
+
+This is the retrieval-orchestration layer that consumes the vectors / keywords
+the ingest side has been producing and returns ranked chunks ready to feed a
+reader. It closes the "single-stage pure-vector" gap and finally wires up the
+three IdeaBlock fields that were *designed but unconsumed*:
+
+* ``keywords``  -> :class:`BM25Retriever` (lexical recall boosting).
+* ``tags`` / ``entities`` / ``language`` / ``kb_id`` -> :class:`RetrievalFilter`
+  (multi-tenant metadata scoping).
+* ``source.locator`` -> :class:`RetrievedChunk.to_citation` (grounded
+  citations, consumed by :mod:`sparksage.reader`).
+
+Everything depends only on protocols (:class:`~sparksage.embed.store.VectorStore`,
+:class:`~sparksage.embed.indexer.BlockEmbedder`, :class:`LexicalRetriever`,
+:class:`Reranker`) -- so the core is fully unit-testable with
+:class:`~sparksage.embed.FakeEmbeddingClient` and zero network calls.
+
+Pipeline::
+
+    query
+        -> dense (VectorStore kNN over embedding_text)
+        -> lexical (BM25Retriever over keywords + answer)   [optional]
+        -> reciprocal rank fusion                           [when >1 leg]
+        -> RetrievalFilter scoping (tags / entities / ...)
+        -> re-rank (LLMReranker)                             [optional]
+        -> top-k RetrievedChunk list
+
+Example
+-------
+::
+
+    from sparksage import BlockEmbedder, FakeEmbeddingClient, InMemoryVectorStore
+    from sparksage.retrieve import BM25Retriever, Retriever
+
+    store = InMemoryVectorStore(dimension=64)
+    retriever = Retriever(
+        registry=registry,
+        store=store,
+        embedder=BlockEmbedder(FakeEmbeddingClient(dimension=64)),
+        lexical=BM25Retriever(),
+    )
+    retriever.index(blocks)
+    result = retriever.search("how to deploy", k=5)
+"""
+
+from sparksage.retrieve.fusion import DEFAULT_RRF_K, reciprocal_rank_fusion
+from sparksage.retrieve.lexical import (
+    DEFAULT_B,
+    DEFAULT_K1,
+    KEYWORD_WEIGHT,
+    BM25Retriever,
+    LexicalRetriever,
+    NullLexicalRetriever,
+    tokenize,
+)
+from sparksage.retrieve.models import (
+    Citation,
+    RetrievalFilter,
+    RetrievalResult,
+    RetrievedChunk,
+)
+from sparksage.retrieve.orchestrator import (
+    DEFAULT_FETCH_FACTOR,
+    DEFAULT_MIN_FETCH,
+    RetrievalConfig,
+    Retriever,
+)
+from sparksage.retrieve.reranker import IdentityReranker, LLMReranker, Reranker
+
+__all__ = [
+    "BM25Retriever",
+    "Citation",
+    "DEFAULT_B",
+    "DEFAULT_FETCH_FACTOR",
+    "DEFAULT_K1",
+    "DEFAULT_MIN_FETCH",
+    "DEFAULT_RRF_K",
+    "IdentityReranker",
+    "KEYWORD_WEIGHT",
+    "LLMReranker",
+    "LexicalRetriever",
+    "NullLexicalRetriever",
+    "Reranker",
+    "RetrievedChunk",
+    "RetrievalConfig",
+    "RetrievalFilter",
+    "RetrievalResult",
+    "Retriever",
+    "reciprocal_rank_fusion",
+    "tokenize",
+]

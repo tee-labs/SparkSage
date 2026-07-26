@@ -106,6 +106,16 @@ class IdeaBlock(BaseModel):
     author: str | None = Field(default=None, description="Who created/verified it.")
     version: int = Field(default=1, ge=1, description="Monotonic content version.")
 
+    # --- knowledge-base membership (multi-tenant scoping) ----------------- #
+    kb_id: str | None = Field(
+        default=None,
+        description=(
+            "Knowledge-base id this block belongs to (see sparksage.kb). "
+            "Optional and additive -- ``None`` for legacy / standalone blocks. "
+            "Used by RetrievalFilter for multi-tenant scoping."
+        ),
+    )
+
     # --- lifecycle / distill bookkeeping -----------------------------------
     status: BlockStatus = Field(
         default=BlockStatus.DRAFT,
@@ -260,4 +270,5 @@ class IdeaBlock(BaseModel):
             "version": self.version,
             "source_uri": self.source.uri if self.source else None,
             "parents": [str(p) for p in self.parents],
+            "kb_id": self.kb_id,
         }

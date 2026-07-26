@@ -38,6 +38,13 @@ Example
         show(result.default_reply)
 """
 
+from sparksage.query.cache import (
+    DEFAULT_CACHE_THRESHOLD,
+    DEFAULT_MAX_ENTRIES,
+    CacheStats,
+    InMemorySemanticCache,
+    semantic_cache_stats,
+)
 from sparksage.query.classifier import (
     IntentClassifier,
     IntentEmptyResponseError,
@@ -54,6 +61,12 @@ from sparksage.query.context import (
     USER,
     ConversationContext,
     ConversationTurn,
+)
+from sparksage.query.expander import (
+    DEFAULT_N_VARIANTS,
+    IdentityExpander,
+    LLMQueryExpander,
+    QueryExpander,
 )
 from sparksage.query.processor import (
     DEFAULT_DEFAULT_REPLY,
@@ -99,15 +112,21 @@ from sparksage.query.schema import (
 
 __all__ = [
     "ASSISTANT",
+    "CacheStats",
+    "DEFAULT_CACHE_THRESHOLD",
     "DEFAULT_CONFIDENCE",
     "DEFAULT_DEFAULT_REPLY",
     "DEFAULT_INTENT",
+    "DEFAULT_MAX_ENTRIES",
     "DEFAULT_MIN_CONFIDENCE",
+    "DEFAULT_N_VARIANTS",
     "DEFAULT_REJECTED_INTENTS",
     "CallableRewriteRule",
     "CoercionError",
     "ConversationContext",
     "ConversationTurn",
+    "IdentityExpander",
+    "InMemorySemanticCache",
     "IntentClassifier",
     "IntentEmptyResponseError",
     "IntentError",
@@ -116,7 +135,9 @@ __all__ = [
     "IntentRule",
     "KeywordIntentRule",
     "LLMIntentClassifier",
+    "LLMQueryExpander",
     "LLMQueryRewriter",
+    "QueryExpander",
     "QueryProcessor",
     "QueryResult",
     "QueryRewriter",
@@ -144,4 +165,5 @@ __all__ = [
     "rewrite_messages",
     "rewrite_system_prompt",
     "rewrite_user_prompt",
+    "semantic_cache_stats",
 ]
