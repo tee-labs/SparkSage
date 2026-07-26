@@ -304,6 +304,94 @@ PYTHONPATH=src python3 examples/build_chunks.py
   deliberately omits `from __future__ import annotations` so FastAPI can
   resolve the lazily-imported route-parameter types (`UploadFile`/`File`/`Form`)
   via eager annotation evaluation.
+- The retrieval core (`retrieve/`) is the query-side counterpart of the ingest
+  pipeline and the layer that finally *consumes* the three "designed but
+  unconsumed" IdeaBlock fields. It depends only on the existing `VectorStore`
+  / `BlockEmbedder` protocols plus two new ones (`LexicalRetriever`,
+  `Reranker`) — never import a search engine or a rerank SDK in the core.
+  `BM25Retriever` (`lexical.py`, pure stdlib) is the sparse half of hybrid
+  search: each block becomes a BM25 document whose token bag weights the
+  curated `keywords` field (the field the schema documents as "for BM25 /
+  lexical recall boosting") plus the answer/question/name text; CJK is
+  tokenized into unigrams + overlapping bigrams (dictionary-free, like the
+  `tags` tokenizer). `reciprocal_rank_fusion` (`fusion.py`) is the
+  score-free RRF merge of dense + lexical (or multi-query) ranked lists. The
+  `Reranker` protocol (`reranker.py`) ships an `LLMReranker` (reuses the
+  existing `LLMClient`, lenient→strict index-list coercion, identity fallback
+  on a bad response) and an `IdentityReranker` no-op. `Retriever`
+  (`orchestrator.py`) wires it together: dense (kNN) + optional lexical →
+  RRF fuse → `RetrievalFilter` post-filter (`tags`/`entities`/`language`/
+  `kb_id`/`block_ids`, applied against a block registry since the store is
+  text-agnostic) → optional rerank → top-k `RetrievedChunk`s. `RetrievedChunk`
+  / `Citation` (`models.py`) surface `source.uri` + `source.locator` — the
+  provenance the reader grounds citations in. The filter is a *post-filter*
+  over an over-fetched dense pool (the store is deliberately text-agnostic);
+  swap in a backend with native metadata filtering for exact filtered kNN.
+- The reader core (`reader/`) is the answer-generation stage — the missing
+  "right half" of the QA pipeline. It depends only on two new protocols,
+  `AnswerGenerator` and `FaithfulnessJudge`, both reusing the existing
+  `LLMClient` (never invent a new LLM abstraction there). `LLMAnswerGenerator`
+  (`generator.py`) feeds the model each candidate's `critical_question` +
+  `trusted_answer` (the IdeaBlock QA-alignment dividend) and emits a JSON
+  answer with citations referencing block ids; the lenient→strict coercion
+  (`schema.py`, mirroring `query/schema.py`) binds those ids to the schema's
+  `source.uri`/`source.locator` and *drops hallucinated* ids not in the
+  retrieved set. `LLMFaithfulnessJudge` (`faithfulness.py`) scores how well
+  the answer is supported (LLM-as-judge, degrades to a default on a bad
+  response). `Reader` (`orchestrator.py`) runs generate → (judge) → abstain:
+  below `min_faithfulness` or `min_confidence` it returns the abstention
+  reply instead of hallucinating — the symmetric answer-side gate to
+  `QueryProcessor`'s query-side `min_confidence`.
+- The QA engine (`qa/`) is the framework-agnostic orchestrator that finally
+  makes SparkSage an end-to-end question-answering core. `QAEngine`
+  (`engine.py`) wires query → retrieval → answer with no business logic of its
+  own — every stage is a swappable protocol (`QueryProcessor` / `QueryExpander`
+  / `Retriever` / `Reader` / `QACache`, all optional). It consumes the
+  rewriter's `sub_queries` (COMPARISON / multi-hop decomposition) and the
+  expander's variants via the same RRF-fused multi-retrieve path. An optional
+  `QACache` (a `lookup`/`store` protocol the `query.SemanticCache` implements)
+  short-circuits the whole pipeline for near-duplicate repeat queries. Not yet
+  wired to the web layer — a future `/api/v1/query` route will be a thin
+  wrapper around `QAEngine.ask`, exactly as `SparkSageService` wraps ingest.
+- The knowledge-base core (`kb/`) is the multi-tenant aggregate root — the
+  organizational entity the flat `documents/DocumentStore` lacked. `KnowledgeBase`
+  (`knowledge_base.py`) owns documents + their IdeaBlocks + a dense `VectorStore`
+  + a `BM25Retriever` + a `Retriever`, and crucially the **consistency**
+  between them: `add_blocks` stamps `kb_id` and embeds+indexes; `remove_document`
+  cascades to block vectors + registry (index↔storage consistency guarantee);
+  `update_document` is an incremental re-index only when `content_hash` changed
+  (hash-aware change detection); `reindex` rebuilds both indexes from the live
+  registry (drift recovery). Each block carries an optional additive `kb_id`
+  (`schema/ideablock.py`) so `RetrievalFilter` can scope retrieval to one KB.
+  `KnowledgeBaseInfo` (`models.py`) is the serializable metadata; the
+  `KnowledgeBaseStore` Protocol + `InMemoryKnowledgeBaseStore` (`store.py`) is
+  the multi-tenant registry — live vector state stays on the aggregate.
+- The query enhancements (`query/expander.py` + `query/cache.py`) extend query
+  understanding with multi-query expansion and a semantic cache. The
+  `QueryExpander` protocol ships an `LLMQueryExpander` (n paraphrase variants
+  for RRF-fused recall, lenient→strict, identity fallback) and an
+  `IdentityExpander` no-op. `InMemorySemanticCache` (`cache.py`, pure stdlib)
+  keys on query *meaning* via an `EmbeddingClient` (cosine ≥ threshold) and
+  implements the `QACache` protocol structurally — the biggest cost lever,
+  since the LLM calls dominate. Both are optional knobs on `QAEngine`.
+- The feedback core (`feedback/`) closes the query→ingest loop (the Phase-4
+  flywheel). `FeedbackRecord` (`models.py`, Pydantic v2, `extra="forbid"`,
+  closed `FeedbackRating` enum) captures the user's verdict on a surfaced
+  answer (positive / negative / corrected) plus optional correction and the
+  backing block ids. The `FeedbackStore` Protocol + `InMemoryFeedbackStore`
+  (`store.py`) persist + aggregate (approval ratio, per-block breakdown).
+  `extract_healing_signals` (`healing.py`, pure stdlib) turns the aggregate
+  back into ingest actions: repeated low-recall queries flag a coverage gap
+  (re-chunk / new content); blocks with a high bad-feedback ratio become split
+  candidates (the inverse of the Distill *merge*).
+- The evaluation core (`eval/`) is the answer-correctness counterpart of
+  `bench/` (which scores retrieval alone). `QAEvaluator` (`evaluator.py`) runs
+  a `QAEngine` over a `QATestCase` set and rolls per-case outcomes into a
+  `QAEvalReport`: mean answer correctness, abstention rate, retrieval hit@k
+  (reuses `bench.evaluate_retrieval` for comparability), mean faithfulness.
+  Correctness is a pluggable `CorrectnessJudge`: the default `TokenOverlapJudge`
+  is dependency-free token-F1 (fully offline); `LLMCorrectnessJudge` swaps in
+  (reuses `LLMClient`, token-F1 fallback on a bad response).
 
 ## Roadmap context
 
@@ -360,8 +448,30 @@ pure-stdlib `InMemoryDocumentStore` + durable `SqliteDocumentStore` (stdlib
 `SparkSageService.ingest_document` → convert → clean → auto-tag → summarize →
 store, with CRUD + `retag_document` + tag vocabulary, exposed as
 `/api/v1/documents` (POST/GET/PATCH/DELETE) and `/api/v1/tags` routes —
-`SPARKSAGE_DOC_STORE` opts into durable SQLite storage; all LLM-free).
+`SPARKSAGE_DOC_STORE` opts into durable SQLite storage; all LLM-free), and the
+full query-side "right half" that turns SparkSage into an end-to-end QA core:
+hybrid retrieval (`retrieve/`: pure-stdlib `BM25Retriever` over the curated
+`keywords` field + dense kNN, `reciprocal_rank_fusion`, `LLMReranker` +
+`IdentityReranker`, `Retriever` orchestrator with `RetrievalFilter`
+tag/entity/language/kb_id scoping and `RetrievedChunk`/`Citation` provenance),
+answer generation (`reader/`: `LLMAnswerGenerator` over the QA-aligned
+`critical_question`+`trusted_answer` context with citation binding to
+`source.locator`, `LLMFaithfulnessJudge`, `Reader` with abstention gate), an
+end-to-end `QAEngine` (`qa/`: query → retrieval → answer, multi-query /
+sub-query RRF-fused retrieval, optional `QACache`), the multi-tenant
+`KnowledgeBase` aggregate root (`kb/`: documents + blocks + consistent dense
++ lexical index, hash-aware `update_document`, `reindex`, `kb_id` scoping,
+`KnowledgeBaseStore` registry), query enhancements (`query/expander.py`
+multi-query expansion + `query/cache.py` embedding-keyed `SemanticCache`),
+the feedback flywheel (`feedback/`: `FeedbackRecord` + `FeedbackStore` +
+`extract_healing_signals` for coverage-gap / split-candidate signals back to
+ingest), and answer-correctness evaluation (`eval/`: `QAEvaluator` over a
+`QATestCase` set, pluggable `TokenOverlapJudge` / `LLMCorrectnessJudge`,
+reusing `bench.evaluate_retrieval` for the retrieval metric). The three
+previously "designed but unconsumed" IdeaBlock fields (`keywords`,
+`entities`/`tags`, `source.locator`) are now all wired into retrieval /
+filtering / citations.
 Planned next: an OpenAI-compatible API, a `/api/v1/query` route wrapping
-`QueryProcessor`, and a `/api/v1/distill` route wrapping `JobManager`.
+`QAEngine`, and a `/api/v1/distill` route wrapping `JobManager`.
 Design schema additions so the Distill lifecycle fields (`status`, `parents`,
 `confidence`, `embedding`) remain usable.
