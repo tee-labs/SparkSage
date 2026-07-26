@@ -63,6 +63,9 @@ chroma = [
 pgvector = [
     "psycopg[binary]>=3.1",
 ]
+tags-zh = [
+    "jieba>=0.42",
+]
 
 [project.urls]
 Homepage = "https://github.com/tee-labs/SparkSage"

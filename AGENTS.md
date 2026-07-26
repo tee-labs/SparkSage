@@ -206,20 +206,6 @@ PYTHONPATH=src python3 examples/build_chunks.py
   the "prove the ROI on your own data" artifact. The comparison is fair by
   construction: same embedder, same queries, same ground truth — only the
   chunking strategy differs.
-- The API orchestration core (`api/pipeline.py` → `SparkSageService`) is
-  framework-agnostic — never import FastAPI or any web framework there. It wires
-  the existing `MarkdownConverter` / `TextCleaner` / `IdeaBlockGenerator` together
-  and owns only temp-file management for uploaded bytes (the converter backends
-  detect format from the file *extension*, so the temp file must carry the
-  original extension; provenance is swapped back to the original filename via
-  `dataclasses.replace`). FastAPI is an optional dependency (`pip install
-  'sparksage[api]'`), imported lazily only inside `api/app.py:create_app`.
-  `create_app(service=...)` accepts an injected service (for tests); when omitted
-  it builds one from env vars (`SPARKSAGE_API_KEY` / `OPENAI_API_KEY`). If no API
-  key is set, `/generate` returns `503` while `/convert` works LLM-free. Note:
-  `app.py` deliberately omits `from __future__ import annotations` so FastAPI can
-  resolve the lazily-imported route-parameter types (`UploadFile`/`File`/`Form`)
-  via eager annotation evaluation.
 - Configuration (`config.py`) is pure stdlib — never import `python-dotenv` or
   any env-loading library. `load_dotenv()` is called once at the top of
   `build_default_service()`; it reads `.env` from the CWD but **real env vars
@@ -261,6 +247,63 @@ PYTHONPATH=src python3 examples/build_chunks.py
   This is **not** wired to the web layer yet — a future `/api/v1/query` route
   will be a thin wrapper, mirroring how `SparkSageService` wraps the ingest
   pipeline.
+- The keyword-extraction core (`tags/`) is the dependency-free auto-tagging
+  engine: when a document arrives without tags, a `KeywordExtractor` derives
+  them from the content using classic algorithms — `RakeKeywordExtractor`,
+  `TfidfKeywordExtractor`, `TextRankKeywordExtractor` (all pure stdlib).
+  It depends only on the `Tokenizer` Protocol (`tokenizer.py`) and the stop-word
+  sets in `stoplist.py` — never import `jieba`, NLTK, or spaCy there. CJK works
+  out of the box via the dictionary-free `CharBigramTokenizer` (overlapping
+  character bigrams carry strong topical signal); word-level Mandarin
+  segmentation is the optional `JiebaTokenizer` (`pip install
+  'sparksage[tags-zh]'`), imported lazily inside its `__init__` like every other
+  optional SDK. `AutoTokenizer` inspects the text and routes CJK → bigrams,
+  Latin → whitespace, and is the default tokenizer of every extractor. Tags are
+  **free-form** (`KeywordScore.keyword` → `list[str]` on the document) —
+  intentionally *not* the closed `Tag` enum, which keeps its coarse-grained
+  semantic-filtering role. `make_extractor("rake"|"tfidf"|"textrank")` is the
+  config-driven factory (unknown names fail fast).
+- The document-management core (`documents/`) is the document-level counterpart
+  of `schema/` — there was no *document* object, only chunk-level
+  `IdeaBlock`s. `DocumentRecord` (`models.py`, Pydantic v2, `extra="forbid"`)
+  carries `title` / `summary` / `body_markdown` / free-form `tags: list[str]`
+  / `SourceRef` provenance / timestamps / `content_hash`; tags are de-duplicated
+  and stripped on validation. The storage layer depends only on the
+  `DocumentStore` Protocol (`store.py`: `save`/`get`/`list`/`delete`/`count`/
+  `list_tags`/`__contains__`/`__len__`) — never import `sqlite3`-specific SQL in
+  the core. `InMemoryDocumentStore` (`backends/memory.py`) is pure stdlib
+  (dict-backed, defensive copies on read/write); `SqliteDocumentStore`
+  (`backends/sqlite.py`, also stdlib `sqlite3`, no server) owns a `documents`
+  table + a `<table>_tags` junction table for exact-match tag filtering, opened
+  `check_same_thread=False` behind a `threading.Lock` (safe across the FastAPI
+  threadpool), table name regex-validated since it can't be SQL-parameterized.
+  `ExtractiveSummarizer` (`summarizer.py`) produces the document-level summary:
+  frequency-scored sentences returned in original order, Markdown heading /
+  emphasis markers stripped — depends only on the same `Tokenizer` Protocol.
+- The API orchestration core (`api/pipeline.py` → `SparkSageService`) is
+  framework-agnostic — never import FastAPI or any web framework there. It wires
+  the existing `MarkdownConverter` / `TextCleaner` / `IdeaBlockGenerator` together
+  and owns only temp-file management for uploaded bytes (the converter backends
+  detect format from the file *extension*, so the temp file must carry the
+  original extension; provenance is swapped back to the original filename via
+  `dataclasses.replace`). It now also owns document management: optional
+  `document_store` (lazily an `InMemoryDocumentStore` so ingest works with zero
+  config), `keyword_extractor` (lazily RAKE), and `summarizer` (lazily
+  extractive) constructor params; `ingest_document` runs convert → clean →
+  (auto-tag when no tags) → (extractive summary) → store, and `list_documents`
+  / `get_document` / `update_document` / `delete_document` / `retag_document`
+  / `count_documents` / `list_document_tags` cover the CRUD + tag vocabulary.
+  `auto_tag` decomposes over-long phrases into tag-shaped single words. FastAPI
+  is an optional dependency (`pip install 'sparksage[api]'`), imported lazily
+  only inside `api/app.py:create_app`. `create_app(service=...)` accepts an
+  injected service (for tests); when omitted it builds one from env vars
+  (`SPARKSAGE_API_KEY` / `OPENAI_API_KEY`, plus `SPARKSAGE_DOC_STORE` → a durable
+  `SqliteDocumentStore`, `SPARKSAGE_AUTO_TAG_EXTRACTOR` = rake|tfidf|textrank,
+  `SPARKSAGE_TAGS_ZH` → jieba). If no API key is set, `/generate` returns `503`
+  while `/convert`, `/documents`, and `/tags` work LLM-free. Note: `app.py`
+  deliberately omits `from __future__ import annotations` so FastAPI can
+  resolve the lazily-imported route-parameter types (`UploadFile`/`File`/`Form`)
+  via eager annotation evaluation.
 
 ## Roadmap context
 
@@ -305,7 +348,19 @@ machine with progress callbacks + cooperative cancellation, ready for a
 future `/api/v1/distill` route), and a reproducible benchmark suite (`bench/`:
 `BenchmarkRunner` comparing IdeaBlock vs a dependency-free
 `RecursiveCharSplitter` baseline over the same queries/ground truth, hit@k /
-MRR + token efficiency, zero-dependency HTML report).
+MRR + token efficiency, zero-dependency HTML report), a dependency-free
+auto-tagging engine (`tags/`: `KeywordExtractor` Protocol with pure-stdlib
+RAKE / TF-IDF / TextRank over the `Tokenizer` Protocol + `stoplist.py`, CJK via
+dictionary-free `CharBigramTokenizer`, optional `JiebaTokenizer` under
+`[tags-zh]`; free-form tags, not the closed `Tag` enum), and a document-
+management service (`documents/`: `DocumentRecord` Pydantic model with free-form
+`tags: list[str]` + `summary` + `content_hash`, `DocumentStore` Protocol with
+pure-stdlib `InMemoryDocumentStore` + durable `SqliteDocumentStore` (stdlib
+`sqlite3`, junction-table tag filtering), `ExtractiveSummarizer`; wired into
+`SparkSageService.ingest_document` → convert → clean → auto-tag → summarize →
+store, with CRUD + `retag_document` + tag vocabulary, exposed as
+`/api/v1/documents` (POST/GET/PATCH/DELETE) and `/api/v1/tags` routes —
+`SPARKSAGE_DOC_STORE` opts into durable SQLite storage; all LLM-free).
 Planned next: an OpenAI-compatible API, a `/api/v1/query` route wrapping
 `QueryProcessor`, and a `/api/v1/distill` route wrapping `JobManager`.
 Design schema additions so the Distill lifecycle fields (`status`, `parents`,

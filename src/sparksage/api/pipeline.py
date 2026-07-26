@@ -28,12 +28,17 @@ from typing import Any
 
 from sparksage.clean.cleaner import TextCleaner
 from sparksage.convert.converter import ConversionResult, MarkdownConverter
+from sparksage.documents.backends.memory import InMemoryDocumentStore
+from sparksage.documents.models import DocumentRecord
+from sparksage.documents.store import DocumentStore
+from sparksage.documents.summarizer import Summarizer, default_summarizer
 from sparksage.generator.generator import (
     GenerationStats,
     IdeaBlockGenerator,
 )
 from sparksage.schema.ideablock import IdeaBlock
 from sparksage.schema.source import SourceRef
+from sparksage.tags.extractor import KeywordExtractor, default_extractor
 
 _logger = logging.getLogger(__name__)
 
@@ -120,6 +125,23 @@ class SparkSageService:
         The :class:`IdeaBlockGenerator` used for the generate operation. When
         ``None``, :meth:`generate` raises :class:`GenerationNotConfiguredError`
         so callers (e.g. the HTTP layer) can surface a clear ``503``.
+    document_store:
+        The :class:`~sparksage.documents.store.DocumentStore` used by the
+        document-management operations (:meth:`ingest_document` /
+        :meth:`list_documents` / ...). When ``None``, an
+        :class:`~sparksage.documents.backends.memory.InMemoryDocumentStore` is
+        created lazily on first use -- so document management works out of the
+        box with no extra install. Pass a
+        :class:`~sparksage.documents.backends.sqlite.SqliteDocumentStore` (or a
+        future backend) for durable storage.
+    keyword_extractor:
+        The :class:`~sparksage.tags.extractor.KeywordExtractor` used to
+        auto-tag documents that arrive without tags. Defaults lazily to a
+        :class:`~sparksage.tags.extractor.RakeKeywordExtractor`.
+    summarizer:
+        The :class:`~sparksage.documents.summarizer.Summarizer` used to produce
+        document-level summaries. Defaults lazily to an
+        :class:`~sparksage.documents.summarizer.ExtractiveSummarizer`.
 
     Examples
     --------
@@ -141,10 +163,17 @@ class SparkSageService:
         converter: MarkdownConverter,
         cleaner: TextCleaner | None = None,
         generator: IdeaBlockGenerator | None = None,
+        *,
+        document_store: DocumentStore | None = None,
+        keyword_extractor: KeywordExtractor | None = None,
+        summarizer: Summarizer | None = None,
     ) -> None:
         self._converter = converter
         self._cleaner = cleaner if cleaner is not None else TextCleaner()
         self._generator = generator
+        self._document_store: DocumentStore | None = document_store
+        self._keyword_extractor: KeywordExtractor | None = keyword_extractor
+        self._summarizer: Summarizer | None = summarizer
 
     @property
     def converter(self) -> MarkdownConverter:
@@ -161,6 +190,37 @@ class SparkSageService:
     @property
     def has_generator(self) -> bool:
         return self._generator is not None
+
+    @property
+    def document_store(self) -> DocumentStore:
+        """The :class:`DocumentStore`, lazily defaulting to an in-memory one.
+
+        Document management works with no explicit wiring: the first access
+        materializes an :class:`~sparksage.documents.backends.memory.InMemoryDocumentStore`
+        so :meth:`ingest_document` / :meth:`list_documents` / ... are always
+        available. Pass a durable store in the constructor to override.
+        """
+        if self._document_store is None:
+            self._document_store = InMemoryDocumentStore()
+        return self._document_store
+
+    @property
+    def has_document_store(self) -> bool:
+        return self._document_store is not None
+
+    @property
+    def keyword_extractor(self) -> KeywordExtractor:
+        """The :class:`KeywordExtractor`, lazily defaulting to RAKE."""
+        if self._keyword_extractor is None:
+            self._keyword_extractor = default_extractor()
+        return self._keyword_extractor
+
+    @property
+    def summarizer(self) -> Summarizer:
+        """The :class:`Summarizer`, lazily defaulting to the extractive one."""
+        if self._summarizer is None:
+            self._summarizer = default_summarizer()
+        return self._summarizer
 
     # ------------------------------------------------------------------ #
     # convert: bytes -> Markdown (+ optional cleaning)
@@ -280,6 +340,228 @@ class SparkSageService:
             source=source_ref,
             cleaned=clean,
             stats=stats,
+        )
+
+    # ------------------------------------------------------------------ #
+    # document management: ingest / list / get / update / delete / retag
+    # ------------------------------------------------------------------ #
+    def auto_tag(
+        self, text: str, *, top_k: int = 8, max_tag_words: int = 3
+    ) -> list[str]:
+        """Extract ``top_k`` free-form tags from ``text`` via the keyword extractor.
+
+        Returns the keyword strings (best first), dropping duplicates. Over-long
+        phrases (more than ``max_tag_words`` space-separated tokens) are
+        decomposed into their constituent single words so the resulting values
+        stay tag-shaped (e.g. ``"machine learning models ranking"`` ->
+        ``machine``, ``learning``, ``models``, ``ranking``). This is the no-LLM
+        auto-tagging path mandated by the tag-management requirement.
+        """
+        if top_k < 1:
+            raise ValueError("top_k must be >= 1")
+        if max_tag_words < 1:
+            raise ValueError("max_tag_words must be >= 1")
+        scores = self.keyword_extractor.extract(text, top_k=max(top_k * 2, top_k))
+        tags: list[str] = []
+        seen: set[str] = set()
+        for ks in scores:
+            words = [w for w in ks.keyword.split() if w]
+            candidates: list[str]
+            if len(words) <= max_tag_words:
+                candidates = [ks.keyword.strip()]
+            else:
+                candidates = [w for w in words]
+            for tag in candidates:
+                t = tag.strip()
+                if not t or t in seen:
+                    continue
+                seen.add(t)
+                tags.append(t)
+                if len(tags) >= top_k:
+                    return tags
+        return tags
+
+    def summarize_text(self, text: str, *, max_sentences: int = 3) -> str:
+        """Produce a document-level extractive summary of ``text``."""
+        return self.summarizer.summarize(text, max_sentences=max_sentences)
+
+    def ingest_document(
+        self,
+        data: bytes | str,
+        filename: str | None = None,
+        *,
+        title: str | None = None,
+        tags: list[str] | None = None,
+        auto_tag: bool = True,
+        clean: bool = True,
+        summarize: bool = True,
+        max_summary_sentences: int = 3,
+        top_k: int = 8,
+        doc_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> DocumentRecord:
+        """Convert -> clean -> (auto-tag) -> (summarize) -> store a document.
+
+        The end-to-end ingest of the document-management service. When ``tags``
+        is empty and ``auto_tag`` is ``True`` (the default), tags are derived
+        from the content via :meth:`auto_tag` (keyword-extraction algorithm, no
+        LLM). When ``summarize`` is ``True`` and no ``summary`` is supplied, a
+        document-level summary is produced by the configured
+        :class:`Summarizer`.
+
+        Parameters
+        ----------
+        data, filename, clean:
+            See :meth:`convert`. ``clean`` defaults to ``True`` here because raw
+            converted text is rarely tag-extraction-ready.
+        title:
+            Explicit title override. Falls back to the backend-extracted title.
+        tags:
+            Caller-supplied tags. When non-empty they win; otherwise
+            ``auto_tag`` fills them.
+        auto_tag:
+            When ``True`` (default) and ``tags`` is empty, derive tags from the
+            content.
+        summarize:
+            When ``True`` (default), produce a summary unless one is supplied
+            via ``metadata['summary']`` (callers rarely need to override).
+        top_k:
+            Number of tags to extract when auto-tagging.
+        doc_id:
+            Optional explicit ``doc_id`` (otherwise a fresh UUID is generated).
+        metadata:
+            Free-form caller metadata stored on the record.
+
+        Returns the stored :class:`DocumentRecord`.
+        """
+        conv = self.convert(data, filename, clean=clean)
+        text = conv.markdown
+        resolved_title = title if title is not None else conv.title
+
+        final_tags = list(tags) if tags else []
+        if not final_tags and auto_tag:
+            final_tags = self.auto_tag(text, top_k=top_k)
+
+        summary: str | None = None
+        if summarize:
+            summary = self.summarize_text(text, max_sentences=max_summary_sentences)
+
+        record_kwargs: dict[str, Any] = {
+            "title": resolved_title,
+            "summary": summary,
+            "body_markdown": text,
+            "tags": final_tags,
+            "source": SourceRef(uri=conv.source.uri, title=resolved_title),
+            "metadata": dict(metadata) if metadata else {},
+        }
+        if doc_id is not None:
+            record_kwargs["doc_id"] = doc_id
+        record = DocumentRecord(**record_kwargs)
+        return self.document_store.save(record)
+
+    def list_documents(
+        self,
+        *,
+        tag: str | None = None,
+        q: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[DocumentRecord]:
+        """List documents, optionally filtered by tag and/or a title/body query."""
+        return self.document_store.list(tag=tag, q=q, limit=limit, offset=offset)
+
+    def get_document(self, doc_id: str) -> DocumentRecord | None:
+        """Return the document for ``doc_id`` (or ``None`` if absent)."""
+        return self.document_store.get(doc_id)
+
+    def delete_document(self, doc_id: str) -> bool:
+        """Delete ``doc_id``. Return whether a record was removed."""
+        return self.document_store.delete(doc_id)
+
+    def count_documents(self, *, tag: str | None = None) -> int:
+        """Number of stored documents, optionally restricted to a tag."""
+        return self.document_store.count(tag=tag)
+
+    def list_document_tags(self) -> list[str]:
+        """Return the distinct tag vocabulary across all stored documents."""
+        return self.document_store.list_tags()
+
+    def update_document(
+        self,
+        doc_id: str,
+        *,
+        title: str | None = None,
+        tags: list[str] | None = None,
+        summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> DocumentRecord:
+        """Partially update a stored document and return the refreshed record.
+
+        Only the fields supplied (non-``None``) are changed; ``updated_at`` is
+        refreshed. ``tags`` replaces the full tag list when supplied.
+
+        Raises :class:`KeyError` when ``doc_id`` is unknown.
+        """
+        existing = self.document_store.get(doc_id)
+        if existing is None:
+            raise KeyError(f"document not found: {doc_id}")
+        changes: dict[str, Any] = {"updated_at": existing.updated_at}
+        if title is not None:
+            changes["title"] = title
+        if tags is not None:
+            changes["tags"] = list(tags)
+        if summary is not None:
+            changes["summary"] = summary
+        if metadata is not None:
+            changes["metadata"] = dict(metadata)
+        updated = existing.model_copy(update=changes)
+        return self.document_store.save(updated)
+
+    def retag_document(
+        self,
+        doc_id: str,
+        *,
+        top_k: int = 8,
+        replace: bool = True,
+        extra_tags: list[str] | None = None,
+    ) -> DocumentRecord:
+        """Re-extract tags for ``doc_id`` from its body and return the record.
+
+        Parameters
+        ----------
+        top_k:
+            Number of tags to extract.
+        replace:
+            When ``True`` (default), the extracted tags replace the existing
+            ones. When ``False``, they are appended (de-duplicated).
+        extra_tags:
+            Additional tags to merge in (always added, de-duplicated).
+
+        Raises :class:`KeyError` when ``doc_id`` is unknown.
+        """
+        existing = self.document_store.get(doc_id)
+        if existing is None:
+            raise KeyError(f"document not found: {doc_id}")
+        extracted = self.auto_tag(existing.body_markdown, top_k=top_k)
+        merged: list[str] = []
+        seen: set[str] = set()
+        source_lists: list[list[str]] = []
+        if replace:
+            source_lists.append(extracted)
+        else:
+            source_lists.append(list(existing.tags))
+            source_lists.append(extracted)
+        if extra_tags:
+            source_lists.append(list(extra_tags))
+        for lst in source_lists:
+            for tag in lst:
+                t = str(tag).strip()
+                if not t or t in seen:
+                    continue
+                seen.add(t)
+                merged.append(t)
+        return self.document_store.save(
+            existing.model_copy(update={"tags": merged})
         )
 
     # ------------------------------------------------------------------ #
