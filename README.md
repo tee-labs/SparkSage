@@ -7,10 +7,11 @@ small, self-contained *knowledge unit* that is aligned to how users ask
 questions. Instead of embedding arbitrary text fragments (which get cut
 mid-sentence and retrieve poorly), SparkSage embeds whole, verified answers.
 
-> Status: **Pre-Alpha**. SparkSage is a **knowledge *preprocessing* library for
-> RAG** — not an end-to-end question-answering system. It owns everything from
-> raw bytes to a retrievable, de-duplicated corpus and hands clean structures
-> off to *your* retriever / generator. Implemented today:
+> Status: **Pre-Alpha**. SparkSage is an **end-to-end question-answering core**
+> built on structured, question-aligned knowledge chunks. It owns everything
+> from raw bytes to a retrievable, de-duplicated corpus *and* the query-side
+> pipeline that turns a question into a grounded, cited answer. Implemented
+> today:
 >
 > - the **chunk schema** (IdeaBlock + TechnicalBlock);
 > - **LLM-driven generation** (free text → many IdeaBlocks);
@@ -27,9 +28,19 @@ mid-sentence and retrieve poorly), SparkSage embeds whole, verified answers.
 > - a **dependency-free auto-tagging engine** (RAKE / TF-IDF / TextRank, CJK
 >   out of the box);
 > - **query-time intent recognition + rewriting** (multi-turn, with rule-based
->   and LLM implementations);
-> - a **measurable benchmark suite** (IdeaBlock vs naive chunking on your own
->   data); and
+>   and LLM implementations, multi-query expansion, and a semantic cache);
+> - **hybrid retrieval** (dense kNN + BM25 over the curated `keywords` field,
+>   reciprocal-rank fusion, LLM reranking, metadata/tenant scoping);
+> - **grounded answer generation** (LLM answers bound to `source.locator`
+>   citations, with a faithfulness judge and an abstention gate);
+> - an **end-to-end QA engine** wiring query → retrieval → answer, with
+>   multi-query / sub-query RRF-fused retrieval;
+> - a **multi-tenant KnowledgeBase** aggregate (documents + blocks + consistent
+>   dense + lexical indexes, hash-aware updates, `reindex`);
+> - a **feedback flywheel** (capture verdicts → coverage-gap / split-candidate
+>   healing signals back to ingest);
+> - a **measurable benchmark + evaluation suite** (IdeaBlock vs naive chunking
+>   on your own data, plus end-to-end answer-correctness scoring); and
 > - a **WEB API** exposing convert / generate / documents / tags over HTTP.
 
 ---
@@ -619,6 +630,24 @@ then coerced through the `QueryIntent` enum into strict `IntentResult` /
 first-class, immutable value object baked into the rewrite prompt, so multi-turn
 anaphora resolution ("那", "it", "the same") is supported from day one.
 
+### Multi-query expansion & semantic cache
+
+Two optional enhancements ride on the same `LLMClient` Protocol and feed the
+end-to-end [`QAEngine`](#ask-end-to-end-questions):
+
+- [`QueryExpander`](src/sparksage/query/expander.py) — default
+  [`LLMQueryExpander`](src/sparksage/query/expander.py) produces `n` paraphrase
+  variants (default `3`) of a query for RRF-fused multi-query recall;
+  [`IdentityExpander`](src/sparksage/query/expander.py) is the no-op. Orthogonal
+  to the rewriter (one improved query) and to sub-query decomposition (a compound
+  question split into parts).
+- [`InMemorySemanticCache`](src/sparksage/query/cache.py) — short-circuits the
+  whole QA pipeline for near-duplicate repeat queries (the biggest cost lever,
+  since the LLM calls dominate). Keys on query *meaning* via an
+  `EmbeddingClient` (cosine ≥ `0.90` by default), implements the `QACache`
+  protocol structurally, and is pure stdlib so it is unit-testable with
+  `FakeEmbeddingClient`.
+
 > **Note:** this is the framework-agnostic core. A future `/api/v1/query` route
 > will be a thin wrapper, mirroring how
 > [`SparkSageService`](src/sparksage/api/pipeline.py) wraps the ingest pipeline.
@@ -628,6 +657,217 @@ Offline demo (rule classifier + scripted FakeLLMClient rewriter; no API key):
 ```bash
 PYTHONPATH=src python3 examples/process_query.py
 ```
+
+---
+
+## Retrieve IdeaBlocks (hybrid)
+
+The `retrieve/` package is the query-side counterpart of the ingest pipeline and
+the layer that finally *consumes* the three "designed but unconsumed" IdeaBlock
+fields: `keywords` power BM25, `tags` / `entities` / `language` / `kb_id` scope
+results, and `source.locator` grounds citations. It depends only on the existing
+`VectorStore` / `BlockEmbedder` protocols plus two new ones (`LexicalRetriever`,
+`Reranker`) — never a search engine or rerank SDK in the core.
+
+```python
+from sparksage import (
+    BlockEmbedder, FakeEmbeddingClient, IdeaBlock, InMemoryVectorStore,
+    BM25Retriever, Retriever, RetrievalFilter, Tag,
+)
+
+registry: dict[str, IdeaBlock] = {}                       # filled by .index()
+embedder = BlockEmbedder(FakeEmbeddingClient(dimension=64))
+retriever = Retriever(
+    registry, InMemoryVectorStore(dimension=64), embedder,
+    lexical=BM25Retriever(),                              # sparse half of hybrid
+)
+retriever.index(blocks)                                   # dense + lexical in one call
+
+result = retriever.search(
+    "how do I deploy?", k=5,
+    filter=RetrievalFilter(tags={Tag.IMPORTANT}),         # post-filter on metadata
+)
+for chunk in result.chunks:
+    print(chunk.score, chunk.block.critical_question)
+    print("  citation:", chunk.to_citation())             # carries source.locator
+```
+
+`Retriever.search` runs dense kNN + optional BM25, fuses the two ranked lists
+with [reciprocal rank fusion](src/sparksage/retrieve/fusion.py) (score-free, so
+a cosine and a BM25 score stay comparable), post-filters the over-fetched pool
+against the block registry (the store is deliberately text-agnostic), optionally
+re-ranks, then truncates to `k`. `RetrievedChunk.to_citation()` surfaces
+`source.uri` + `source.locator` — the provenance a reader grounds citations in.
+
+How it stays dependency-light and pluggable:
+
+- [`BM25Retriever`](src/sparksage/retrieve/lexical.py) is the sparse half: each
+  block becomes a BM25 document whose token bag weights the curated `keywords`
+  field (×3) plus answer / question / name text; CJK is tokenized into unigrams
+  + overlapping bigrams (dictionary-free, like the `tags` tokenizer). Pure
+  stdlib, no `rank_bm25`.
+- [`reciprocal_rank_fusion`](src/sparksage/retrieve/fusion.py) is the score-free
+  RRF merge of dense + lexical (or multi-query) ranked lists — the same fusion
+  step the QA engine's multi-query retrieval uses.
+- The [`Reranker`](src/sparksage/retrieve/reranker.py) protocol ships an
+  [`LLMReranker`](src/sparksage/retrieve/reranker.py) (reuses `LLMClient`,
+  lenient→strict index-list coercion, identity fallback on a bad response) and
+  an [`IdentityReranker`](src/sparksage/retrieve/reranker.py) no-op.
+- [`RetrievalFilter`](src/sparksage/retrieve/models.py) is a *post-filter* over
+  an over-fetched dense pool (`tags` / `entities` / `language` / `kb_id` /
+  `block_ids`); swap in a backend with native metadata filtering for exact
+  filtered kNN.
+
+---
+
+## Generate grounded answers
+
+The `reader/` package is the answer-generation stage — the missing "right half"
+of the QA pipeline. It depends only on two new protocols, `AnswerGenerator` and
+`FaithfulnessJudge`, both reusing the existing
+[`LLMClient`](src/sparksage/generator/client.py) (never invent a new LLM
+abstraction there).
+
+```python
+from sparksage import (
+    OpenAICompatibleClient,
+    LLMAnswerGenerator, LLMFaithfulnessJudge, Reader,
+)
+
+client = OpenAICompatibleClient(api_key="...", model="gpt-4o-mini")
+reader = Reader(
+    generator=LLMAnswerGenerator(client),
+    faithfulness_judge=LLMFaithfulnessJudge(client),   # optional
+)
+
+result = reader.answer("how do I deploy?", retrieved_chunks)
+if result.abstained:
+    print(result.abstention_reason)                    # e.g. "faithfulness 0.32 below floor 0.50"
+else:
+    print(result.answer.text)
+    for c in result.answer.citations:                  # bound to source.locator
+        print(f"  [{c.block_id}] {c.uri}:{c.locator}")
+```
+
+[`LLMAnswerGenerator`](src/sparksage/reader/generator.py) feeds the model each
+candidate's `critical_question` + `trusted_answer` (the IdeaBlock QA-alignment
+dividend) and emits a JSON answer with citations referencing block ids; the
+lenient→strict coercion binds those ids to the schema's `source.uri` /
+`source.locator` and *drops hallucinated* ids not in the retrieved set.
+[`LLMFaithfulnessJudge`](src/sparksage/reader/faithfulness.py) scores how well
+the answer is supported (LLM-as-judge, degrades to a default on a bad response).
+[`Reader`](src/sparksage/reader/orchestrator.py) runs generate → (judge) →
+abstain: below `min_faithfulness` (`0.5`) or `min_confidence` (`0.2`) it returns
+the abstention reply instead of hallucinating — the symmetric answer-side gate
+to [`QueryProcessor`](src/sparksage/query/processor.py)'s query-side
+`min_confidence`.
+
+---
+
+## Ask end-to-end questions
+
+The `qa/` package is the framework-agnostic orchestrator that finally makes
+SparkSage an end-to-end question-answering core.
+[`QAEngine`](src/sparksage/qa/engine.py) wires query → retrieval → answer with
+no business logic of its own — every stage is a swappable protocol
+(`QueryProcessor` / `QueryExpander` / `Retriever` / `Reader` / `QACache`, all
+optional).
+
+```python
+from sparksage import (
+    IdeaBlock,
+    OpenAICompatibleClient, OpenAIEmbeddingClient,
+    QueryProcessor, LLMIntentClassifier, LLMQueryRewriter,
+    BlockEmbedder, InMemoryVectorStore, BM25Retriever, Retriever,
+    LLMAnswerGenerator, LLMFaithfulnessJudge, Reader,
+    QAEngine, InMemorySemanticCache,
+)
+
+llm = OpenAICompatibleClient(api_key="...", model="gpt-4o-mini")
+embedder = BlockEmbedder(OpenAIEmbeddingClient(api_key="..."))
+
+registry: dict[str, IdeaBlock] = {}
+retriever = Retriever(
+    registry, InMemoryVectorStore(dimension=embedder.dimension), embedder,
+    lexical=BM25Retriever(),
+)
+retriever.index(blocks)
+
+engine = QAEngine(
+    retriever=retriever,
+    reader=Reader(
+        generator=LLMAnswerGenerator(llm),
+        faithfulness_judge=LLMFaithfulnessJudge(llm),
+    ),
+    query_processor=QueryProcessor(
+        classifier=LLMIntentClassifier(llm),
+        rewriter=LLMQueryRewriter(llm),
+    ),
+    cache=InMemorySemanticCache(embedder.client),       # short-circuit repeats
+)
+
+result = engine.ask("中国移动2024年净利润怎么样")
+print(result.text)                                       # grounded answer or abstention
+print(result.citations)                                  # bound to source.locator
+```
+
+It consumes the rewriter's `sub_queries` (COMPARISON / multi-hop decomposition)
+and the expander's variants via the same RRF-fused multi-retrieve path: each
+query is retrieved independently (reranking deferred to the fused pool), then
+[`reciprocal_rank_fusion`](src/sparksage/retrieve/fusion.py) merges the ranked
+lists before the reader generates one answer. An optional
+[`QACache`](src/sparksage/qa/engine.py) (which the
+[`InMemorySemanticCache`](src/sparksage/query/cache.py) implements)
+short-circuits the whole pipeline for near-duplicate repeat queries.
+
+> **Note:** not yet wired to the web layer — a future `/api/v1/query` route will
+> be a thin wrapper around `QAEngine.ask`, exactly as
+> [`SparkSageService`](src/sparksage/api/pipeline.py) wraps ingest.
+
+---
+
+## Organize knowledge bases
+
+The `kb/` package is the multi-tenant aggregate root — the organizational entity
+the flat [`documents/DocumentStore`](src/sparksage/documents/store.py) lacked.
+[`KnowledgeBase`](src/sparksage/kb/knowledge_base.py) owns documents + their
+IdeaBlocks + a dense `VectorStore` + a `BM25Retriever` + a `Retriever`, and
+crucially the **consistency** between them.
+
+```python
+from sparksage import (
+    KnowledgeBase, KnowledgeBaseInfo, InMemoryKnowledgeBaseStore,
+    BlockEmbedder, OpenAIEmbeddingClient, new_record,
+)
+
+kb = KnowledgeBase(
+    info=KnowledgeBaseInfo(name="Product Docs", language="en"),
+    embedder=BlockEmbedder(OpenAIEmbeddingClient(api_key="...")),
+)
+
+kb.add_document(
+    new_record(title="Annual Report", body_markdown="# Annual Report\n..."),
+    blocks=blocks,                                       # embedded + indexed, kb_id stamped
+)
+
+result = kb.search("revenue growth", k=5)                # retrieval scoped to this KB
+print(kb.block_count(), kb.document_count())
+
+registry = InMemoryKnowledgeBaseStore()                  # multi-tenant registry
+registry.save(kb.info)
+```
+
+- [`add_blocks`](src/sparksage/kb/knowledge_base.py) stamps `kb_id` and
+  embeds + indexes; [`remove_document`](src/sparksage/kb/knowledge_base.py)
+  cascades to block vectors + the registry (index↔storage consistency guarantee).
+- [`update_document`](src/sparksage/kb/knowledge_base.py) is an incremental
+  re-index **only when `content_hash` changed** (hash-aware change detection).
+- [`reindex`](src/sparksage/kb/knowledge_base.py) rebuilds both indexes from
+  the live registry (drift recovery).
+- Each block carries an optional additive `kb_id`
+  ([`schema/ideablock.py`](src/sparksage/schema/ideablock.py)) so
+  [`RetrievalFilter`](src/sparksage/retrieve/models.py) can scope retrieval to
+  one KB.
 
 ---
 
@@ -679,6 +919,86 @@ Offline demo (no API key):
 ```bash
 PYTHONPATH=src python3 examples/run_benchmark.py
 ```
+
+---
+
+## Evaluate answer correctness
+
+The `eval/` package is the answer-correctness counterpart of `bench/` (which
+scores retrieval alone): where `bench` asks *"did the right block surface?"*,
+`eval` asks *"is the generated answer actually correct?"*.
+[`QAEvaluator`](src/sparksage/eval/evaluator.py) runs a
+[`QAEngine`](src/sparksage/qa/engine.py) over a
+[`QATestCase`](src/sparksage/eval/models.py) set and rolls per-case outcomes
+into a [`QAEvalReport`](src/sparksage/eval/models.py): mean answer correctness,
+abstention rate, retrieval hit@k (reuses
+[`bench.evaluate_retrieval`](src/sparksage/bench/metrics.py) for comparability),
+and mean faithfulness.
+
+```python
+from sparksage import QAEvaluator, QATestCase, TokenOverlapJudge
+
+evaluator = QAEvaluator(engine)                          # any QAEngine
+report = evaluator.run([
+    QATestCase(
+        query="how do I deploy sparksage?",
+        reference_answer="Run uvicorn sparksage.api.app:create_app ...",
+        relevant_block_ids={"block-uuid-1", "block-uuid-2"},
+    ),
+    # ...
+])
+
+print(report.mean_correctness, report.abstention_rate, report.retrieval.mrr)
+```
+
+Correctness is a pluggable [`CorrectnessJudge`](src/sparksage/eval/evaluator.py):
+the default [`TokenOverlapJudge`](src/sparksage/eval/evaluator.py) is
+dependency-free token-F1 (fully offline, CJK-aware via
+[`token_f1`](src/sparksage/eval/evaluator.py));
+[`LLMCorrectnessJudge`](src/sparksage/eval/evaluator.py) swaps in (reuses
+`LLMClient`, token-F1 fallback on a bad response) for semantic scoring. When a
+case has no `reference_answer`, correctness falls back to a retrieval-hit +
+faithfulness proxy.
+
+---
+
+## Close the feedback loop
+
+The `feedback/` package closes the query → ingest loop (the quality flywheel).
+[`FeedbackRecord`](src/sparksage/feedback/models.py) (Pydantic v2,
+`extra="forbid"`, closed [`FeedbackRating`](src/sparksage/feedback/models.py)
+enum) captures the user's verdict on a surfaced answer (positive / negative /
+corrected) plus optional correction and the backing block ids. The
+[`FeedbackStore`](src/sparksage/feedback/store.py) Protocol +
+[`InMemoryFeedbackStore`](src/sparksage/feedback/store.py) persist + aggregate
+(approval ratio, per-block breakdown).
+
+```python
+from sparksage import (
+    InMemoryFeedbackStore, FeedbackRecord, FeedbackRating,
+    extract_healing_signals,
+)
+
+store = InMemoryFeedbackStore()
+store.add(FeedbackRecord(
+    query="how do I deploy?",
+    answer_text="...",
+    rating=FeedbackRating.NEGATIVE,
+    block_ids=["block-uuid-1"],
+))
+
+report = extract_healing_signals(store)
+print(report.approval)                                   # headline health metric
+for sig in report.low_recall:                            # coverage gaps -> re-chunk / ingest
+    print("low recall:", sig.query, sig.occurrences)
+for sig in report.split_candidates:                      # bad-ratio blocks -> split
+    print("split:", sig.block_id, sig.bad_ratio)
+```
+
+[`extract_healing_signals`](src/sparksage/feedback/healing.py) (pure stdlib)
+turns the aggregate back into ingest actions: repeated low-recall queries flag a
+coverage gap (re-chunk / new content); blocks with a high bad-feedback ratio
+become split candidates (the inverse of the Distill *merge*).
 
 ---
 
@@ -1034,10 +1354,37 @@ src/sparksage/
 ├── query/
 │   ├── classifier.py   # IntentClassifier protocol + LLM + rule-based  ★
 │   ├── rewriter.py     # QueryRewriter protocol + LLM + rule-based  ★
+│   ├── expander.py     # QueryExpander protocol + LLM + Identity (multi-query)  ★
+│   ├── cache.py        # InMemorySemanticCache (embedding-keyed QACache)  ★
 │   ├── context.py      # ConversationContext (multi-turn anaphora carrier)
 │   ├── prompts.py      # intent/rewrite prompts (read QueryIntent live)
 │   ├── schema.py       # lenient raw models + QueryIntent coercion
 │   └── processor.py    # QueryProcessor: classify -> intercept -> rewrite  ★
+├── retrieve/
+│   ├── lexical.py      # BM25Retriever (keywords-weighted, CJK-aware) + protocol  ★
+│   ├── fusion.py       # reciprocal_rank_fusion (score-free RRF merge)  ★
+│   ├── reranker.py     # Reranker protocol + LLMReranker + IdentityReranker  ★
+│   ├── models.py       # RetrievedChunk / Citation / RetrievalFilter / RetrievalResult
+│   └── orchestrator.py # Retriever: dense + lexical -> RRF -> filter -> rerank  ★
+├── reader/
+│   ├── generator.py    # AnswerGenerator protocol + LLMAnswerGenerator  ★
+│   ├── faithfulness.py # FaithfulnessJudge protocol + LLMFaithfulnessJudge  ★
+│   ├── prompts.py      # answer/faithfulness prompts (QA-aligned context)
+│   ├── schema.py       # lenient raw models + strict GeneratedAnswer coercion
+│   └── orchestrator.py # Reader: generate -> judge -> abstain gate  ★
+├── qa/
+│   └── engine.py       # QAEngine: query -> retrieval -> answer (multi-query RRF)  ★
+├── kb/
+│   ├── models.py       # KnowledgeBaseInfo (serializable metadata)
+│   ├── knowledge_base.py # KnowledgeBase aggregate (docs+blocks+consistent indexes)  ★
+│   └── store.py        # KnowledgeBaseStore protocol + InMemoryKnowledgeBaseStore
+├── feedback/
+│   ├── models.py       # FeedbackRecord + FeedbackRating enum  ★
+│   ├── store.py        # FeedbackStore protocol + InMemoryFeedbackStore (+ aggregation)
+│   └── healing.py      # extract_healing_signals -> coverage/split candidates  ★
+├── eval/
+│   ├── models.py       # QATestCase / QACaseResult / QAEvalReport
+│   └── evaluator.py    # QAEvaluator + CorrectnessJudge (token-F1 / LLM)  ★
 ├── bench/
 │   ├── baselines.py    # RecursiveCharSplitter (LangChain-default reimpl.)  ★
 │   ├── metrics.py      # hit@k / MRR / token-efficiency (pure stdlib)
@@ -1047,7 +1394,8 @@ src/sparksage/
 │   ├── pipeline.py     # SparkSageService: convert→clean→generate→tag→store  ★
 │   ├── schemas.py      # request/response Pydantic models (no fastapi)
 │   └── app.py          # FastAPI app factory + routes (lazy fastapi import)
-tests/                  # schema + generation + conversion + cleaning + api + config
+tests/                  # schema + generation + conversion + cleaning + retrieval +
+                        # reader + qa + kb + feedback + eval + api + config
 examples/               # runnable demos
 ```
 
@@ -1088,15 +1436,35 @@ Implemented:
 - [x] Query-time intent recognition + rewriting (`query/`: LLM + rule-based
       `IntentClassifier` / `QueryRewriter`, multi-turn `ConversationContext`,
       lenient→strict `QueryIntent` coercion, `QueryProcessor` interception)
+- [x] Query enhancements (multi-query `QueryExpander` + embedding-keyed
+      `InMemorySemanticCache` implementing `QACache`)
+- [x] Hybrid retrieval (`retrieve/`: pure-stdlib `BM25Retriever` over the
+      curated `keywords` field + dense kNN, `reciprocal_rank_fusion`,
+      `LLMReranker` / `IdentityReranker`, `Retriever` orchestrator with
+      `RetrievalFilter` tag/entity/language/kb_id scoping and
+      `RetrievedChunk`/`Citation` provenance)
+- [x] Grounded answer generation (`reader/`: `LLMAnswerGenerator` over the
+      QA-aligned `critical_question`+`trusted_answer` context with citation
+      binding to `source.locator`, `LLMFaithfulnessJudge`, `Reader` with
+      abstention gate)
+- [x] End-to-end QA engine (`qa/`: `QAEngine` query → retrieval → answer,
+      multi-query / sub-query RRF-fused retrieval, optional `QACache`)
+- [x] Multi-tenant knowledge base (`kb/`: `KnowledgeBase` aggregate root with
+      documents + blocks + consistent dense + lexical index, hash-aware
+      `update_document`, `reindex`, `kb_id` scoping, `KnowledgeBaseStore`)
+- [x] Feedback flywheel (`feedback/`: `FeedbackRecord` + `FeedbackStore` +
+      `extract_healing_signals` for coverage-gap / split-candidate signals back
+      to ingest)
+- [x] Answer-correctness evaluation (`eval/`: `QAEvaluator` over a `QATestCase`
+      set, pluggable `TokenOverlapJudge` / `LLMCorrectnessJudge`, reusing
+      `bench.evaluate_retrieval` for the retrieval metric)
 - [x] WEB API (FastAPI: `/convert`, `/generate`, `/documents` CRUD, `/tags`)
 
 Planned next:
 
-- [ ] `/api/v1/query` route wrapping `QueryProcessor`
+- [ ] `/api/v1/query` route wrapping `QAEngine`
 - [ ] `/api/v1/distill` route wrapping `JobManager` (submit / poll / cancel)
-- [ ] OpenAI-compatible ingest / distill API
-- [ ] End-to-end retrieval→generation→answer-correctness benchmark (extends
-      `bench/`, which today scores retrieval only)
+- [ ] OpenAI-compatible ingest / distill / query API
 
 ## License
 
