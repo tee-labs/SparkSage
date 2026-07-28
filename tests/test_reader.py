@@ -18,10 +18,12 @@ from sparksage.reader import (
     RawCitation,
     RawFaithfulness,
     Reader,
+    approx_tokens,
     coerce_answer,
     coerce_citations,
     coerce_faithfulness,
     extract_json,
+    trim_to_token_budget,
 )
 from sparksage.retrieve.models import RetrievedChunk
 from sparksage.schema.source import SourceRef
@@ -237,3 +239,143 @@ class TestReader:
             Reader(generator=LLMAnswerGenerator(FakeLLMClient([])), min_faithfulness=2.0)
         with pytest.raises(ValueError):
             Reader(generator=LLMAnswerGenerator(FakeLLMClient([])), min_confidence=-0.1)
+
+
+# --------------------------------------------------------------------------- #
+# Token budget / Context-Cliff protection
+# --------------------------------------------------------------------------- #
+class TestApproxTokens:
+    def test_basic_heuristic(self):
+        assert approx_tokens("abcd") == 1.0
+        assert approx_tokens("a" * 40) == 10.0
+
+    def test_bad_chars_per_token(self):
+        with pytest.raises(ValueError):
+            approx_tokens("x", chars_per_token=0)
+
+
+class TestTrimToTokenBudget:
+    def _chunks(self, n):
+        return [
+            RetrievedChunk(
+                block=IdeaBlock(
+                    name=f"B{i}",
+                    critical_question="q?",
+                    trusted_answer="a" * 40,  # 10 tokens (q? adds ~1)
+                    source=SourceRef(uri=f"file://{i}.md", title=str(i), locator="L1"),
+                ),
+                score=float(n - i),
+                rank=i,
+            )
+            for i in range(n)
+        ]
+
+    def test_empty_returns_empty(self):
+        assert trim_to_token_budget([], 100) == []
+
+    def test_keeps_all_when_under_budget(self):
+        chunks = self._chunks(2)
+        out = trim_to_token_budget(chunks, 10_000)
+        assert out == chunks
+
+    def test_truncates_to_budget(self):
+        chunks = self._chunks(5)
+        # each chunk ~11 tokens; budget 25 keeps ~2 chunks (22 tokens), 3rd would exceed
+        out = trim_to_token_budget(chunks, 25)
+        assert len(out) < len(chunks)
+        assert len(out) >= 1
+
+    def test_preserves_best_first_order(self):
+        chunks = self._chunks(3)
+        out = trim_to_token_budget(chunks, 10_000)
+        assert [c.rank for c in out] == [0, 1, 2]
+
+    def test_keep_min_overrides_budget(self):
+        chunks = self._chunks(3)
+        # budget 0 but keep_min=1 -> still keeps the first chunk
+        out = trim_to_token_budget(chunks, 0, keep_min=1)
+        assert len(out) == 1
+        assert out[0].rank == 0
+
+    def test_keep_min_two(self):
+        chunks = self._chunks(3)
+        out = trim_to_token_budget(chunks, 0, keep_min=2)
+        assert len(out) == 2
+
+    def test_token_counter_override(self):
+        chunks = self._chunks(2)
+        # exact counter: 100 tokens each, budget 150 -> keeps 1 (keep_min=1)
+        out = trim_to_token_budget(
+            chunks, 150, token_counter=lambda t: 100, keep_min=1
+        )
+        assert len(out) == 1
+
+    def test_bad_params(self):
+        chunks = self._chunks(1)
+        with pytest.raises(ValueError):
+            trim_to_token_budget(chunks, -1)
+        with pytest.raises(ValueError):
+            trim_to_token_budget(chunks, 10, chars_per_token=0)
+        with pytest.raises(ValueError):
+            trim_to_token_budget(chunks, 10, keep_min=0)
+        with pytest.raises(TypeError):
+            trim_to_token_budget(chunks, "x")  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            trim_to_token_budget(chunks, 10, keep_min=1.0)  # type: ignore[arg-type]
+
+    def test_does_not_mutate_input(self):
+        chunks = self._chunks(3)
+        original = list(chunks)
+        trim_to_token_budget(chunks, 5)
+        assert chunks == original
+
+
+class TestReaderBudget:
+    def _answer(self, n_chunks=3):
+        b = _block()
+        return b, [_chunk(b) for _ in range(n_chunks)]
+
+    def test_budget_trims_context_passed_to_generator(self):
+        b = _block()
+        chunks = [
+            RetrievedChunk(block=b, score=0.9, rank=i) for i in range(5)
+        ]
+        client = FakeLLMClient(responses=[_answer_json(cid=str(b.id), conf=0.9)])
+        reader = Reader(
+            generator=LLMAnswerGenerator(client),
+            max_context_tokens=1,  # forces trim to keep_min=1
+        )
+        result = reader.answer("q", chunks)
+        assert not result.abstained
+        # only one chunk retained in the result provenance
+        assert len(result.chunks) == 1
+
+    def test_no_budget_keeps_all(self):
+        b = _block()
+        chunks = [_chunk(b) for _ in range(4)]
+        client = FakeLLMClient(responses=[_answer_json(cid=str(b.id), conf=0.9)])
+        reader = Reader(generator=LLMAnswerGenerator(client))
+        result = reader.answer("q", chunks)
+        assert len(result.chunks) == 4
+
+    def test_property_and_validation(self):
+        reader = Reader(
+            generator=LLMAnswerGenerator(FakeLLMClient([])),
+            max_context_tokens=500,
+        )
+        assert reader.max_context_tokens == 500
+        with pytest.raises(ValueError):
+            Reader(
+                generator=LLMAnswerGenerator(FakeLLMClient([])),
+                max_context_tokens=-1,
+            )
+        with pytest.raises(ValueError):
+            Reader(
+                generator=LLMAnswerGenerator(FakeLLMClient([])),
+                chars_per_token=0,
+            )
+        with pytest.raises(ValueError):
+            Reader(
+                generator=LLMAnswerGenerator(FakeLLMClient([])),
+                context_keep_min=0,
+            )

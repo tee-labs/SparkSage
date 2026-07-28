@@ -22,8 +22,10 @@ runs fully offline under :class:`~sparksage.generator.FakeLLMClient`.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from sparksage.reader.budget import DEFAULT_CHARS_PER_TOKEN, trim_to_token_budget
 from sparksage.reader.faithfulness import FaithfulnessJudge
 from sparksage.reader.generator import AnswerGenerator
 from sparksage.reader.schema import FaithfulnessResult, GeneratedAnswer
@@ -95,6 +97,18 @@ class Reader:
         Generator confidence below which the reader abstains (default ``0.2``).
     abstention_reply:
         Canned text surfaced on :class:`AnswerResult` when abstaining.
+    max_context_tokens:
+        Optional soft ceiling on the total token cost of the chunks fed to the
+        generator (and judge). When set, the best-first chunk list is trimmed to
+        fit before generation -- the Context-Cliff guard. ``None`` (default)
+        disables trimming (forward all chunks, the legacy behaviour).
+    chars_per_token:
+        Heuristic ratio for the built-in token estimator (default ``4.0``).
+    token_counter:
+        Optional exact tokenizer (``str -> int``) overriding the heuristic.
+    context_keep_min:
+        Minimum chunks to retain even when the first chunk exceeds the budget
+        (default ``1``). See :func:`~sparksage.reader.budget.trim_to_token_budget`.
 
     Examples
     --------
@@ -114,6 +128,10 @@ class Reader:
         min_faithfulness: float = DEFAULT_MIN_FAITHFULNESS,
         min_confidence: float = DEFAULT_MIN_ANSWER_CONFIDENCE,
         abstention_reply: str = DEFAULT_ABSTENTION_REPLY,
+        max_context_tokens: float | None = None,
+        chars_per_token: float = DEFAULT_CHARS_PER_TOKEN,
+        token_counter: Callable[[str], int] | None = None,
+        context_keep_min: int = 1,
     ) -> None:
         if not isinstance(generator, AnswerGenerator):
             raise TypeError("generator must implement the AnswerGenerator protocol")
@@ -127,11 +145,28 @@ class Reader:
             raise ValueError("min_faithfulness must be in [0.0, 1.0]")
         if not 0.0 <= min_confidence <= 1.0:
             raise ValueError("min_confidence must be in [0.0, 1.0]")
+        if max_context_tokens is not None:
+            if not isinstance(max_context_tokens, (int, float)) or isinstance(
+                max_context_tokens, bool
+            ):
+                raise TypeError("max_context_tokens must be a number or None")
+            if max_context_tokens < 0:
+                raise ValueError("max_context_tokens must be >= 0")
+        if chars_per_token <= 0:
+            raise ValueError("chars_per_token must be > 0")
+        if not isinstance(context_keep_min, int) or isinstance(context_keep_min, bool):
+            raise TypeError("context_keep_min must be an int")
+        if context_keep_min < 1:
+            raise ValueError("context_keep_min must be >= 1")
         self._generator = generator
         self._judge = faithfulness_judge
         self._min_faithfulness = min_faithfulness
         self._min_confidence = min_confidence
         self._abstention_reply = abstention_reply
+        self._max_context_tokens = max_context_tokens
+        self._chars_per_token = chars_per_token
+        self._token_counter = token_counter
+        self._context_keep_min = context_keep_min
 
     @property
     def generator(self) -> AnswerGenerator:
@@ -149,6 +184,11 @@ class Reader:
     def min_confidence(self) -> float:
         return self._min_confidence
 
+    @property
+    def max_context_tokens(self) -> float | None:
+        """The Context-Cliff token ceiling, or ``None`` when trimming is off."""
+        return self._max_context_tokens
+
     def answer(
         self,
         query: str,
@@ -160,6 +200,8 @@ class Reader:
             return self._abstain(
                 query, chunks, reason="no retrieved context", faithfulness=None
             )
+
+        chunks = self._apply_budget(chunks)
 
         answer = self._generator.generate(query, chunks)
 
@@ -214,6 +256,30 @@ class Reader:
             abstention_reason=None,
             confidence=eff_conf,
         )
+
+    def _apply_budget(self, chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+        """Trim ``chunks`` to the configured token budget (no-op when off).
+
+        Applied once, before generation and judging, so the judge scores the
+        answer against exactly the context the generator saw.
+        """
+        if self._max_context_tokens is None:
+            return chunks
+        trimmed = trim_to_token_budget(
+            chunks,
+            self._max_context_tokens,
+            chars_per_token=self._chars_per_token,
+            token_counter=self._token_counter,
+            keep_min=self._context_keep_min,
+        )
+        if len(trimmed) < len(chunks):
+            _logger.debug(
+                "context trimmed %d -> %d chunks (max_context_tokens=%s)",
+                len(chunks),
+                len(trimmed),
+                self._max_context_tokens,
+            )
+        return trimmed
 
     def _abstain(
         self,
