@@ -21,6 +21,7 @@ carries ``uri`` / ``locator`` / ``title`` straight from the backing block.
 Pipeline::
 
     retrieved chunks
+        -> token-budget trim       [optional, Context-Cliff guard]
         -> AnswerGenerator       (grounded answer + citations)
         -> FaithfulnessJudge     [optional]
         -> abstention gate       (low faithfulness / confidence -> "I don't know")
@@ -44,6 +45,12 @@ Example
         print(result.answer.text, result.answer.citations)
 """
 
+from sparksage.reader.budget import (
+    DEFAULT_CHARS_PER_TOKEN,
+    DEFAULT_KEEP_MIN,
+    approx_tokens,
+    trim_to_token_budget,
+)
 from sparksage.reader.faithfulness import (
     FaithfulnessEmptyResponseError,
     FaithfulnessError,
@@ -101,7 +108,9 @@ __all__ = [
     "CoercionError",
     "DEFAULT_ABSTENTION_REPLY",
     "DEFAULT_ANSWER_CONFIDENCE",
+    "DEFAULT_CHARS_PER_TOKEN",
     "DEFAULT_FAITHFULNESS",
+    "DEFAULT_KEEP_MIN",
     "DEFAULT_MIN_ANSWER_CONFIDENCE",
     "DEFAULT_MIN_FAITHFULNESS",
     "FaithfulnessEmptyResponseError",
@@ -119,6 +128,7 @@ __all__ = [
     "answer_messages",
     "answer_system_prompt",
     "answer_user_prompt",
+    "approx_tokens",
     "coerce_answer",
     "coerce_citations",
     "coerce_faithfulness",
@@ -130,4 +140,5 @@ __all__ = [
     "parse_faithfulness_response",
     "parse_raw_answer",
     "parse_raw_faithfulness",
+    "trim_to_token_budget",
 ]

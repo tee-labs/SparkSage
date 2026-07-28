@@ -66,6 +66,9 @@ pgvector = [
 tags-zh = [
     "jieba>=0.42",
 ]
+rerank = [
+    "sentence-transformers>=2.2",
+]
 
 [project.urls]
 Homepage = "https://github.com/tee-labs/SparkSage"

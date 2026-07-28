@@ -244,9 +244,16 @@ PYTHONPATH=src python3 examples/build_chunks.py
   vocabulary live from the enum, so extending it widens what the model may emit
   with no prompt edit. Multi-turn anaphora resolution is first-class:
   `ConversationContext` (`context.py`) is baked into the rewrite system prompt.
-  This is **not** wired to the web layer yet — a future `/api/v1/query` route
-  will be a thin wrapper, mirroring how `SparkSageService` wraps the ingest
-  pipeline.
+  The self-query decomposition (`self_query.py`) is the LLM front-end that
+  finally *produces* a `RetrievalFilter` from free text: a `SelfQueryParser`
+  protocol ships an `LLMSelfQueryParser` (splits a question into a clean query
+  + a `RetrievalFilter` of tags / entities / languages; tag values are read
+  live from the `Tag` enum into the prompt, lenient→strict coercion reusing
+  `query.schema.CoercionError`, identity fallback on a bad response) and an
+  `IdentitySelfQueryParser` no-op — wire it in front of `Retriever.search` and
+  pass its `filter` straight through. This is **not** wired to the web layer yet
+  — a future `/api/v1/query` route will be a thin wrapper, mirroring how
+  `SparkSageService` wraps the ingest pipeline.
 - The keyword-extraction core (`tags/`) is the dependency-free auto-tagging
   engine: when a document arrives without tags, a `KeywordExtractor` derives
   them from the content using classic algorithms — `RakeKeywordExtractor`,
@@ -327,6 +334,17 @@ PYTHONPATH=src python3 examples/build_chunks.py
   provenance the reader grounds citations in. The filter is a *post-filter*
   over an over-fetched dense pool (the store is deliberately text-agnostic);
   swap in a backend with native metadata filtering for exact filtered kNN.
+  The concrete `Reranker` backends (`retrieve/backends/`) each implement the
+  same Protocol and lazily import their own SDK inside `__init__` (with a clear
+  `ImportError` pointing at the extra), so the core stays zero-dependency —
+  install only the backend you need. `CrossEncoderReranker`
+  (`cross_encoder.py`, under the `[rerank]` extra via `sentence-transformers`)
+  wraps a `CrossEncoder` (e.g. `cross-encoder/ms-marco-MiniLM-L-6-v2`, or
+  `BAAI/bge-reranker-v2-m3` for CJK/multilingual) and re-scores the fused pool
+  in one cross-attention pass per pair — the single largest point lever after
+  chunking strategy, and an order of magnitude cheaper per query than
+  `LLMReranker`; raw logits are squashed through a stable sigmoid into `(0, 1)`
+  by default (`apply_sigmoid=`) so scores match the other rerankers' shape.
 - The reader core (`reader/`) is the answer-generation stage — the missing
   "right half" of the QA pipeline. It depends only on two new protocols,
   `AnswerGenerator` and `FaithfulnessJudge`, both reusing the existing
@@ -341,7 +359,14 @@ PYTHONPATH=src python3 examples/build_chunks.py
   response). `Reader` (`orchestrator.py`) runs generate → (judge) → abstain:
   below `min_faithfulness` or `min_confidence` it returns the abstention
   reply instead of hallucinating — the symmetric answer-side gate to
-  `QueryProcessor`'s query-side `min_confidence`.
+  `QueryProcessor`'s query-side `min_confidence`. `Reader` also owns the
+  Context-Cliff guard: an optional `max_context_tokens` trims the best-first
+  chunk list to a token budget (`reader/budget.py:trim_to_token_budget`, pure
+  stdlib `len/chars_per_token` heuristic mirroring `bench.approx_tokens`, with a
+  pluggable `token_counter=` for an exact tokenizer and a `keep_min` floor) *before*
+  generation and judging, so the judge scores the answer against exactly the
+  context the generator saw — preventing the "lost in the middle" degradation
+  that a generous top-k otherwise causes.
 - The QA engine (`qa/`) is the framework-agnostic orchestrator that finally
   makes SparkSage an end-to-end question-answering core. `QAEngine`
   (`engine.py`) wires query → retrieval → answer with no business logic of its
@@ -467,7 +492,16 @@ the feedback flywheel (`feedback/`: `FeedbackRecord` + `FeedbackStore` +
 `extract_healing_signals` for coverage-gap / split-candidate signals back to
 ingest), and answer-correctness evaluation (`eval/`: `QAEvaluator` over a
 `QATestCase` set, pluggable `TokenOverlapJudge` / `LLMCorrectnessJudge`,
-reusing `bench.evaluate_retrieval` for the retrieval metric). The three
+reusing `bench.evaluate_retrieval` for the retrieval metric). Also implemented
+now: a cross-encoder re-ranking backend (`retrieve/backends/cross_encoder.py`:
+`CrossEncoderReranker` under `[rerank]` via `sentence-transformers`, sigmoid-
+normalized logits, the largest point lever after chunking strategy), the
+Context-Cliff guard (`reader/budget.py`: `trim_to_token_budget` wired into
+`Reader.max_context_tokens`, pure-stdlib token heuristic + pluggable tokenizer,
+applied before generation *and* judging), and self-query decomposition
+(`query/self_query.py`: `SelfQueryParser` protocol + `LLMSelfQueryParser`
+producing a `RetrievalFilter` from free text, tag values read live from the
+`Tag` enum, lenient→strict coercion, identity fallback). The three
 previously "designed but unconsumed" IdeaBlock fields (`keywords`,
 `entities`/`tags`, `source.locator`) are now all wired into retrieval /
 filtering / citations.

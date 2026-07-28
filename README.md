@@ -647,6 +647,14 @@ end-to-end [`QAEngine`](#ask-end-to-end-questions):
   `EmbeddingClient` (cosine ≥ `0.90` by default), implements the `QACache`
   protocol structurally, and is pure stdlib so it is unit-testable with
   `FakeEmbeddingClient`.
+- [`SelfQueryParser`](src/sparksage/query/self_query.py) — default
+  [`LLMSelfQueryParser`](src/sparksage/query/self_query.py) splits a natural-
+  language question into a clean query **plus a `RetrievalFilter`** (tags read
+  live from the `Tag` enum, free-form entities / languages), so
+  `"2025 华东区销售数据"` becomes `query="销售数据"` scoped by the extracted
+  metadata; [`IdentitySelfQueryParser`](src/sparksage/query/self_query.py) is the
+  no-op. Wire it in front of `Retriever.search` and pass its `filter` straight
+  through.
 
 > **Note:** this is the framework-agnostic core. A future `/api/v1/query` route
 > will be a thin wrapper, mirroring how
@@ -712,7 +720,12 @@ How it stays dependency-light and pluggable:
 - The [`Reranker`](src/sparksage/retrieve/reranker.py) protocol ships an
   [`LLMReranker`](src/sparksage/retrieve/reranker.py) (reuses `LLMClient`,
   lenient→strict index-list coercion, identity fallback on a bad response) and
-  an [`IdentityReranker`](src/sparksage/retrieve/reranker.py) no-op.
+  an [`IdentityReranker`](src/sparksage/retrieve/reranker.py) no-op. The
+  concrete backend
+  [`CrossEncoderReranker`](src/sparksage/retrieve/backends/cross_encoder.py)
+  (`[rerank]` extra via `sentence-transformers`) re-scores the fused pool with
+  one cross-attention pass per pair — the largest single-point lever after
+  chunking strategy, and far cheaper per query than `LLMReranker`.
 - [`RetrievalFilter`](src/sparksage/retrieve/models.py) is a *post-filter* over
   an over-fetched dense pool (`tags` / `entities` / `language` / `kb_id` /
   `block_ids`); swap in a backend with native metadata filtering for exact
@@ -760,7 +773,13 @@ the answer is supported (LLM-as-judge, degrades to a default on a bad response).
 abstain: below `min_faithfulness` (`0.5`) or `min_confidence` (`0.2`) it returns
 the abstention reply instead of hallucinating — the symmetric answer-side gate
 to [`QueryProcessor`](src/sparksage/query/processor.py)'s query-side
-`min_confidence`.
+`min_confidence`. `Reader` also owns the **Context-Cliff guard**: an optional
+`max_context_tokens=` trims the best-first chunk list to a token budget
+([`trim_to_token_budget`](src/sparksage/reader/budget.py), pure-stdlib
+`len/chars_per_token` heuristic, pluggable `token_counter=` for an exact
+tokenizer, `keep_min=` floor) *before* generation and judging — so the judge
+scores the answer against exactly the context the generator saw, avoiding the
+"lost in the middle" degradation a generous top-k otherwise causes.
 
 ---
 
@@ -1041,6 +1060,18 @@ pip install 'sparksage[pgvector]'     # PgvectorVectorStore (psycopg v3 + Postgr
 
 All three implement the same `VectorStore` Protocol, so you swap them in
 wherever an `InMemoryVectorStore` is used.
+
+#### Re-ranking backend
+
+The default `LLMReranker` / `IdentityReranker` need no extra dependencies. For
+the higher-precision, cheaper-per-query cross-encoder re-ranker:
+
+```bash
+pip install 'sparksage[rerank]'       # CrossEncoderReranker (sentence-transformers)
+```
+
+It implements the same `Reranker` Protocol, so it slots into the `reranker=`
+slot of `Retriever` (and `QAEngine`) unchanged.
 
 ### Run the server
 
@@ -1355,6 +1386,7 @@ src/sparksage/
 │   ├── classifier.py   # IntentClassifier protocol + LLM + rule-based  ★
 │   ├── rewriter.py     # QueryRewriter protocol + LLM + rule-based  ★
 │   ├── expander.py     # QueryExpander protocol + LLM + Identity (multi-query)  ★
+│   ├── self_query.py   # SelfQueryParser protocol + LLM + Identity (query+filter)  ★
 │   ├── cache.py        # InMemorySemanticCache (embedding-keyed QACache)  ★
 │   ├── context.py      # ConversationContext (multi-turn anaphora carrier)
 │   ├── prompts.py      # intent/rewrite prompts (read QueryIntent live)
@@ -1365,13 +1397,15 @@ src/sparksage/
 │   ├── fusion.py       # reciprocal_rank_fusion (score-free RRF merge)  ★
 │   ├── reranker.py     # Reranker protocol + LLMReranker + IdentityReranker  ★
 │   ├── models.py       # RetrievedChunk / Citation / RetrievalFilter / RetrievalResult
-│   └── orchestrator.py # Retriever: dense + lexical -> RRF -> filter -> rerank  ★
+│   ├── orchestrator.py # Retriever: dense + lexical -> RRF -> filter -> rerank  ★
+│   └── backends/       # CrossEncoderReranker (sentence-transformers, [rerank])  ★
 ├── reader/
 │   ├── generator.py    # AnswerGenerator protocol + LLMAnswerGenerator  ★
 │   ├── faithfulness.py # FaithfulnessJudge protocol + LLMFaithfulnessJudge  ★
+│   ├── budget.py       # trim_to_token_budget (Context-Cliff guard, stdlib)  ★
 │   ├── prompts.py      # answer/faithfulness prompts (QA-aligned context)
 │   ├── schema.py       # lenient raw models + strict GeneratedAnswer coercion
-│   └── orchestrator.py # Reader: generate -> judge -> abstain gate  ★
+│   └── orchestrator.py # Reader: trim -> generate -> judge -> abstain gate  ★
 ├── qa/
 │   └── engine.py       # QAEngine: query -> retrieval -> answer (multi-query RRF)  ★
 ├── kb/
@@ -1458,6 +1492,17 @@ Implemented:
 - [x] Answer-correctness evaluation (`eval/`: `QAEvaluator` over a `QATestCase`
       set, pluggable `TokenOverlapJudge` / `LLMCorrectnessJudge`, reusing
       `bench.evaluate_retrieval` for the retrieval metric)
+- [x] Cross-encoder re-ranking backend (`retrieve/backends/`:
+      `CrossEncoderReranker` under `[rerank]` via `sentence-transformers`, sigmoid-
+      normalized logits, lazy SDK import; the single largest point lever after
+      chunking strategy)
+- [x] Context-Cliff guard (`reader/budget.py`: `trim_to_token_budget` wired into
+      `Reader.max_context_tokens`, pure-stdlib token heuristic + pluggable
+      tokenizer, applied before generation *and* judging)
+- [x] Self-query decomposition (`query/self_query.py`: `SelfQueryParser` protocol
+      + `LLMSelfQueryParser` producing a `RetrievalFilter` from free text, tag
+      values read live from the `Tag` enum, lenient→strict coercion, identity
+      fallback)
 - [x] WEB API (FastAPI: `/convert`, `/generate`, `/documents` CRUD, `/tags`)
 
 Planned next:

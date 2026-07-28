@@ -15,18 +15,24 @@ from sparksage.generator import FakeLLMClient
 from sparksage.query import (
     CoercionError,
     ConversationContext,
+    IdentitySelfQueryParser,
     IntentEmptyResponseError,
     IntentResponseParseError,
     IntentResult,
     KeywordIntentRule,
     LLMIntentClassifier,
     LLMQueryRewriter,
+    LLMSelfQueryParser,
     QueryProcessor,
     RewriteEmptyResponseError,
     RewriteResponseParseError,
     RewriteResult,
     RuleIntentClassifier,
     RuleQueryRewriter,
+    SelfQueryResult,
+    coerce_self_query,
+    parse_raw_self_query,
+    parse_self_query_response,
 )
 from sparksage.query.prompts import (
     intent_messages,
@@ -46,7 +52,8 @@ from sparksage.query.schema import (
     parse_raw_rewrite,
     parse_rewrite_response,
 )
-from sparksage.schema.enums import QueryIntent
+from sparksage.query.self_query import RawSelfQuery
+from sparksage.schema.enums import QueryIntent, Tag
 
 
 # --------------------------------------------------------------------------- #
@@ -532,3 +539,179 @@ class TestQueryProcessor:
             QueryProcessor(classifier="not a classifier", rewriter=RuleQueryRewriter())  # type: ignore[arg-type]
         with pytest.raises(TypeError):
             QueryProcessor(classifier=RuleIntentClassifier(), rewriter="nope")  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# Self-query parsing (query + RetrievalFilter decomposition)
+# --------------------------------------------------------------------------- #
+def _self_query_json(
+    query="销售数据",
+    *,
+    tags=None,
+    entities=None,
+    languages=None,
+):
+    return json.dumps(
+        {
+            "query": query,
+            "tags": tags or [],
+            "entities": entities or [],
+            "languages": languages or [],
+        }
+    )
+
+
+class TestSelfQueryCoercion:
+    def test_parse_raw_self_query_lenient(self):
+        raw = parse_raw_self_query(
+            {"query": "x", "tags": ["IMPORTANT"], "extra": "ignored"}
+        )
+        assert isinstance(raw, RawSelfQuery)
+        assert raw.query == "x"
+        assert raw.tags == ["IMPORTANT"]
+
+    def test_parse_raw_rejects_non_object(self):
+        with pytest.raises(CoercionError):
+            parse_raw_self_query([1, 2, 3])  # type: ignore[arg-type]
+
+    def test_parse_response_handles_prose_wrapped(self):
+        raw = parse_self_query_response('sure! {"query": "x", "tags": ["FAQ"]}')
+        assert raw.query == "x"
+        assert raw.tags == ["FAQ"]
+
+    def test_coerce_maps_tags_case_insensitive(self):
+        raw = RawSelfQuery(query="x", tags=["important", "faq"])
+        result = coerce_self_query(raw, "orig")
+        assert result.filter.tags == {Tag.IMPORTANT, Tag.FAQ}
+        assert result.query == "x"
+
+    def test_coerce_drops_foreign_tags(self):
+        raw = RawSelfQuery(query="x", tags=["IMPORTANT", "BOGUS"])
+        result = coerce_self_query(raw, "orig")
+        assert result.filter.tags == {Tag.IMPORTANT}
+
+    def test_coerce_strict_tags_raises_on_foreign(self):
+        raw = RawSelfQuery(query="x", tags=["BOGUS"])
+        with pytest.raises(CoercionError):
+            coerce_self_query(raw, "orig", strict_tags=True)
+
+    def test_coerce_available_tags_restriction(self):
+        raw = RawSelfQuery(query="x", tags=["IMPORTANT", "FAQ"])
+        result = coerce_self_query(raw, "orig", available_tags=[Tag.FAQ])
+        assert result.filter.tags == {Tag.FAQ}
+
+    def test_coerce_entities_and_languages(self):
+        raw = RawSelfQuery(
+            query="x", entities=["SparkSage", "OpenAI"], languages=["en", "zh"]
+        )
+        result = coerce_self_query(raw, "orig")
+        assert result.filter.entities == {"SparkSage", "OpenAI"}
+        assert result.filter.languages == {"en", "zh"}
+
+    def test_coerce_query_falls_back_to_original(self):
+        raw = RawSelfQuery(query="   ")
+        result = coerce_self_query(raw, "original query")
+        assert result.query == "original query"
+
+    def test_coerce_empty_filter_is_empty(self):
+        raw = RawSelfQuery(query="x")
+        result = coerce_self_query(raw, "orig")
+        assert result.filter.is_empty
+
+
+class TestIdentitySelfQueryParser:
+    def test_returns_query_unchanged_with_empty_filter(self):
+        out = IdentitySelfQueryParser().parse("anything goes here")
+        assert isinstance(out, SelfQueryResult)
+        assert out.query == "anything goes here"
+        assert out.filter.is_empty
+
+    def test_implements_protocol(self):
+        from sparksage.query import SelfQueryParser
+
+        assert isinstance(IdentitySelfQueryParser(), SelfQueryParser)
+
+
+class TestLLMSelfQueryParser:
+    def test_parses_decomposition(self):
+        client = FakeLLMClient(
+            responses=[_self_query_json(
+                "销售数据", tags=["IMPORTANT"], entities=["华东"], languages=["zh"]
+            )]
+        )
+        parser = LLMSelfQueryParser(client)
+        out = parser.parse("2025年华东区销售数据")
+        assert out.query == "销售数据"
+        assert out.filter.tags == {Tag.IMPORTANT}
+        assert out.filter.entities == {"华东"}
+        assert out.filter.languages == {"zh"}
+        assert parser.fallbacks == 0
+
+    def test_prompt_advertises_tag_vocabulary(self):
+        client = FakeLLMClient(responses=[_self_query_json("x")])
+        LLMSelfQueryParser(client).parse("x")
+        system = client.last_messages[0]["content"]
+        assert Tag.IMPORTANT.value in system
+        assert Tag.FAQ.value in system
+
+    def test_available_tags_restrict_prompt(self):
+        client = FakeLLMClient(responses=[_self_query_json("x")])
+        LLMSelfQueryParser(client, available_tags=[Tag.WARNING]).parse("x")
+        system = client.last_messages[0]["content"]
+        assert Tag.WARNING.value in system
+        assert Tag.IMPORTANT.value not in system
+
+    def test_falls_back_on_bad_json(self):
+        client = FakeLLMClient(responses=["totally not json"])
+        parser = LLMSelfQueryParser(client)
+        out = parser.parse("real query")
+        assert out.query == "real query"
+        assert out.filter.is_empty
+        assert parser.fallbacks >= 1
+
+    def test_falls_back_on_empty_response(self):
+        client = FakeLLMClient(responses=["  "])
+        parser = LLMSelfQueryParser(client)
+        out = parser.parse("real query")
+        assert out.query == "real query"
+        assert parser.fallbacks >= 1
+
+    def test_foreign_tag_dropped_silently_by_default(self):
+        client = FakeLLMClient(
+            responses=[_self_query_json("x", tags=["BOGUS", "FAQ"])]
+        )
+        out = LLMSelfQueryParser(client).parse("x")
+        assert out.filter.tags == {Tag.FAQ}
+
+    def test_empty_input_returns_empty(self):
+        parser = LLMSelfQueryParser(FakeLLMClient(responses=[]))
+        out = parser.parse("   ")
+        assert out.query == ""
+        assert out.filter.is_empty
+
+    def test_implements_protocol(self):
+        from sparksage.query import SelfQueryParser
+
+        assert isinstance(LLMSelfQueryParser(FakeLLMClient([])), SelfQueryParser)
+
+    def test_repr(self):
+        assert "LLMSelfQueryParser" in repr(LLMSelfQueryParser(FakeLLMClient([])))
+
+
+class TestSelfQueryEndToEnd:
+    def test_filter_consumed_by_retrieval_filter(self):
+        # Proves the parser's output slots straight into RetrievalFilter.matches.
+        from sparksage import IdeaBlock
+        from sparksage.retrieve import RetrievalFilter
+        from sparksage.schema.source import SourceRef
+
+        client = FakeLLMClient(
+            responses=[_self_query_json("deploy", tags=["IMPORTANT"])]
+        )
+        out = LLMSelfQueryParser(client).parse("IMPORTANT deploy steps")
+        assert isinstance(out.filter, RetrievalFilter)
+        block = IdeaBlock(
+            name="A", critical_question="q?", trusted_answer="a",
+            tags=[Tag.IMPORTANT], source=SourceRef(uri="u", title="t", locator="L1"),
+        )
+        assert out.filter.matches(block)
