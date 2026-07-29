@@ -375,9 +375,24 @@ PYTHONPATH=src python3 examples/build_chunks.py
   rewriter's `sub_queries` (COMPARISON / multi-hop decomposition) and the
   expander's variants via the same RRF-fused multi-retrieve path. An optional
   `QACache` (a `lookup`/`store` protocol the `query.SemanticCache` implements)
-  short-circuits the whole pipeline for near-duplicate repeat queries. Not yet
-  wired to the web layer — a future `/api/v1/query` route will be a thin
-  wrapper around `QAEngine.ask`, exactly as `SparkSageService` wraps ingest.
+  short-circuits the whole pipeline for near-duplicate repeat queries. Two
+  Phase-5 self-correction layers are optional knobs: (a) **intent→KB routing**
+  — an `intent_router: Callable[[IntentResult], str | None]` (see the callable
+  `IntentKBRouter` mapping `QueryIntent → kb_id`) merges a classified intent
+  into `RetrievalFilter.kb_id` before retrieval, finally connecting the existing
+  `IntentClassifier` to the existing `KnowledgeBase` multi-tenancy (a per-call
+  `filter.kb_id` always wins); (b) the **self-reflective retrieval loop** — an
+  optional `RetrievalGrader` (`retrieve/grader.py`, the retrieval-side
+  counterpart of `FaithfulnessJudge`) scores chunk relevance after each
+  retrieval, and below `min_relevance` an optional `QueryRefiner`
+  (`query/refiner.py`) refines the query and the engine re-retrieves (up to
+  `max_iterations`, keeping the best-graded result so refinement can never lower
+  quality). This is the middle gate of the symmetric three-stage policy:
+  query-side `min_confidence` → retrieval-side `min_relevance` → answer-side
+  `min_faithfulness`. `QAResult` now carries `relevance` / `refined_query` /
+  `iterations` for transparency. Not yet wired to the web layer — a future
+  `/api/v1/query` route will be a thin wrapper around `QAEngine.ask`, exactly as
+  `SparkSageService` wraps ingest.
 - The knowledge-base core (`kb/`) is the multi-tenant aggregate root — the
   organizational entity the flat `documents/DocumentStore` lacked. `KnowledgeBase`
   (`knowledge_base.py`) owns documents + their IdeaBlocks + a dense `VectorStore`
@@ -391,14 +406,25 @@ PYTHONPATH=src python3 examples/build_chunks.py
   `KnowledgeBaseInfo` (`models.py`) is the serializable metadata; the
   `KnowledgeBaseStore` Protocol + `InMemoryKnowledgeBaseStore` (`store.py`) is
   the multi-tenant registry — live vector state stays on the aggregate.
-- The query enhancements (`query/expander.py` + `query/cache.py`) extend query
-  understanding with multi-query expansion and a semantic cache. The
-  `QueryExpander` protocol ships an `LLMQueryExpander` (n paraphrase variants
-  for RRF-fused recall, lenient→strict, identity fallback) and an
-  `IdentityExpander` no-op. `InMemorySemanticCache` (`cache.py`, pure stdlib)
-  keys on query *meaning* via an `EmbeddingClient` (cosine ≥ threshold) and
-  implements the `QACache` protocol structurally — the biggest cost lever,
-  since the LLM calls dominate. Both are optional knobs on `QAEngine`.
+- The query enhancements (`query/expander.py` + `query/cache.py` +
+  `query/refiner.py`) extend query understanding with multi-query expansion, a
+  semantic cache, and self-corrective refinement. The `QueryExpander` protocol
+  ships an `LLMQueryExpander` (n paraphrase variants for RRF-fused recall,
+  lenient→strict, identity fallback), a `HyDEExpander` (Hypothetical Document
+  Embeddings — drafts a hypothetical answer and retrieves against it; lands in
+  the `trusted_answer` semantic space IdeaBlock is embedded from, so
+  "question→hypothesis→real answer" beats "question→question" for short / vague
+  queries; only fires below a configurable word count to avoid hallucination on
+  long queries), and an `IdentityExpander` no-op. `InMemorySemanticCache`
+  (`cache.py`, pure stdlib) keys on query *meaning* via an `EmbeddingClient`
+  (cosine ≥ threshold) and implements the `QACache` protocol structurally — the
+  biggest cost lever, since the LLM calls dominate. `QueryRefiner`
+  (`refiner.py`) is the self-reflective-retrieval companion: an `LLMQueryRefiner`
+  rewrites the query using the retrieval grader's low-relevance feedback
+  (lenient→strict, identity fallback) and an `IdentityRefiner` no-op; it depends
+  only on the relevance score + reasoning, never on retrieved chunks, so the
+  `query` package stays free of any `retrieve` dependency. All are optional
+  knobs on `QAEngine`.
 - The feedback core (`feedback/`) closes the query→ingest loop (the Phase-4
   flywheel). `FeedbackRecord` (`models.py`, Pydantic v2, `extra="forbid"`,
   closed `FeedbackRating` enum) captures the user's verdict on a surfaced
@@ -501,7 +527,15 @@ Context-Cliff guard (`reader/budget.py`: `trim_to_token_budget` wired into
 applied before generation *and* judging), and self-query decomposition
 (`query/self_query.py`: `SelfQueryParser` protocol + `LLMSelfQueryParser`
 producing a `RetrievalFilter` from free text, tag values read live from the
-`Tag` enum, lenient→strict coercion, identity fallback). The three
+`Tag` enum, lenient→strict coercion, identity fallback), the self-reflective
+retrieval loop (`retrieve/grader.py` `RetrievalGrader` + `query/refiner.py`
+`QueryRefiner` wired into `QAEngine`: relevance grade → query refine →
+re-retrieve, best-graded result kept, the symmetric middle gate between
+query-side `min_confidence` and answer-side `min_faithfulness`), HyDE
+(`query/expander.py:HyDEExpander`, hypothetical-answer retrieval into the
+`trusted_answer` space, short-query gated), and intent→KB routing
+(`qa/engine.py:IntentKBRouter`, classifies intent → `RetrievalFilter.kb_id`).
+The three
 previously "designed but unconsumed" IdeaBlock fields (`keywords`,
 `entities`/`tags`, `source.locator`) are now all wired into retrieval /
 filtering / citations.

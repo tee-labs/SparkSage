@@ -27,9 +27,19 @@ Example
     print(result.text, result.citations)
 """
 
-from sparksage.qa.engine import QACache, QAEngine, QAResult
+from sparksage.qa.engine import (
+    DEFAULT_MAX_REFINE_ITERATIONS,
+    DEFAULT_MIN_RELEVANCE,
+    IntentKBRouter,
+    QACache,
+    QAEngine,
+    QAResult,
+)
 
 __all__ = [
+    "DEFAULT_MAX_REFINE_ITERATIONS",
+    "DEFAULT_MIN_RELEVANCE",
+    "IntentKBRouter",
     "QAEngine",
     "QACache",
     "QAResult",
