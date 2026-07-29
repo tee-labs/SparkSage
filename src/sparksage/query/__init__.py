@@ -63,7 +63,9 @@ from sparksage.query.context import (
     ConversationTurn,
 )
 from sparksage.query.expander import (
+    DEFAULT_HYDE_MAX_WORDS,
     DEFAULT_N_VARIANTS,
+    HyDEExpander,
     IdentityExpander,
     LLMQueryExpander,
     QueryExpander,
@@ -82,6 +84,12 @@ from sparksage.query.prompts import (
     rewrite_messages,
     rewrite_system_prompt,
     rewrite_user_prompt,
+)
+from sparksage.query.refiner import (
+    DEFAULT_MAX_REFINED_CHARS,
+    IdentityRefiner,
+    LLMQueryRefiner,
+    QueryRefiner,
 )
 from sparksage.query.rewriter import (
     CallableRewriteRule,
@@ -129,8 +137,10 @@ __all__ = [
     "DEFAULT_CACHE_THRESHOLD",
     "DEFAULT_CONFIDENCE",
     "DEFAULT_DEFAULT_REPLY",
+    "DEFAULT_HYDE_MAX_WORDS",
     "DEFAULT_INTENT",
     "DEFAULT_MAX_ENTRIES",
+    "DEFAULT_MAX_REFINED_CHARS",
     "DEFAULT_MIN_CONFIDENCE",
     "DEFAULT_N_VARIANTS",
     "DEFAULT_REJECTED_INTENTS",
@@ -138,7 +148,9 @@ __all__ = [
     "CoercionError",
     "ConversationContext",
     "ConversationTurn",
+    "HyDEExpander",
     "IdentityExpander",
+    "IdentityRefiner",
     "IdentitySelfQueryParser",
     "InMemorySemanticCache",
     "IntentClassifier",
@@ -150,10 +162,12 @@ __all__ = [
     "KeywordIntentRule",
     "LLMIntentClassifier",
     "LLMQueryExpander",
+    "LLMQueryRefiner",
     "LLMQueryRewriter",
     "LLMSelfQueryParser",
     "QueryExpander",
     "QueryProcessor",
+    "QueryRefiner",
     "QueryResult",
     "QueryRewriter",
     "RawIntent",
