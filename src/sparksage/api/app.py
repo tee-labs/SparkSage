@@ -72,6 +72,11 @@ ENV_DOC_STORE_TABLE = "SPARKSAGE_DOC_STORE_TABLE"
 ENV_AUTO_TAG_EXTRACTOR = "SPARKSAGE_AUTO_TAG_EXTRACTOR"
 ENV_TAGS_ZH = "SPARKSAGE_TAGS_ZH"
 
+# End-to-end QA
+ENV_EMBEDDING_API_KEY = "SPARKSAGE_EMBEDDING_API_KEY"
+ENV_EMBEDDING_BASE_URL = "SPARKSAGE_EMBEDDING_BASE_URL"
+ENV_EMBEDDING_MODEL = "SPARKSAGE_EMBEDDING_MODEL"
+
 DEFAULT_MODEL = "gpt-4o-mini"
 #: Streaming is on by default -- it is more robust for long generations.
 DEFAULT_STREAM = True
@@ -79,6 +84,8 @@ DEFAULT_STREAM = True
 DEFAULT_DOC_STORE_TABLE = "documents"
 #: Default keyword-extraction algorithm used for auto-tagging.
 DEFAULT_AUTO_TAG_EXTRACTOR = "rake"
+#: Default embedding model for the QA knowledge base.
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 
 _TRUTHY = {"1", "true", "yes", "on"}
 _FALSY = {"0", "false", "no", "off"}
@@ -199,7 +206,135 @@ def _build_document_store():
     return SqliteDocumentStore(path, table=table)
 
 
-def create_app(service: SparkSageService | None = None) -> Any:
+def build_qa_service():
+    """Wire a full end-to-end :class:`QAService` from configuration.
+
+    Composes the ingest pipeline (:class:`SparkSageService`) with the retrieval
+    + answer pipeline (:class:`QAEngine` over a :class:`KnowledgeBase`), sharing
+    one LLM client across generation / query-processing / answering and one
+    embedding client across indexing / retrieval. Reads the same env vars as
+    :func:`build_default_service` plus:
+
+    ============================  =============================================
+    ``SPARKSAGE_EMBEDDING_API_KEY``  Embedding API key (falls back to the LLM key)
+    ``SPARKSAGE_EMBEDDING_BASE_URL`` Embedding base URL (falls back to LLM base URL)
+    ``SPARKSAGE_EMBEDDING_MODEL``    Embedding model (default ``text-embedding-3-small``)
+    ============================  =============================================
+
+    When no LLM key is set the QA routes return ``503`` with a clear message
+    (the full pipeline needs an LLM for both generation and answering).
+    """
+    from sparksage.api.qa_service import QAService
+    from sparksage.embed.indexer import BlockEmbedder
+    from sparksage.reader.faithfulness import LLMFaithfulnessJudge
+    from sparksage.reader.generator import LLMAnswerGenerator
+    from sparksage.reader.orchestrator import Reader
+
+    load_dotenv()
+    configure_logging()
+
+    api_key = _env(ENV_API_KEY) or _env(ENV_OPENAI_API_KEY)
+    if not api_key:
+        _logger.warning(
+            "no %s/%s set; the QA routes will return 503",
+            ENV_API_KEY,
+            ENV_OPENAI_API_KEY,
+        )
+
+    base_url = _env(ENV_BASE_URL) or _env(ENV_OPENAI_BASE_URL)
+    model = _env(ENV_MODEL) or DEFAULT_MODEL
+    stream = _env_bool(ENV_STREAM, DEFAULT_STREAM)
+    language = _env("SPARKSAGE_LANGUAGE") or "en"
+
+    llm_client: OpenAICompatibleClient | None = None
+    generator: IdeaBlockGenerator | None = None
+    if api_key:
+        llm_client = OpenAICompatibleClient(
+            base_url=base_url, api_key=api_key, model=model, stream=stream
+        )
+        generator = IdeaBlockGenerator(llm_client, language=language)
+
+    spark_service = SparkSageService(
+        converter=MarkdownConverter(backend=MarkItDownBackend()),
+        cleaner=TextCleaner(),
+        generator=generator,
+        document_store=_build_document_store(),
+        keyword_extractor=make_extractor(
+            _env(ENV_AUTO_TAG_EXTRACTOR) or DEFAULT_AUTO_TAG_EXTRACTOR,
+            tokenizer=AutoTokenizer(use_jieba=_env_bool(ENV_TAGS_ZH, False)),
+        ),
+    )
+
+    embed_api_key = _env(ENV_EMBEDDING_API_KEY) or api_key
+    embed_base_url = _env(ENV_EMBEDDING_BASE_URL) or base_url
+    embed_model = _env(ENV_EMBEDDING_MODEL) or DEFAULT_EMBEDDING_MODEL
+    embedder = BlockEmbedder(
+        _build_embedding_client(embed_api_key, embed_base_url, embed_model)
+    )
+
+    reader: Reader
+    if llm_client is not None:
+        reader = Reader(
+            generator=LLMAnswerGenerator(llm_client),
+            faithfulness_judge=LLMFaithfulnessJudge(llm_client),
+        )
+    else:
+        reader = Reader(generator=_DummyAnswerGenerator())
+
+    return QAService(
+        service=spark_service,
+        embedder=embedder,
+        reader=reader,
+    )
+
+
+def _build_embedding_client(api_key, base_url, model):
+    """Resolve an :class:`EmbeddingClient` from configuration.
+
+    Falls back to a :class:`FakeEmbeddingClient` when no API key is available so
+    the QA service stays constructible (and testable) with zero configuration --
+    though retrieval quality will be meaningless without a real embedder.
+    """
+    from sparksage.embed.client import FakeEmbeddingClient
+
+    if not api_key:
+        _logger.warning(
+            "no embedding API key; using FakeEmbeddingClient (retrieval is "
+            "non-functional until a real key is set)"
+        )
+        return FakeEmbeddingClient(dimension=128)
+    from sparksage.embed.client import OpenAIEmbeddingClient
+
+    return OpenAIEmbeddingClient(
+        base_url=base_url, api_key=api_key, model=model
+    )
+
+
+class _DummyAnswerGenerator:
+    """Stand-in answer generator used when no LLM is configured.
+
+    Always abstains with a clear message so the QA route returns a helpful 503
+    rather than crashing when the LLM key is missing.
+    """
+
+    def generate(self, query, chunks):  # noqa: ARG002
+        from sparksage.reader.schema import GeneratedAnswer
+
+        return GeneratedAnswer(
+            text="",
+            citations=[],
+            grounded_block_ids=[],
+            confidence=0.0,
+            abstained=True,
+            abstention_reason="no LLM configured; set SPARKSAGE_API_KEY to enable answering",
+        )
+
+
+def create_app(
+    service: SparkSageService | None = None,
+    *,
+    qa_service: Any = None,
+) -> Any:
     """Create and configure a FastAPI application.
 
     Parameters
@@ -208,6 +343,11 @@ def create_app(service: SparkSageService | None = None) -> Any:
         A pre-built :class:`SparkSageService`. When omitted,
         :func:`build_default_service` is used (which reads env vars). Inject a
         custom service (e.g. with fakes) for testing.
+    qa_service:
+        An optional pre-built :class:`QAService`. When omitted, the end-to-end
+        QA routes (``/api/v1/query``, ``/api/v1/knowledge_base/...``,
+        ``/api/v1/feedback``) are *not* mounted. Pass an instance (or call
+        :func:`build_qa_service`) to enable the full knowledge-QA loop.
 
     Raises
     ------
@@ -247,7 +387,12 @@ def create_app(service: SparkSageService | None = None) -> Any:
         to_generate_response,
     )
 
-    svc = service if service is not None else build_default_service()
+    if service is not None:
+        svc = service
+    elif qa_service is not None:
+        svc = qa_service.service
+    else:
+        svc = build_default_service()
 
     app = FastAPI(
         title="SparkSage API",
@@ -257,7 +402,6 @@ def create_app(service: SparkSageService | None = None) -> Any:
         ),
         version=__version__,
     )
-
     @app.get("/api/v1/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
         return HealthResponse(
@@ -475,8 +619,189 @@ def create_app(service: SparkSageService | None = None) -> Any:
     async def list_tags() -> TagsResponse:
         return TagsResponse(tags=svc.list_document_tags())
 
+    # ------------------------------------------------------------------ #
+    # end-to-end QA routes (mounted only when a QAService is provided)
+    # ------------------------------------------------------------------ #
+    if qa_service is not None:
+        _mount_qa_routes(app, qa_service)
+
     app.state.service = svc
+    if qa_service is not None:
+        app.state.qa_service = qa_service
     return app
+
+
+def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
+    """Mount the end-to-end QA routes onto ``app`` using ``qa_svc``.
+
+    Extracted from :func:`create_app` so the QA wiring stays readable and the
+    base convert/generate/documents routes work unchanged when no QA service is
+    provided.
+    """
+    from typing import Annotated
+
+    from fastapi import Body, File, Form, HTTPException, Path, UploadFile
+
+    from sparksage.api.pipeline import GenerationNotConfiguredError
+    from sparksage.api.qa_service import QAService
+    from sparksage.api.schemas import (
+        AskRequest,
+        AskResponse,
+        FeedbackRequest,
+        FeedbackResponse,
+        FeedbackStatsResponse,
+        IngestAndIndexResponse,
+        KnowledgeBaseResponse,
+        _build_filter_from_request,
+        _to_ask_response,
+        _to_ingest_response,
+    )
+
+    if not isinstance(qa_svc, QAService):
+        raise TypeError("qa_service must be a QAService instance")
+
+    @app.post(
+        "/api/v1/knowledge_base/ingest",
+        response_model=IngestAndIndexResponse,
+        summary="Upload knowledge: parse -> chunk -> embed -> index",
+    )
+    async def kb_ingest(
+        file: Annotated[
+            UploadFile, File(description="The source document to ingest and index.")
+        ],
+        title: Annotated[
+            str | None, Form(description="Explicit title override.")
+        ] = None,
+        tags: Annotated[
+            str | None,
+            Form(description="Comma-separated tags. When empty, tags are auto-extracted."),
+        ] = None,
+        auto_tag: Annotated[
+            bool, Form(description="Auto-extract tags when none are given.")
+        ] = True,
+        clean: Annotated[
+            bool, Form(description="Apply text cleaning before generation.")
+        ] = True,
+        summarize: Annotated[
+            bool, Form(description="Produce a document-level summary.")
+        ] = True,
+        top_k: Annotated[
+            int, Form(ge=1, description="Number of tags to extract when auto-tagging.")
+        ] = 8,
+        max_blocks: Annotated[
+            int | None, Form(ge=1, description="Max IdeaBlocks to emit.")
+        ] = None,
+        language: Annotated[
+            str | None, Form(description="BCP-47 code written into every block.")
+        ] = None,
+    ) -> IngestAndIndexResponse:
+        data = await file.read()
+        parsed_tags = None
+        if tags is not None:
+            parsed_tags = [p.strip() for p in tags.split(",") if p.strip()]
+        try:
+            result = qa_svc.ingest_and_index(
+                data,
+                file.filename,
+                title=title,
+                tags=parsed_tags,
+                auto_tag=auto_tag,
+                clean=clean,
+                summarize=summarize,
+                top_k=top_k,
+                max_blocks=max_blocks,
+                language=language,
+            )
+        except GenerationNotConfiguredError as exc:
+            raise HTTPException(status_code=503, detail=_detail(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail=_detail(exc)) from exc
+        return _to_ingest_response(result)
+
+    @app.post(
+        "/api/v1/query",
+        response_model=AskResponse,
+        summary="Ask a question against the knowledge base",
+    )
+    async def ask(
+        body: Annotated[AskRequest, Body(description="The question + options.")],
+    ) -> AskResponse:
+        flt, context = _build_filter_from_request(body)
+        try:
+            result = qa_svc.ask(
+                body.query,
+                context=context,
+                filter=flt,
+                k=body.k,
+                use_lexical=body.use_lexical,
+                use_rerank=body.use_rerank,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=_detail(exc)) from exc
+        return _to_ask_response(result)
+
+    @app.get(
+        "/api/v1/knowledge_base",
+        response_model=KnowledgeBaseResponse,
+        summary="Knowledge-base snapshot (block / document counts)",
+    )
+    async def kb_info() -> KnowledgeBaseResponse:
+        info = qa_svc.knowledge_base_info()
+        return KnowledgeBaseResponse(**info)
+
+    @app.delete(
+        "/api/v1/knowledge_base/documents/{doc_id}",
+        summary="Remove a document and cascade-remove its indexed blocks",
+    )
+    async def kb_remove_document(
+        doc_id: Annotated[str, Path(description="The document id.")],
+    ) -> dict[str, bool]:
+        deleted = qa_svc.remove_document(doc_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"document not found: {doc_id}")
+        return {"deleted": True}
+
+    @app.post(
+        "/api/v1/feedback",
+        response_model=FeedbackResponse,
+        summary="Record a user verdict on a surfaced answer",
+    )
+    async def record_feedback(
+        body: Annotated[FeedbackRequest, Body(description="The feedback record.")],
+    ) -> FeedbackResponse:
+        valid = {"positive", "negative", "corrected"}
+        if body.rating not in valid:
+            raise HTTPException(
+                status_code=422,
+                detail=f"rating must be one of {sorted(valid)}",
+            )
+        record = qa_svc.add_feedback(
+            body.query,
+            body.answer_text,
+            body.rating,
+            correction=body.correction,
+            block_ids=body.block_ids,
+        )
+        return FeedbackResponse(
+            feedback_id=record.feedback_id,
+            rating=record.rating.value,
+            acknowledged=True,
+        )
+
+    @app.get(
+        "/api/v1/feedback",
+        response_model=FeedbackStatsResponse,
+        summary="Aggregate feedback stats (approval ratio)",
+    )
+    async def feedback_stats() -> FeedbackStatsResponse:
+        stats = qa_svc.feedback_stats()
+        return FeedbackStatsResponse(
+            total=stats.total,
+            positive=stats.positive,
+            negative=stats.negative,
+            corrected=stats.corrected,
+            approval=stats.approval,
+        )
 
 
 def _detail(exc: BaseException) -> str:
@@ -506,10 +831,14 @@ __all__ = [
     "DEFAULT_STREAM",
     "ENV_API_KEY",
     "ENV_BASE_URL",
+    "ENV_EMBEDDING_API_KEY",
+    "ENV_EMBEDDING_BASE_URL",
+    "ENV_EMBEDDING_MODEL",
     "ENV_LOG_LEVEL",
     "ENV_MODEL",
     "ENV_STREAM",
     "build_default_service",
+    "build_qa_service",
     "configure_logging",
     "create_app",
     "run",

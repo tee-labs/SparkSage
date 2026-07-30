@@ -8,11 +8,15 @@ consistent with the project's ``ConfigDict(extra="forbid")`` convention.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from sparksage.api.pipeline import GenerateOutput
+
+if TYPE_CHECKING:
+    from sparksage.query.context import ConversationContext
+    from sparksage.retrieve.models import RetrievalFilter
 
 
 class SourceInfo(BaseModel):
@@ -287,3 +291,299 @@ def to_document_list_response(
         limit=limit,
         offset=offset,
     )
+
+
+# ---------------------------------------------------------------------------- #
+# End-to-end QA (ingest-and-index + query + feedback)
+# ---------------------------------------------------------------------------- #
+class IngestAndIndexResponse(BaseModel):
+    """Response body for ``POST /api/v1/knowledge_base/ingest``.
+
+    Confirms that uploaded knowledge was parsed, chunked into IdeaBlocks, and
+    indexed -- i.e. it is now retrievable via ``POST /api/v1/query``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    doc_id: str = Field(description="Stored document id.")
+    block_count: int = Field(description="Number of IdeaBlocks indexed.")
+    blocks: list[dict[str, Any]] = Field(
+        description=(
+            "Generated IdeaBlocks serialized as flat JSON dicts "
+            "(via ``IdeaBlock.model_dump(mode='json')``)."
+        )
+    )
+    title: str | None = Field(default=None, description="Document title.")
+    source: SourceInfo = Field(description="Provenance of the source document.")
+    tags: list[str] = Field(default_factory=list, description="Document tags.")
+    summary: str | None = Field(default=None, description="Document summary.")
+
+
+class AskRequest(BaseModel):
+    """JSON body for ``POST /api/v1/query``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(..., min_length=1, description="The natural-language question.")
+    k: int | None = Field(default=None, ge=1, description="Top-k chunks to retrieve.")
+    use_lexical: bool | None = Field(
+        default=None, description="Toggle the BM25 lexical leg of hybrid search."
+    )
+    use_rerank: bool | None = Field(
+        default=None, description="Toggle re-ranking of the fused pool."
+    )
+    tags: list[str] | None = Field(
+        default=None,
+        description="Restrict to blocks carrying at least one of these Tag values.",
+    )
+    entities: list[str] | None = Field(
+        default=None, description="Restrict to blocks referencing these entities."
+    )
+    languages: list[str] | None = Field(
+        default=None, description="Restrict to blocks in these languages."
+    )
+    history: list[dict[str, str]] | None = Field(
+        default=None,
+        description=(
+            "Prior conversation turns for multi-turn anaphora resolution. "
+            'Each item is {"role": "user"|"assistant", "content": "..."}.'
+        ),
+    )
+
+
+class CitationOut(BaseModel):
+    """A single grounded citation backing part of a generated answer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    block_id: str = Field(description="Backing IdeaBlock id.")
+    quote: str = Field(default="", description="Supporting snippet.")
+    uri: str | None = Field(default=None, description="``source.uri`` of the block.")
+    locator: str | None = Field(
+        default=None, description="``source.locator`` (page / line / anchor)."
+    )
+    title: str | None = Field(default=None, description="``source.title`` of the block.")
+
+
+class RetrievedChunkOut(BaseModel):
+    """One retrieved chunk surfaced to the caller (for transparency)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    block_id: str = Field(description="The IdeaBlock id.")
+    name: str = Field(description="Block name / short title.")
+    critical_question: str = Field(description="The question this block answers.")
+    trusted_answer: str = Field(description="The verified answer text.")
+    score: float = Field(description="Final relevance score (higher is better).")
+    rank: int = Field(default=0, description="0-indexed position in the ranked list.")
+
+
+class AskResponse(BaseModel):
+    """Response body for ``POST /api/v1/query`` -- a grounded answer or abstention."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(description="The original question.")
+    answer: str = Field(description="The surfaced answer (or abstention reply).")
+    abstained: bool = Field(
+        description="Whether the system chose not to answer (low faithfulness / recall)."
+    )
+    abstention_reason: str | None = Field(
+        default=None, description="Why the system abstained (when ``abstained``)."
+    )
+    citations: list[CitationOut] = Field(
+        default_factory=list,
+        description="Grounded citations, each bound to ``source.locator``.",
+    )
+    retrieved: list[RetrievedChunkOut] = Field(
+        default_factory=list,
+        description="The retrieved chunks backing the answer (for transparency).",
+    )
+    cached: bool = Field(
+        default=False, description="Whether the result was served from the cache."
+    )
+    confidence: float = Field(
+        default=0.0, description="Effective confidence (generator * faithfulness)."
+    )
+    intent: str | None = Field(
+        default=None, description="Classified query intent (when a processor is wired)."
+    )
+
+
+class KnowledgeBaseResponse(BaseModel):
+    """Snapshot of the knowledge base behind the QA service."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kb_id: str = Field(description="Stable unique id.")
+    name: str = Field(description="Human-readable KB name.")
+    block_count: int = Field(description="Number of indexed IdeaBlocks.")
+    document_count: int = Field(description="Number of stored documents.")
+    language: str = Field(default="en", description="Default block language.")
+    description: str | None = Field(default=None, description="Free-text description.")
+    tags: list[str] = Field(default_factory=list, description="KB-level labels.")
+
+
+class FeedbackRequest(BaseModel):
+    """JSON body for ``POST /api/v1/feedback``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(..., min_length=1, description="The query that produced the answer.")
+    answer_text: str = Field(default="", description="The surfaced answer text.")
+    rating: str = Field(
+        ...,
+        description="One of: positive | negative | corrected.",
+    )
+    correction: str | None = Field(
+        default=None, description="User-supplied corrected answer (for 'corrected')."
+    )
+    block_ids: list[str] | None = Field(
+        default=None, description="Block ids the answer was built from."
+    )
+
+
+class FeedbackResponse(BaseModel):
+    """Response body for ``POST /api/v1/feedback``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    feedback_id: str = Field(description="Stored feedback id.")
+    rating: str = Field(description="The recorded rating.")
+    acknowledged: bool = Field(default=True)
+
+
+class FeedbackStatsResponse(BaseModel):
+    """Response body for ``GET /api/v1/feedback``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    total: int = Field(default=0, description="Total feedback records.")
+    positive: int = Field(default=0, description="Positive count.")
+    negative: int = Field(default=0, description="Negative count.")
+    corrected: int = Field(default=0, description="Corrected count.")
+    approval: float = Field(default=0.0, description="Approval ratio (positive / total).")
+
+
+def _to_ingest_response(result: object) -> IngestAndIndexResponse:
+    """Build an :class:`IngestAndIndexResponse` from an :class:`IngestResult`."""
+    return IngestAndIndexResponse(
+        doc_id=result.doc_id,
+        block_count=result.block_count,
+        blocks=[b.model_dump(mode="json") for b in result.blocks],
+        title=result.title,
+        source=SourceInfo(uri=result.source.uri, title=result.source.title),
+        tags=list(result.tags),
+        summary=result.summary,
+    )
+
+
+def _build_filter_from_request(
+    body: AskRequest,
+) -> tuple[RetrievalFilter | None, ConversationContext | None]:
+    """Translate an :class:`AskRequest` into the retrieval filter + context."""
+    from sparksage.query.context import ConversationContext
+    from sparksage.retrieve.models import RetrievalFilter
+    from sparksage.schema.enums import Tag
+
+    flt: RetrievalFilter | None = None
+    if body.tags:
+        parsed: set[Tag] = set()
+        for raw in body.tags:
+            try:
+                parsed.add(Tag(raw))
+            except ValueError:
+                continue
+        if parsed:
+            flt = RetrievalFilter(tags=parsed)
+    if body.entities:
+        ent_set = set(body.entities)
+        flt = RetrievalFilter(entities=ent_set) if flt is None else _merge(flt, entities=ent_set)
+    if body.languages:
+        lang_set = set(body.languages)
+        flt = (
+            RetrievalFilter(languages=lang_set)
+            if flt is None
+            else _merge(flt, languages=lang_set)
+        )
+
+    context: ConversationContext | None = None
+    if body.history:
+        ctx = ConversationContext()
+        for turn in body.history:
+            role = turn.get("role", "user")
+            content = turn.get("content", "")
+            ctx = ctx.with_turn(role, content)
+        context = ctx
+
+    return flt, context
+
+
+def _merge(flt: RetrievalFilter, **kw: Any) -> RetrievalFilter:
+    from dataclasses import replace
+
+    return replace(flt, **kw)
+
+
+def _to_ask_response(result: QAResultLike) -> AskResponse:
+    """Build an :class:`AskResponse` from a :class:`~sparksage.qa.QAResult`."""
+    citations = [
+        CitationOut(
+            block_id=str(getattr(c, "block_id", "")),
+            quote=getattr(c, "quote", "") or "",
+            uri=getattr(c, "uri", None),
+            locator=getattr(c, "locator", None),
+            title=getattr(c, "title", None),
+        )
+        for c in result.citations
+    ]
+
+    retrieved: list[RetrievedChunkOut] = []
+    if result.retrieval is not None:
+        for chunk in result.retrieval.chunks:
+            retrieved.append(
+                RetrievedChunkOut(
+                    block_id=str(chunk.block.id),
+                    name=chunk.block.name,
+                    critical_question=chunk.block.critical_question,
+                    trusted_answer=chunk.block.trusted_answer,
+                    score=chunk.score,
+                    rank=getattr(chunk, "rank", 0),
+                )
+            )
+
+    intent: str | None = None
+    if result.query_result is not None and result.query_result.intent is not None:
+        intent = (
+            result.query_result.intent.intent.value
+            if hasattr(result.query_result.intent.intent, "value")
+            else str(result.query_result.intent.intent)
+        )
+
+    return AskResponse(
+        query=result.query,
+        answer=result.text,
+        abstained=result.abstained,
+        abstention_reason=(
+            result.answer.abstention_reason
+            if result.answer is not None
+            else None
+        ),
+        citations=citations,
+        retrieved=retrieved,
+        cached=result.cached,
+        confidence=result.answer.confidence if result.answer is not None else 0.0,
+        intent=intent,
+    )
+
+
+class QAResultLike:
+    """Structural type hint for :func:`_to_ask_response` (avoids import cycle)."""
+
+    query: str
+    citations: list[Any]
+    retrieval: Any
+    query_result: Any
+    answer: Any
+    abstained: bool
+    cached: bool
