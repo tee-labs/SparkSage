@@ -311,6 +311,29 @@ PYTHONPATH=src python3 examples/build_chunks.py
   deliberately omits `from __future__ import annotations` so FastAPI can
   resolve the lazily-imported route-parameter types (`UploadFile`/`File`/`Form`)
   via eager annotation evaluation.
+- The configuration management (`api/config_manager.py`) is the pure-stdlib
+  bridge between the WEB UI's `/config` page and the `.env` file. It depends
+  only on `sparksage.config.parse_env_file` (never a third-party env loader).
+  `read_config` reports the *effective* value of every known key (a real env
+  var wins over the file, exactly like `load_dotenv`), masking any key ending in
+  `_API_KEY` as `"****"` so the response is browser-safe. `write_config` is a
+  *patch* (only supplied keys are touched; comments, ordering and unknown keys
+  are preserved), rejects unknown key names outside the `SPARKSAGE_*` /
+  `OPENAI_*` / `*_API_KEY` surface, and treats a `"****"` secret value as a
+  no-op so a GET→POST round-trip never clobbers a secret with the mask. It also
+  writes through to `os.environ` (12-factor: never overriding a real env var)
+  so the running process stays in sync until the manual restart.
+- The static frontend serving (`_mount_static_frontend` in `app.py`) lets the
+  built React + Ant Design WEB UI ship from the same FastAPI origin. When a
+  Vite build is found (`SPARKSAGE_WEB_DIST`, or `web/dist` next to the CWD / the
+  repo root), `/assets` is mounted straight from disk and a catch-all route
+  (registered *last*, so every `/api/...` route wins first) serves the SPA
+  `index.html` for non-API GET paths. Any method on an unknown `/api/` path
+  returns a real `404` (not a `405`) so API consumers get a clean "not found".
+  The `web/` app (Vite + React 18 + TS + antd 5) covers 6 demo pages:
+  `/config`, `/ingest`, `/documents`, `/knowledge-base`, `/qa`, `/feedback`
+  (left-side collapsible antd `Menu`); the Docker image builds it in a
+  `node:20` stage and copies `web/dist` into `/app/web/dist`.
 - The retrieval core (`retrieve/`) is the query-side counterpart of the ingest
   pipeline and the layer that finally *consumes* the three "designed but
   unconsumed" IdeaBlock fields. It depends only on the existing `VectorStore`

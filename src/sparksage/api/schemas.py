@@ -462,7 +462,140 @@ class FeedbackStatsResponse(BaseModel):
     positive: int = Field(default=0, description="Positive count.")
     negative: int = Field(default=0, description="Negative count.")
     corrected: int = Field(default=0, description="Corrected count.")
-    approval: float = Field(default=0.0, description="Approval ratio (positive / total).")
+    approval: float = Field(default=0, description="Approval ratio (positive / total).")
+
+
+class ConfigResponse(BaseModel):
+    """Response body for ``GET /api/v1/config``.
+
+    Each known key is always present (empty string when unset). Secrets (keys
+    ending in ``_API_KEY``) are returned as ``"****"`` rather than the real
+    value so the response is safe to render in a browser.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    variables: dict[str, str] = Field(
+        description="Effective configuration values (secrets masked)."
+    )
+
+
+class ConfigUpdateResponse(BaseModel):
+    """Response body for ``POST /api/v1/config``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    applied: list[str] = Field(
+        description="Keys that were written (secrets left unchanged are excluded)."
+    )
+    restart_required: bool = Field(
+        default=True,
+        description="Always true -- a restart is needed for new values to take effect.",
+    )
+    message: str = Field(description="Human-readable status message.")
+
+
+class BlockOut(BaseModel):
+    """One IdeaBlock row for the knowledge-base listing.
+
+    Serialized as a flat JSON dict (via ``IdeaBlock.model_dump(mode='json')``)
+    so all schema fields (tags / entities / status / parents / ...) are
+    available to the detail view.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(description="Stable unique block id.")
+    name: str = Field(description="Short title / headline.")
+    critical_question: str = Field(description="The question this block answers.")
+    trusted_answer: str = Field(description="The verified answer text.")
+    tags: list[str] = Field(default_factory=list, description="Coarse semantic tags.")
+    keywords: list[str] = Field(default_factory=list, description="Lexical keywords.")
+    language: str = Field(default="en", description="Answer language code.")
+    status: str = Field(default="DRAFT", description="Lifecycle status.")
+    confidence: float | None = Field(default=None, description="Merge confidence.")
+    parents: list[str] = Field(default_factory=list, description="Merged-in block ids.")
+    source: SourceInfo | None = Field(default=None, description="Block provenance.")
+    kb_id: str | None = Field(default=None, description="Owning knowledge-base id.")
+    created_at: datetime | None = Field(default=None, description="Creation time.")
+    updated_at: datetime | None = Field(default=None, description="Last update time.")
+
+
+class BlockListResponse(BaseModel):
+    """Paginated IdeaBlock listing for the knowledge-base browser."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[BlockOut] = Field(description="The current page of blocks.")
+    count: int = Field(description="Number of items in this page.")
+    total: int = Field(description="Total blocks matching the filter.")
+    limit: int = Field(description="Page size used.")
+    offset: int = Field(description="Offset used.")
+
+
+class FeedbackRecordOut(BaseModel):
+    """One feedback record for the recent-feedback listing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    feedback_id: str = Field(description="Stable feedback id.")
+    query: str = Field(description="The query that produced the answer.")
+    answer_text: str = Field(default="", description="The surfaced answer text.")
+    rating: str = Field(description="positive | negative | corrected.")
+    correction: str | None = Field(default=None, description="User-supplied correction.")
+    block_ids: list[str] = Field(default_factory=list, description="Backing block ids.")
+    kb_id: str | None = Field(default=None, description="Source knowledge base.")
+    created_at: datetime = Field(description="UTC timestamp.")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Caller metadata.")
+
+
+class FeedbackListResponse(BaseModel):
+    """Paginated recent-feedback listing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[FeedbackRecordOut] = Field(description="Feedback records, newest-first.")
+    count: int = Field(description="Number of items in this page.")
+    total: int = Field(description="Total feedback records.")
+    limit: int = Field(description="Page size used.")
+    offset: int = Field(description="Offset used.")
+
+
+def _to_block_out(block: object) -> BlockOut:
+    """Build a :class:`BlockOut` from an :class:`~sparksage.schema.IdeaBlock`."""
+    tags = []
+    for t in getattr(block, "tags", []) or []:
+        tags.append(t.value if hasattr(t, "value") else str(t))
+    source_obj = getattr(block, "source", None)
+    source = (
+        SourceInfo(
+            uri=getattr(source_obj, "uri", None),
+            title=getattr(source_obj, "title", None),
+        )
+        if source_obj is not None
+        else None
+    )
+    parents = []
+    for p in getattr(block, "parents", []) or []:
+        parents.append(str(p))
+    status_val = getattr(block, "status", None)
+    status_str = status_val.value if hasattr(status_val, "value") else str(status_val)
+    return BlockOut(
+        id=str(block.id),
+        name=getattr(block, "name", ""),
+        critical_question=getattr(block, "critical_question", ""),
+        trusted_answer=getattr(block, "trusted_answer", ""),
+        tags=tags,
+        keywords=list(getattr(block, "keywords", []) or []),
+        language=getattr(block, "language", "en"),
+        status=status_str,
+        confidence=getattr(block, "confidence", None),
+        parents=parents,
+        source=source,
+        kb_id=getattr(block, "kb_id", None),
+        created_at=getattr(block, "created_at", None),
+        updated_at=getattr(block, "updated_at", None),
+    )
 
 
 def _to_ingest_response(result: object) -> IngestAndIndexResponse:

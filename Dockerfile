@@ -52,6 +52,18 @@ ARG PYTHON_VERSION=3.11
 # extended image (e.g. append chroma / pgvector for production vector stores).
 ARG SPARKSAGE_EXTRAS="api,convert,llm,embed,rerank,distill,tags-zh"
 
+# --------------------------------------------------------------------------- #
+# Frontend build stage: compile the React + Ant Design WEB UI to static assets.
+# The built `web/dist` is served by FastAPI behind a catch-all route, so the
+# whole product (API + UI) ships in one container on :8000.
+# --------------------------------------------------------------------------- #
+FROM node:20-slim AS frontend
+WORKDIR /web
+COPY web/package.json web/package-lock.json* ./
+RUN npm install --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
+
 FROM python:${PYTHON_VERSION}-slim AS builder
 
 ENV PIP_NO_CACHE_DIR=1 \
@@ -90,6 +102,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install /wheels/sparksage-*.whl "sparksage[${SPARKSAGE_EXTRAS}]" && \
     rm -rf /wheels && \
     python -c "import sparksage; print(sparksage.__version__)"
+
+# Built WEB UI. FastAPI auto-serves it when web/dist is present next to the app
+# (served behind a catch-all route, so one container exposes API + UI on :8000).
+COPY --from=frontend --chown=sparksage:sparksage /web/dist /app/web/dist
 
 USER sparksage
 
