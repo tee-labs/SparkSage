@@ -1191,25 +1191,41 @@ PYTHONPATH=src python3 examples/serve_api.py
 
 The repository ships a production-ready [`Dockerfile`](Dockerfile) that builds
 the library and serves the WEB API over uvicorn. The image is built as a
-non-root, multi-stage image with the `convert` + `llm` extras pre-installed, so
-both `/convert` and `/generate` work out of the box — only secrets need to be
-provided at run time.
+non-root, multi-stage image with the **full extras set** pre-installed
+(``api``, ``convert``, ``llm``, ``embed``, ``rerank``, ``distill``, ``tags-zh``),
+so convert / generate / documents *and* the end-to-end QA pipeline
+(`/knowledge_base/ingest`, `/query`, `/feedback`) all work out of the box —
+only secrets need to be provided at run time. The QA routes are mounted
+automatically because `SPARKSAGE_ENABLE_QA=1` is the default.
 
 ### Build & run
 
 ```bash
-# build the image (Python 3.11 by default; override with a build arg)
+# build the full image (Python 3.11 by default; override with a build arg)
 docker build -t sparksage:latest .
 docker build --build-arg PYTHON_VERSION=3.12 -t sparksage:latest .
 
+# slim image: convert + generate + documents only (no embeddings / QA)
+docker build --build-arg SPARKSAGE_EXTRAS=api,convert,llm -t sparksage:slim .
+docker run --rm -p 8000:8000 -e SPARKSAGE_ENABLE_QA=0 sparksage:slim
+
+# extended image with production vector stores
+docker build \
+  --build-arg SPARKSAGE_EXTRAS=api,convert,llm,embed,rerank,distill,tags-zh,chroma,pgvector \
+  -t sparksage:full .
+
 # run it, mounting secrets via an env-file (recommended):
 docker run --rm -p 8000:8000 --env-file .env sparksage:latest
+
+# or mount a .env directly into the working dir (auto-loaded at startup):
+docker run --rm -p 8000:8000 -v "$PWD/.env:/app/.env:ro" sparksage:latest
 
 # or pass individual variables:
 docker run --rm -p 8000:8000 \
   -e SPARKSAGE_API_KEY=sk-... \
   -e SPARKSAGE_BASE_URL=https://your-endpoint/v1 \
   -e SPARKSAGE_MODEL=gpt-4o-mini \
+  -e SPARKSAGE_EMBEDDING_API_KEY=sk-... \
   -e SPARKSAGE_STREAM=true \
   sparksage:latest
 ```
@@ -1218,8 +1234,10 @@ The API is then live at `http://localhost:8000` (interactive docs at `/docs`),
 and [`/api/v1/health`](#serve-the-web-api) reports whether generation is
 configured.
 
-> No key? The container still starts and serves `/convert` and `/health`;
-> `/generate` returns a clear `503` instead of crashing.
+> No key? The container still starts and serves `/convert`, `/documents`,
+> `/tags` and `/health`; `/generate` and `/query` return a clear `503` instead
+> of crashing. Set `SPARKSAGE_ENABLE_QA=0` to run the slim API only (the QA
+> routes are then not mounted).
 
 ### Docker Compose
 
@@ -1250,9 +1268,16 @@ docker compose logs -f sparksage
   the final layer and the image stays small.
 - **Non-root runtime** — the server runs as a dedicated `sparksage` user
   (uid/gid `1001`), so a process breakout never starts as root.
-- **Pre-bundled extras** — `sparksage[api,convert,llm]` is installed, so PDF /
-  DOCX / PPTX / … conversion and OpenAI-compatible generation work without any
-  extra `pip install` inside the container.
+- **Pre-bundled extras** — the full extras set
+  (`api,convert,llm,embed,rerank,distill,tags-zh`) is installed, so PDF / DOCX /
+  PPTX / … conversion, OpenAI-compatible generation, embeddings + cross-encoder
+  re-ranking, the Distill de-dup pipeline and jieba CJK keyword extraction all
+  work without any extra `pip install` inside the container. Build a slim image
+  with `--build-arg SPARKSAGE_EXTRAS=api,convert,llm` (or extend it with
+  `chroma` / `pgvector` for production vector stores).
+- **Full QA pipeline by default** — `SPARKSAGE_ENABLE_QA=1` is baked in, so the
+  `/api/v1/knowledge_base/ingest`, `/api/v1/query` and `/api/v1/feedback` routes
+  are mounted automatically; set `SPARKSAGE_ENABLE_QA=0` for the slim API.
 - **Built-in health check** — `HEALTHCHECK` polls `/api/v1/health` every 30s,
   so orchestrators (Docker Compose, Swarm, Kubernetes) get liveness for free.
 - **Secrets never baked in** — [`.dockerignore`](.dockerignore) excludes
