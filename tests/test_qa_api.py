@@ -464,3 +464,38 @@ class TestRouteMounting:
 
         resp = client.get("/api/v1/knowledge_base")
         assert resp.status_code == 404
+
+    def test_env_var_auto_builds_qa_service(self, monkeypatch):
+        """SPARKSAGE_ENABLE_QA=1 auto-builds a QA service and mounts QA routes."""
+        import sparksage.api.app as app_module
+
+        qa_svc = _make_qa_service()
+        monkeypatch.setenv("SPARKSAGE_ENABLE_QA", "1")
+        monkeypatch.setattr(app_module, "build_qa_service", lambda: qa_svc)
+        app = create_app()
+        client = TestClient(app)
+
+        resp = client.get("/api/v1/knowledge_base")
+        assert resp.status_code == 200
+        assert app.state.qa_service is qa_svc
+
+    def test_env_var_falsy_does_not_mount_qa_routes(self, monkeypatch):
+        """When SPARKSAGE_ENABLE_QA is unset, QA routes stay unmounted."""
+        import sparksage.api.app as app_module
+        from sparksage.clean.cleaner import TextCleaner
+        from sparksage.convert.backend import FakeConverterBackend
+        from sparksage.convert.converter import MarkdownConverter
+
+        monkeypatch.delenv("SPARKSAGE_ENABLE_QA", raising=False)
+        base_svc = SparkSageService(
+            converter=MarkdownConverter(backend=FakeConverterBackend("# hi")),
+            cleaner=TextCleaner(),
+        )
+        monkeypatch.setattr(
+            app_module, "build_default_service", lambda: base_svc
+        )
+        app = create_app()
+        client = TestClient(app)
+
+        resp = client.get("/api/v1/knowledge_base")
+        assert resp.status_code == 404

@@ -76,6 +76,7 @@ ENV_TAGS_ZH = "SPARKSAGE_TAGS_ZH"
 ENV_EMBEDDING_API_KEY = "SPARKSAGE_EMBEDDING_API_KEY"
 ENV_EMBEDDING_BASE_URL = "SPARKSAGE_EMBEDDING_BASE_URL"
 ENV_EMBEDDING_MODEL = "SPARKSAGE_EMBEDDING_MODEL"
+ENV_ENABLE_QA = "SPARKSAGE_ENABLE_QA"
 
 DEFAULT_MODEL = "gpt-4o-mini"
 #: Streaming is on by default -- it is more robust for long generations.
@@ -347,7 +348,11 @@ def create_app(
         An optional pre-built :class:`QAService`. When omitted, the end-to-end
         QA routes (``/api/v1/query``, ``/api/v1/knowledge_base/...``,
         ``/api/v1/feedback``) are *not* mounted. Pass an instance (or call
-        :func:`build_qa_service`) to enable the full knowledge-QA loop.
+        :func:`build_qa_service`) to enable the full knowledge-QA loop. As a
+        convenience, when neither ``service`` nor ``qa_service`` is provided and
+        the ``SPARKSAGE_ENABLE_QA`` env var is truthy, :func:`build_qa_service`
+        is used automatically -- this is how the Docker image exposes the full
+        pipeline out of the box (``SPARKSAGE_ENABLE_QA=1``).
 
     Raises
     ------
@@ -390,6 +395,9 @@ def create_app(
     if service is not None:
         svc = service
     elif qa_service is not None:
+        svc = qa_service.service
+    elif _env_bool(ENV_ENABLE_QA, False):
+        qa_service = build_qa_service()
         svc = qa_service.service
     else:
         svc = build_default_service()
@@ -831,6 +839,7 @@ __all__ = [
     "DEFAULT_STREAM",
     "ENV_API_KEY",
     "ENV_BASE_URL",
+    "ENV_ENABLE_QA",
     "ENV_EMBEDDING_API_KEY",
     "ENV_EMBEDDING_BASE_URL",
     "ENV_EMBEDDING_MODEL",

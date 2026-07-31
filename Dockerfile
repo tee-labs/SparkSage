@@ -2,22 +2,55 @@
 #
 # SparkSage API image.
 #
-# Builds the library and runs the FastAPI web API (uvicorn factory) with the
-# convert + llm extras enabled, so both /api/v1/convert and /api/v1/generate
-# are functional. Provide SPARKSAGE_API_KEY (or OPENAI_API_KEY) at runtime to
-# enable /generate; without a key the API still serves /convert and /health.
+# Builds the library and runs the FastAPI web API (uvicorn factory). By default
+# the full extras set is installed so the *complete* end-to-end QA pipeline is
+# available out of the box:
+#
+#   * convert + llm  -> /api/v1/convert, /api/v1/generate
+#   * documents      -> /api/v1/documents (CRUD), /api/v1/tags
+#   * embed + rerank -> the knowledge base: /api/v1/knowledge_base/ingest,
+#                       /api/v1/query (mounted when SPARKSAGE_ENABLE_QA is set)
+#   * distill        -> the de-dup pipeline (in-process, /api/v1/distill later)
+#   * tags-zh        -> jieba CJK segmentation for keyword extraction
+#
+# The QA routes are mounted automatically because SPARKSAGE_ENABLE_QA=1 is set
+# below; unset it (or set SPARKSAGE_ENABLE_QA=0) to run the slim convert +
+# generate + documents API only.
+#
+# Provide SPARKSAGE_API_KEY (or OPENAI_API_KEY) at runtime to enable
+# /generate and /query; without a key the API still serves /convert, /documents,
+# /tags and /health, while /generate and /query return a clear 503.
 #
 #   docker build -t sparksage:latest .
+#   # slim image (no QA / embeddings):
+#   docker build --build-arg SPARKSAGE_EXTRAS=api,convert,llm -t sparksage:slim .
+#   # add production vector stores:
+#   docker build \
+#     --build-arg SPARKSAGE_EXTRAS=api,convert,llm,embed,rerank,distill,tags-zh,chroma,pgvector \
+#     -t sparksage:full .
+#
 #   docker run --rm -p 8000:8000 --env-file .env sparksage:latest
+#   # or mount a .env directly into the working dir (auto-loaded at startup):
+#   docker run --rm -p 8000:8000 -v "$PWD/.env:/app/.env:ro" sparksage:latest
 #
 # Env vars (SPARKSAGE_* take priority over OPENAI_*):
-#   SPARKSAGE_API_KEY   API key (falls back to OPENAI_API_KEY)
-#   SPARKSAGE_BASE_URL  OpenAI-compatible base URL (custom endpoint)
-#   SPARKSAGE_MODEL     Model id (default gpt-4o-mini)
-#   SPARKSAGE_STREAM    Stream the LLM response (default true)
-#   SPARKSAGE_LANGUAGE  BCP-47 code written into every block
+#   SPARKSAGE_ENABLE_QA       Mount the full QA pipeline (default "1")
+#   SPARKSAGE_API_KEY         API key (falls back to OPENAI_API_KEY)
+#   SPARKSAGE_BASE_URL        OpenAI-compatible base URL (custom endpoint)
+#   SPARKSAGE_MODEL           Model id (default gpt-4o-mini)
+#   SPARKSAGE_STREAM          Stream the LLM response (default true)
+#   SPARKSAGE_LANGUAGE        BCP-47 code written into every block
+#   SPARKSAGE_EMBEDDING_API_KEY   Embedding key (falls back to the LLM key)
+#   SPARKSAGE_EMBEDDING_BASE_URL  Embedding base URL (falls back to LLM base URL)
+#   SPARKSAGE_EMBEDDING_MODEL     Embedding model (default text-embedding-3-small)
+#   SPARKSAGE_DOC_STORE       Path to a SQLite file for durable document storage
+#   SPARKSAGE_AUTO_TAG_EXTRACTOR  Auto-tag algorithm: rake|tfidf|textrank
+#   SPARKSAGE_TAGS_ZH         Use jieba for CJK segmentation when truthy
 
 ARG PYTHON_VERSION=3.11
+# Full QA pipeline. Override with --build-arg SPARKSAGE_EXTRAS=... for a slim or
+# extended image (e.g. append chroma / pgvector for production vector stores).
+ARG SPARKSAGE_EXTRAS="api,convert,llm,embed,rerank,distill,tags-zh"
 
 FROM python:${PYTHON_VERSION}-slim AS builder
 
@@ -36,10 +69,13 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 FROM python:${PYTHON_VERSION}-slim AS runtime
 
+ARG SPARKSAGE_EXTRAS
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    SPARKSAGE_EXTRAS=${SPARKSAGE_EXTRAS} \
+    SPARKSAGE_ENABLE_QA=1
 
 # Non-root user for runtime safety.
 RUN groupadd --system --gid 1001 sparksage && \
@@ -51,7 +87,7 @@ COPY --from=builder /wheels /wheels
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip install --upgrade pip && \
-    python -m pip install /wheels/sparksage-*.whl "sparksage[api,convert,llm]" && \
+    python -m pip install /wheels/sparksage-*.whl "sparksage[${SPARKSAGE_EXTRAS}]" && \
     rm -rf /wheels && \
     python -c "import sparksage; print(sparksage.__version__)"
 
