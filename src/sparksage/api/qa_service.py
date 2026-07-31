@@ -374,6 +374,79 @@ class QAService:
             return self._feedback_store.stats(kb_id=self._kb.kb_id)
         return FeedbackStats()
 
+    def list_blocks(
+        self,
+        *,
+        tags: list[str] | None = None,
+        language: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[IdeaBlock], int]:
+        """Return a filtered, paginated slice of the knowledge-base blocks.
+
+        ``tags`` is an any-match OR over the block's coarse ``Tag`` values
+        (unknown tag strings are ignored). ``status`` filters by lifecycle
+        status value (``ACTIVE`` / ``MERGED`` / ...). Returns ``(page, total)``
+        so the caller can render pagination. ``total`` is computed against the
+        *filter*, not the whole registry.
+        """
+        from sparksage.schema.enums import BlockStatus, Tag
+
+        blocks = self._kb.blocks()
+        norm_tags = set()
+        if tags:
+            for raw in tags:
+                try:
+                    norm_tags.add(Tag(raw))
+                except ValueError:
+                    continue
+
+        status_enum: BlockStatus | None = None
+        if status:
+            try:
+                status_enum = BlockStatus(status)
+            except ValueError:
+                status_enum = None
+
+        def keep(b: IdeaBlock) -> bool:
+            if norm_tags and not (set(b.tags) & norm_tags):
+                return False
+            if language and (b.language or "en") != language:
+                return False
+            if status_enum is not None and b.status != status_enum:
+                return False
+            return True
+
+        filtered = [b for b in blocks if keep(b)]
+        total = len(filtered)
+        if limit < 1:
+            limit = 1
+        if offset < 0:
+            offset = 0
+        page = filtered[offset : offset + limit]
+        return page, total
+
+    def list_feedback(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[FeedbackRecord], int]:
+        """Return a newest-first paginated slice of feedback records.
+
+        Scoped to this service's knowledge base. Returns ``(page, total)``.
+        """
+        total = self._feedback_store.count(kb_id=self._kb.kb_id)
+        if limit < 1:
+            limit = 1
+        if offset < 0:
+            offset = 0
+        page = self._feedback_store.list(
+            kb_id=self._kb.kb_id, limit=limit, offset=offset
+        )
+        return page, total
+
 
 __all__ = [
     "IngestResult",

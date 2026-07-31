@@ -38,6 +38,7 @@ scope -- is what lets FastAPI see them.
 
 import logging
 import os
+from pathlib import Path
 from typing import Annotated, Any
 
 from sparksage.api.pipeline import (
@@ -377,7 +378,10 @@ def create_app(
         ) from exc
 
     from sparksage import __version__
+    from sparksage.api.config_manager import ConfigError, read_config, write_config
     from sparksage.api.schemas import (
+        ConfigResponse,
+        ConfigUpdateResponse,
         ConvertResponse,
         DocumentListResponse,
         DocumentResponse,
@@ -416,6 +420,43 @@ def create_app(
             status="ok",
             version=__version__,
             generator_configured=svc.has_generator,
+        )
+
+    # ------------------------------------------------------------------ #
+    # configuration management routes (edit the .env from the UI)
+    # ------------------------------------------------------------------ #
+    @app.get(
+        "/api/v1/config",
+        response_model=ConfigResponse,
+        summary="Read the effective configuration (secrets masked)",
+    )
+    async def get_config() -> ConfigResponse:
+        return ConfigResponse(variables=read_config())
+
+    @app.post(
+        "/api/v1/config",
+        response_model=ConfigUpdateResponse,
+        summary="Write a patch of configuration values to the .env file",
+    )
+    async def update_config(
+        body: Annotated[
+            dict[str, Any],
+            Body(description="A {KEY: value} patch to apply to the .env file."),
+        ],
+    ) -> ConfigUpdateResponse:
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=422, detail="expected a JSON object")
+        str_updates = {str(k): ("" if v is None else str(v)) for k, v in body.items()}
+        try:
+            applied = write_config(str_updates)
+        except ConfigError as exc:
+            raise HTTPException(status_code=422, detail=_detail(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=_detail(exc)) from exc
+        return ConfigUpdateResponse(
+            applied=applied,
+            restart_required=True,
+            message="配置已保存。请手动重启服务使配置生效。",
         )
 
     @app.post(
@@ -633,10 +674,84 @@ def create_app(
     if qa_service is not None:
         _mount_qa_routes(app, qa_service)
 
+    # ------------------------------------------------------------------ #
+    # optional static frontend (serve the built WEB UI from one origin)
+    # ------------------------------------------------------------------ #
+    _mount_static_frontend(app)
+
     app.state.service = svc
     if qa_service is not None:
         app.state.qa_service = qa_service
     return app
+
+
+def _resolve_web_dist() -> Path | None:
+    """Locate the built frontend (``web/dist``) if present.
+
+    Resolution order: the ``SPARKSAGE_WEB_DIST`` env var (explicit override),
+    then a ``web/dist`` directory relative to the CWD, then one relative to the
+    package root. Returns ``None`` when no build exists (the API runs headless).
+    """
+    explicit = _env("SPARKSAGE_WEB_DIST")
+    candidates = []
+    if explicit:
+        candidates.append(Path(explicit))
+    candidates.append(Path.cwd() / "web" / "dist")
+    candidates.append(Path(__file__).resolve().parent.parent.parent.parent / "web" / "dist")
+    for c in candidates:
+        if c.is_dir() and (c / "index.html").is_file():
+            return c
+    return None
+
+
+def _mount_static_frontend(app: Any) -> None:
+    """Serve the built WEB UI (Vite ``dist``) behind a catch-all route.
+
+    Mounted last so every ``/api/...`` route wins first. Non-API GET requests
+    fall through to the SPA ``index.html``; any method on an unknown ``/api/``
+    path returns a real ``404`` (not a ``405``) so API consumers get a clean
+    "not found". A no-op when no build is found (the API runs headless).
+
+    Uses ``include_in_schema=False`` so the catch-all does not clutter the
+    OpenAPI docs.
+    """
+    dist = _resolve_web_dist()
+    if dist is None:
+        return
+
+    from starlette.staticfiles import StaticFiles
+
+    assets = dist / "assets"
+    if assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(assets)), name="sparksage-assets")
+    if (dist / "favicon.svg").is_file():
+        app.mount(
+            "/favicon.svg",
+            StaticFiles(directory=str(dist), html=False),
+            name="sparksage-favicon",
+        )
+
+    index_html = dist / "index.html"
+
+    from fastapi import Request
+
+    @app.api_route(
+        "/{full_path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+        include_in_schema=False,
+    )
+    async def spa(full_path: str, request: Request) -> Any:
+        from fastapi import HTTPException
+        from fastapi.responses import FileResponse
+
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not Found")
+        if request.method not in ("GET", "HEAD"):
+            raise HTTPException(status_code=405, detail="Method Not Allowed")
+        candidate = dist / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(str(candidate))
+        return FileResponse(str(index_html))
 
 
 def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
@@ -648,13 +763,16 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
     """
     from typing import Annotated
 
-    from fastapi import Body, File, Form, HTTPException, Path, UploadFile
+    from fastapi import Body, File, Form, HTTPException, Path, Query, UploadFile
 
     from sparksage.api.pipeline import GenerationNotConfiguredError
     from sparksage.api.qa_service import QAService
     from sparksage.api.schemas import (
         AskRequest,
         AskResponse,
+        BlockListResponse,
+        FeedbackListResponse,
+        FeedbackRecordOut,
         FeedbackRequest,
         FeedbackResponse,
         FeedbackStatsResponse,
@@ -662,6 +780,7 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
         KnowledgeBaseResponse,
         _build_filter_from_request,
         _to_ask_response,
+        _to_block_out,
         _to_ingest_response,
     )
 
@@ -809,6 +928,65 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
             negative=stats.negative,
             corrected=stats.corrected,
             approval=stats.approval,
+        )
+
+    @app.get(
+        "/api/v1/knowledge_base/blocks",
+        response_model=BlockListResponse,
+        summary="List indexed IdeaBlocks (filter by tag / language / status)",
+    )
+    async def kb_list_blocks(
+        tag: Annotated[
+            str | None,
+            Query(description="Comma-separated tag filter (any-match OR)."),
+        ] = None,
+        language: Annotated[
+            str | None, Query(description="Restrict to this language code.")
+        ] = None,
+        status: Annotated[
+            str | None,
+            Query(description="Lifecycle status: ACTIVE / MERGED / DRAFT / ARCHIVED."),
+        ] = None,
+        limit: Annotated[int, Query(ge=1, le=1000, description="Page size.")] = 100,
+        offset: Annotated[int, Query(ge=0, description="Page offset.")] = 0,
+    ) -> BlockListResponse:
+        tags = None
+        if tag:
+            tags = [p.strip() for p in tag.split(",") if p.strip()]
+        page, total = qa_svc.list_blocks(
+            tags=tags, language=language, status=status, limit=limit, offset=offset
+        )
+        items = [_to_block_out(b) for b in page]
+        return BlockListResponse(
+            items=items, count=len(items), total=total, limit=limit, offset=offset
+        )
+
+    @app.get(
+        "/api/v1/feedback/records",
+        response_model=FeedbackListResponse,
+        summary="List recent feedback records (newest-first)",
+    )
+    async def feedback_list(
+        limit: Annotated[int, Query(ge=1, le=1000, description="Page size.")] = 50,
+        offset: Annotated[int, Query(ge=0, description="Page offset.")] = 0,
+    ) -> FeedbackListResponse:
+        page, total = qa_svc.list_feedback(limit=limit, offset=offset)
+        items = [
+            FeedbackRecordOut(
+                feedback_id=r.feedback_id,
+                query=r.query,
+                answer_text=r.answer_text,
+                rating=r.rating.value,
+                correction=r.correction,
+                block_ids=list(r.block_ids),
+                kb_id=r.kb_id,
+                created_at=r.created_at,
+                metadata=dict(r.metadata),
+            )
+            for r in page
+        ]
+        return FeedbackListResponse(
+            items=items, count=len(items), total=total, limit=limit, offset=offset
         )
 
 

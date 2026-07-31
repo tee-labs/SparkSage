@@ -21,6 +21,13 @@ Routes:
 * ``POST/GET /api/v1/feedback`` -- record / aggregate user verdicts.
 """
 
+from sparksage.api.config_manager import (
+    KNOWN_CONFIG_KEYS,
+    ConfigError,
+    mask_value,
+    read_config,
+    write_config,
+)
 from sparksage.api.pipeline import (
     ConvertOutput,
     GenerateOutput,
@@ -35,13 +42,19 @@ from sparksage.api.qa_service import (
 from sparksage.api.schemas import (
     AskRequest,
     AskResponse,
+    BlockListResponse,
+    BlockOut,
     CitationOut,
+    ConfigResponse,
+    ConfigUpdateResponse,
     ConvertResponse,
     DocumentListResponse,
     DocumentResponse,
     DocumentSourceInfo,
     DocumentSummary,
     DocumentUpdateRequest,
+    FeedbackListResponse,
+    FeedbackRecordOut,
     FeedbackRequest,
     FeedbackResponse,
     FeedbackStatsResponse,
@@ -59,7 +72,13 @@ from sparksage.api.schemas import (
 __all__ = [
     "AskRequest",
     "AskResponse",
+    "BlockListResponse",
+    "BlockOut",
     "CitationOut",
+    "KNOWN_CONFIG_KEYS",
+    "ConfigError",
+    "ConfigResponse",
+    "ConfigUpdateResponse",
     "ConvertOutput",
     "ConvertResponse",
     "DocumentListResponse",
@@ -67,6 +86,8 @@ __all__ = [
     "DocumentSourceInfo",
     "DocumentSummary",
     "DocumentUpdateRequest",
+    "FeedbackListResponse",
+    "FeedbackRecordOut",
     "FeedbackRequest",
     "FeedbackResponse",
     "FeedbackStatsResponse",
@@ -85,4 +106,7 @@ __all__ = [
     "SourceInfo",
     "SparkSageService",
     "TagsResponse",
+    "mask_value",
+    "read_config",
+    "write_config",
 ]

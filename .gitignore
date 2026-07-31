@@ -37,3 +37,8 @@ Thumbs.db
 
 # Node (legacy opencode lockfile tracked separately)
 node_modules/
+
+# Frontend build output (web UI is built in-place / in the Docker image)
+web/dist/
+web/node_modules/
+web/tsconfig.tsbuildinfo
