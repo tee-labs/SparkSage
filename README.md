@@ -1,5 +1,11 @@
 # SparkSage
 
+[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://pypi.org/project/sparksage/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](#license)
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](#development)
+[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://pypi.org/project/sparksage/)
+[![中文文档](https://img.shields.io/badge/docs-%E4%B8%AD%E6%96%87-red.svg)](README_CN.md)
+
 **Structured, question-aligned knowledge chunks for high-quality RAG.**
 
 SparkSage replaces naive fixed-size text slicing with the **IdeaBlock** — a
@@ -7,41 +13,59 @@ small, self-contained *knowledge unit* that is aligned to how users ask
 questions. Instead of embedding arbitrary text fragments (which get cut
 mid-sentence and retrieve poorly), SparkSage embeds whole, verified answers.
 
-> Status: **Pre-Alpha**. SparkSage is an **end-to-end question-answering core**
-> built on structured, question-aligned knowledge chunks. It owns everything
-> from raw bytes to a retrievable, de-duplicated corpus *and* the query-side
-> pipeline that turns a question into a grounded, cited answer. Implemented
-> today:
->
-> - the **chunk schema** (IdeaBlock + TechnicalBlock);
-> - **LLM-driven generation** (free text → many IdeaBlocks);
-> - **file-to-Markdown conversion** (any format via a pluggable backend);
-> - **customizable, source-aware text cleaning**;
-> - **dense-vector embedding & retrieval** (`EmbeddingClient` Protocol + an
->   in-memory kNN store, JSON persistence, all-pairs near-duplicate detection,
->   and production backends for FAISS / Chroma / pgvector);
-> - the **Distill de-duplication pipeline** (detect → cluster → LLM-merge →
->   lifecycle write-back), with an async job layer and LSH acceleration for
->   million-vector corpora;
-> - a **document-management service** (parsed documents + free-form tags +
->   summaries + durable SQLite storage);
-> - a **dependency-free auto-tagging engine** (RAKE / TF-IDF / TextRank, CJK
->   out of the box);
-> - **query-time intent recognition + rewriting** (multi-turn, with rule-based
->   and LLM implementations, multi-query expansion, and a semantic cache);
-> - **hybrid retrieval** (dense kNN + BM25 over the curated `keywords` field,
->   reciprocal-rank fusion, LLM reranking, metadata/tenant scoping);
-> - **grounded answer generation** (LLM answers bound to `source.locator`
->   citations, with a faithfulness judge and an abstention gate);
-> - an **end-to-end QA engine** wiring query → retrieval → answer, with
->   multi-query / sub-query RRF-fused retrieval;
-> - a **multi-tenant KnowledgeBase** aggregate (documents + blocks + consistent
->   dense + lexical indexes, hash-aware updates, `reindex`);
-> - a **feedback flywheel** (capture verdicts → coverage-gap / split-candidate
->   healing signals back to ingest);
-> - a **measurable benchmark + evaluation suite** (IdeaBlock vs naive chunking
->   on your own data, plus end-to-end answer-correctness scoring); and
-> - a **WEB API** exposing convert / generate / documents / tags over HTTP.
+It is an **end-to-end question-answering core**: from raw bytes to a
+retrievable, de-duplicated corpus, all the way to a grounded, cited answer.
+Every stage is a swappable protocol with a pure-stdlib default, so the core
+runs fully offline and is unit-testable with deterministic fakes — install
+only the extras you actually need.
+
+## Installation
+
+```bash
+pip install sparksage                  # core only (schema + stdlib defaults)
+pip install 'sparksage[llm,embed]'     # + generation + embedding (OpenAI SDK)
+pip install 'sparksage[convert]'       # + any-file -> Markdown (markitdown)
+pip install 'sparksage[api]'           # + WEB API (FastAPI + uvicorn)
+pip install 'sparksage[distill]'       # + de-dup acceleration + FaissVectorStore
+pip install 'sparksage[chroma]'        # + ChromaVectorStore
+pip install 'sparksage[pgvector]'      # + PgvectorVectorStore (Postgres)
+pip install 'sparksage[rerank]'        # + cross-encoder re-ranking
+pip install 'sparksage[all]'           # everything above + CJK (jieba)
+```
+
+> Each subsystem lazily imports its own SDK inside the backend that needs it,
+> so the core stays zero-dependency — install only the extras you use.
+
+## The SparkSage pipeline
+
+One line runs it all — `bytes → convert → clean → generate → embed → distill`
+on the ingest side, and `question → intent → retrieve → answer` on the query
+side, with a feedback loop that turns user verdicts back into ingest actions:
+
+```mermaid
+flowchart LR
+    subgraph ingest["ingest (write side)"]
+        direction TB
+        BYTES[raw bytes] --> CONV[convert]
+        CONV --> CLN[clean]
+        CLN --> GEN[generate]
+        GEN --> EMB[embed]
+        EMB --> DST[distill de-dup]
+    end
+    DST --> STORE[("store + dense/BM25 indexes")]
+    GEN -. auto-tag + summarize .-> DOC[("document store")]
+    subgraph query["query (read side)"]
+        direction TB
+        Q[question] --> INTENT[intent / rewrite]
+        INTENT --> RET[dense + BM25 retrieve]
+        RET --> RR[rerank]
+        RR --> ANSREAD[reader]
+        ANSREAD --> ANSWER["cited answer (or abstain)"]
+    end
+    STORE --> RET
+    ANSWER -. feedback .-> FB[("feedback store")]
+    FB -. healing signals .-> ingest
+```
 
 ---
 
@@ -53,13 +77,15 @@ Traditional `RecursiveCharacterTextSplitter` chunks:
 - carry no notion of *what question they answer* → sparse vector clusters,
 - lack queryable metadata → weak filtering / hybrid retrieval.
 
-An IdeaBlock fixes all three at the data layer:
+An IdeaBlock fixes all three at the data layer — and the dividend compounds
+across every downstream stage:
 
-| Problem | IdeaBlock answer |
-| --- | --- |
-| Sentence breakage | Single-field embedding of a concise `trusted_answer` |
-| No query alignment | Every block carries its `critical_question` |
-| Poor metadata | `tags` / `entities` / `keywords` / provenance |
+| Stage | Naive `RecursiveCharacterTextSplitter` | IdeaBlock |
+| --- | --- | --- |
+| Splitting | cut mid-sentence → semantic breakage | whole, verified `trusted_answer` per block |
+| Generation | no notion of *what question it answers* | every block carries its `critical_question` |
+| Retrieval | weak metadata, sparse vector clusters | `tags` / `entities` / `keywords` filter + boost |
+| Answers | fragments re-mixed, easy to hallucinate | QA-aligned context + `source.locator` citations |
 
 ---
 
@@ -74,6 +100,20 @@ An IdeaBlock fixes all three at the data layer:
   <entity><entity_name>..</entity_name><entity_type>PRODUCT|..</entity_type></entity>
   <keywords>keywords for BM25 / lexical recall</keywords>
 </ideablock>
+```
+
+The same shape as a Python dict (the `to_xml()` / `from_xml()` round-trip is
+lossless):
+
+```python
+{
+    "name": "标题 / short title",
+    "critical_question": "the single question this block answers?",
+    "trusted_answer": "verified, self-consistent answer (2–3 sentences, ≤500 chars)",
+    "tags": ["IMPORTANT", "TECHNOLOGY"],
+    "entities": [{"entity_name": "..", "entity_type": "PRODUCT"}],
+    "keywords": ["keywords", "for BM25", "lexical recall"],
+}
 ```
 
 Core model: [`src/sparksage/schema/ideablock.py`](src/sparksage/schema/ideablock.py).
@@ -137,6 +177,26 @@ A fuller end-to-end demo:
 ```bash
 PYTHONPATH=src python3 examples/build_chunks.py
 ```
+
+### Example index
+
+Every example runs **fully offline** (deterministic fakes — no API key, no
+`markitdown`) unless noted.
+
+| Example | Demonstrates |
+| --- | --- |
+| [`build_chunks.py`](examples/build_chunks.py) | The IdeaBlock + TechnicalBlock schema end-to-end |
+| [`generate_blocks.py`](examples/generate_blocks.py) | Free text → many IdeaBlocks via an LLM client |
+| [`convert_files.py`](examples/convert_files.py) | Any file → Markdown (single + batch directory) |
+| [`clean_text.py`](examples/clean_text.py) | convert → clean → generate (source-aware rules) |
+| [`search_blocks.py`](examples/search_blocks.py) | embed → index → kNN search → JSON persist → reload |
+| [`distill_blocks.py`](examples/distill_blocks.py) | Near-duplicate de-dup pipeline (cluster → merge) |
+| [`extract_tags.py`](examples/extract_tags.py) | RAKE / TF-IDF / TextRank auto-tagging (CJK-aware) |
+| [`manage_documents.py`](examples/manage_documents.py) | Document CRUD + tag vocabulary (in-memory / SQLite) |
+| [`process_query.py`](examples/process_query.py) | Query → intent classification → rewrite (multi-turn) |
+| [`run_benchmark.py`](examples/run_benchmark.py) | IdeaBlock vs naive chunking → HTML report |
+| [`serve_api.py`](examples/serve_api.py) | FastAPI server: `/convert` + `/generate` via TestClient |
+| [`qa_full_pipeline.py`](examples/qa_full_pipeline.py) | Full knowledge-QA: ingest → retrieve → answer + feedback |
 
 ---
 
@@ -1306,18 +1366,18 @@ load_dotenv(override=True)          # let the file clobber real env vars
 
 `SPARKSAGE_*` take priority over the `OPENAI_*` fallbacks.
 
-| Variable              | Purpose                                              |
-| --------------------- | ---------------------------------------------------- |
-| `SPARKSAGE_API_KEY`   | API key (falls back to `OPENAI_API_KEY`)             |
-| `SPARKSAGE_BASE_URL`  | OpenAI-compatible base URL (Azure/vLLM/Ollama/GLM…)  |
-| `SPARKSAGE_MODEL`     | Model id (default `gpt-4o-mini`)                     |
-| `SPARKSAGE_STREAM`    | Stream the LLM response (default `true`)             |
-| `SPARKSAGE_LANGUAGE`  | BCP-47 code written into each block (e.g. `en`, `zh`)|
-| `SPARKSAGE_LOG_LEVEL` | `sparksage` logger verbosity (default `WARNING`; `INFO`/`DEBUG` for analysis) |
-| `SPARKSAGE_DOC_STORE` | Path to a SQLite file for the document store (empty → in-memory; the `/documents` routes work but do not persist across restarts) |
-| `SPARKSAGE_DOC_STORE_TABLE` | SQLite table name (default `documents`)         |
-| `SPARKSAGE_AUTO_TAG_EXTRACTOR` | Auto-tag algorithm: `rake` \| `tfidf` \| `textrank` (default `rake`) |
-| `SPARKSAGE_TAGS_ZH`   | Use `jieba` for CJK segmentation when `true` (requires `pip install 'sparksage[tags-zh]'`) |
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `SPARKSAGE_API_KEY` | API key (falls back to `OPENAI_API_KEY`) | *none* (`/generate` returns `503`) |
+| `SPARKSAGE_BASE_URL` | OpenAI-compatible base URL (Azure/vLLM/Ollama/GLM…) | OpenAI default |
+| `SPARKSAGE_MODEL` | Model id | `gpt-4o-mini` |
+| `SPARKSAGE_STREAM` | Stream the LLM response | `true` |
+| `SPARKSAGE_LANGUAGE` | BCP-47 code written into each block (e.g. `en`, `zh`) | `en` |
+| `SPARKSAGE_LOG_LEVEL` | `sparksage` logger verbosity | `WARNING` |
+| `SPARKSAGE_DOC_STORE` | Path to a SQLite file for the document store (empty → in-memory) | *empty* (ephemeral) |
+| `SPARKSAGE_DOC_STORE_TABLE` | SQLite table name | `documents` |
+| `SPARKSAGE_AUTO_TAG_EXTRACTOR` | Auto-tag algorithm: `rake` \| `tfidf` \| `textrank` | `rake` |
+| `SPARKSAGE_TAGS_ZH` | Use `jieba` for CJK segmentation when `true` (needs `[tags-zh]`) | *unset* (bigram tokenizer) |
 
 ### Supported `.env` syntax
 
@@ -1336,101 +1396,82 @@ avoids the quoting/injection bugs a real shell parser would introduce. See
 
 ## Project layout
 
+Grouped by pipeline stage. `★` marks the primary entry point of each package.
+
 ```
 src/sparksage/
-├── config.py          # .env loader (stdlib; env vars take priority over file)
-├── logging_config.py  # SPARKSAGE_LOG_LEVEL -> sparksage logger (stdlib; idempotent)
-├── schema/
-│   ├── enums.py        # controlled vocabularies (Tag, EntityType, QueryIntent, ...)
-│   ├── entity.py       # named things a block references
-│   ├── source.py       # provenance (where a block came from)
-│   ├── ideablock.py    # the core question-aligned chunk  ★
-│   └── technical.py    # order-sensitive variant for SOPs/manuals
-├── generator/
-│   ├── client.py       # LLMClient protocol + OpenAI-compatible + Fake client
-│   ├── prompts.py      # prompt builder (reads enums -> never drifts)
-│   ├── schema.py       # lenient raw models + enum coercion
-│   └── generator.py    # text -> list[IdeaBlock]  ★
-├── convert/
-│   ├── backend.py      # ConverterBackend protocol + MarkItDown + Fake backend
-│   └── converter.py    # any-file -> Markdown (single + batch)  ★
-├── clean/
-│   ├── rules.py        # CleaningRule protocol + built-in & configurable rules
-│   ├── registry.py     # source/filename-aware rule routing (glob/regex)
-│   └── cleaner.py      # raw text -> final document text  ★
-├── embed/
-│   ├── client.py       # EmbeddingClient protocol + OpenAI + Fake client
-│   ├── indexer.py      # BlockEmbedder: blocks -> vectors (fills .embedding)  ★
-│   ├── store.py        # VectorStore protocol + InMemoryVectorStore kNN  ★
-│   ├── similarity.py   # find_similar_pairs: all-pairs near-duplicate detection  ★
-│   ├── persist.py      # save_store / load_store (zero-dep JSON)
-│   └── backends/       # FaissVectorStore / ChromaVectorStore / PgvectorVectorStore
-├── distill/
-│   ├── cluster.py      # ClusteringBackend protocol + union-find + Louvain  ★
-│   ├── merge.py        # BlockMerger: cluster -> one canonical block (LLMClient)  ★
-│   ├── prompts.py      # merge prompt (reads enums -> never drifts)
-│   ├── schema.py       # lenient raw merge model + coercion
-│   ├── lsh.py          # LSHCandidateReducer: random-hyperplane LSH (stdlib)  ★
-│   ├── pipeline.py     # DistillPipeline: iterative refine + hierarchical merge  ★
-│   └── job.py          # DistillJob / JobManager: async pollable state machine  ★
-├── tags/
-│   ├── tokenizer.py    # Tokenizer protocol + Auto/Whitespace/CharBigram/Jieba  ★
-│   ├── stoplist.py     # English + CJK stop-word sets
-│   └── extractor.py    # RAKE / TF-IDF / TextRank keyword extractors  ★
-├── documents/
-│   ├── models.py       # DocumentRecord (title/summary/body/tags/provenance)  ★
-│   ├── store.py        # DocumentStore protocol (save/get/list/delete/count/...)
-│   ├── summarizer.py   # ExtractiveSummarizer (stdlib, no LLM)  ★
-│   └── backends/       # InMemoryDocumentStore + SqliteDocumentStore
-├── query/
-│   ├── classifier.py   # IntentClassifier protocol + LLM + rule-based  ★
-│   ├── rewriter.py     # QueryRewriter protocol + LLM + rule-based  ★
-│   ├── expander.py     # QueryExpander protocol + LLM + Identity (multi-query)  ★
-│   ├── self_query.py   # SelfQueryParser protocol + LLM + Identity (query+filter)  ★
-│   ├── cache.py        # InMemorySemanticCache (embedding-keyed QACache)  ★
-│   ├── context.py      # ConversationContext (multi-turn anaphora carrier)
-│   ├── prompts.py      # intent/rewrite prompts (read QueryIntent live)
-│   ├── schema.py       # lenient raw models + QueryIntent coercion
-│   └── processor.py    # QueryProcessor: classify -> intercept -> rewrite  ★
-├── retrieve/
-│   ├── lexical.py      # BM25Retriever (keywords-weighted, CJK-aware) + protocol  ★
-│   ├── fusion.py       # reciprocal_rank_fusion (score-free RRF merge)  ★
-│   ├── reranker.py     # Reranker protocol + LLMReranker + IdentityReranker  ★
-│   ├── models.py       # RetrievedChunk / Citation / RetrievalFilter / RetrievalResult
-│   ├── orchestrator.py # Retriever: dense + lexical -> RRF -> filter -> rerank  ★
-│   └── backends/       # CrossEncoderReranker (sentence-transformers, [rerank])  ★
-├── reader/
-│   ├── generator.py    # AnswerGenerator protocol + LLMAnswerGenerator  ★
-│   ├── faithfulness.py # FaithfulnessJudge protocol + LLMFaithfulnessJudge  ★
-│   ├── budget.py       # trim_to_token_budget (Context-Cliff guard, stdlib)  ★
-│   ├── prompts.py      # answer/faithfulness prompts (QA-aligned context)
-│   ├── schema.py       # lenient raw models + strict GeneratedAnswer coercion
-│   └── orchestrator.py # Reader: trim -> generate -> judge -> abstain gate  ★
-├── qa/
-│   └── engine.py       # QAEngine: query -> retrieval -> answer (multi-query RRF)  ★
-├── kb/
-│   ├── models.py       # KnowledgeBaseInfo (serializable metadata)
-│   ├── knowledge_base.py # KnowledgeBase aggregate (docs+blocks+consistent indexes)  ★
-│   └── store.py        # KnowledgeBaseStore protocol + InMemoryKnowledgeBaseStore
-├── feedback/
-│   ├── models.py       # FeedbackRecord + FeedbackRating enum  ★
-│   ├── store.py        # FeedbackStore protocol + InMemoryFeedbackStore (+ aggregation)
-│   └── healing.py      # extract_healing_signals -> coverage/split candidates  ★
-├── eval/
-│   ├── models.py       # QATestCase / QACaseResult / QAEvalReport
-│   └── evaluator.py    # QAEvaluator + CorrectnessJudge (token-F1 / LLM)  ★
-├── bench/
-│   ├── baselines.py    # RecursiveCharSplitter (LangChain-default reimpl.)  ★
-│   ├── metrics.py      # hit@k / MRR / token-efficiency (pure stdlib)
-│   ├── report.py       # BenchmarkReport + zero-dep HTML renderer  ★
-│   └── runner.py       # BenchmarkRunner: IdeaBlock vs naive on your corpus  ★
-├── api/
-│   ├── pipeline.py     # SparkSageService: convert→clean→generate→tag→store  ★
-│   ├── schemas.py      # request/response Pydantic models (no fastapi)
-│   └── app.py          # FastAPI app factory + routes (lazy fastapi import)
-tests/                  # schema + generation + conversion + cleaning + retrieval +
-                        # reader + qa + kb + feedback + eval + api + config
-examples/               # runnable demos
+├── schema/            # the data layer (the foundation)
+│   ├── enums.py         # controlled vocabularies (Tag, EntityType, QueryIntent, ...)
+│   ├── ideablock.py  ★  # the core question-aligned chunk
+│   ├── technical.py     # order-sensitive variant for SOPs / manuals
+│   ├── entity.py        # named things a block references
+│   └── source.py        # provenance (where a block came from)
+│
+├── ingest             # write side: bytes → indexed, de-duplicated corpus
+│   ├── convert/     ★  # any-file → Markdown (markitdown backend)
+│   ├── clean/       ★  # source-aware text cleaning (composable rules)
+│   ├── generator/   ★  # free text → many IdeaBlocks (LLMClient protocol)
+│   ├── embed/       ★  # BlockEmbedder + VectorStore + de-dup similarity
+│   │   └── backends/    # FaissVectorStore / ChromaVectorStore / PgvectorVectorStore
+│   ├── distill/     ★  # de-dup pipeline (cluster → LLM merge → write-back)
+│   ├── tags/        ★  # dependency-free auto-tagging (RAKE / TF-IDF / TextRank)
+│   └── documents/   ★  # DocumentRecord + store (in-memory / SQLite) + summarizer
+│
+├── retrieve/          # read side: question → cited answer
+│   ├── orchestrator ★  # dense + BM25 → RRF → filter → rerank
+│   ├── lexical.py      # BM25Retriever (keywords-weighted, CJK-aware)
+│   ├── fusion.py       # reciprocal_rank_fusion
+│   ├── reranker.py     # Reranker protocol (LLM / Identity)
+│   ├── grader.py       # RetrievalGrader (self-reflective loop)
+│   ├── models.py       # RetrievedChunk / Citation / RetrievalFilter
+│   └── backends/       # CrossEncoderReranker (sentence-transformers)
+│
+├── reader/            # answer generation + faithfulness
+│   ├── orchestrator ★  # trim → generate → judge → abstain gate
+│   ├── generator.py    # LLMAnswerGenerator (citation-bound)
+│   ├── faithfulness.py # LLMFaithfulnessJudge
+│   └── budget.py       # Context-Cliff guard (token budget)
+│
+├── qa/                # end-to-end orchestration
+│   └── engine.py    ★  # QAEngine: query → retrieval → answer (multi-query RRF)
+│
+├── query/             # query understanding (intent / rewrite / expand / cache)
+│   ├── processor.py ★  # classify → intercept → rewrite
+│   ├── classifier.py   # intent (LLM + rule)
+│   ├── rewriter.py     # rewrite (LLM + rule)
+│   ├── expander.py     # multi-query + HyDE expansion
+│   ├── self_query.py   # question → query + RetrievalFilter
+│   ├── refiner.py      # self-reflective query refinement
+│   ├── cache.py        # embedding-keyed semantic cache
+│   └── context.py      # multi-turn ConversationContext
+│
+├── kb/                # multi-tenant KnowledgeBase aggregate
+│   ├── knowledge_base.py ★  # docs + blocks + consistent indexes
+│   └── store.py           # KnowledgeBaseStore registry
+│
+├── feedback/          # the quality flywheel
+│   ├── healing.py  ★  # verdicts → coverage-gap / split-candidate signals
+│   ├── models.py      # FeedbackRecord + FeedbackRating
+│   └── store.py       # FeedbackStore + aggregation
+│
+├── eval/              # answer-correctness evaluation
+│   └── evaluator.py ★ # QAEvaluator (token-F1 / LLM correctness judge)
+│
+├── bench/             # retrieval benchmark (IdeaBlock vs naive chunking)
+│   ├── runner.py    ★ # BenchmarkRunner
+│   ├── baselines.py   # RecursiveCharSplitter (LangChain-default reimpl.)
+│   └── report.py      # zero-dependency HTML report
+│
+├── api/               # WEB API (FastAPI, optional)
+│   ├── pipeline.py  ★ # SparkSageService (framework-agnostic orchestration)
+│   ├── app.py         # FastAPI app factory + routes
+│   └── schemas.py     # request/response models
+│
+├── config.py          # .env loader (stdlib; env vars override file)
+└── logging_config.py  # SPARKSAGE_LOG_LEVEL (stdlib; idempotent)
+
+tests/                 # schema + every subsystem (pure-stdlib fakes)
+examples/              # runnable offline demos (see Example index above)
 ```
 
 ## Development
@@ -1442,74 +1483,17 @@ ruff check src tests                          # lint
 
 ## Roadmap
 
-Implemented:
+Everything described in this README is **implemented and tested** today (see the
+sections above and [`AGENTS.md`](AGENTS.md) for the full subsystem map). What
+comes next:
 
-- [x] Chunk schema (IdeaBlock + TechnicalBlock) — *first release*
-- [x] LLM-driven generation (text -> many IdeaBlocks via pluggable LLM client)
-- [x] Uniform file-to-Markdown conversion (any format -> Markdown via markitdown)
-- [x] Customizable text cleaning (business-specific rules, source-aware routing)
-- [x] `.env` configuration (built-in loader, env vars override file)
-- [x] Dense-vector embedding & retrieval (pluggable `EmbeddingClient` +
-      in-memory kNN `VectorStore` + all-pairs near-duplicate detection +
-      JSON persistence, pure stdlib core)
-- [x] Production vector-store backends — FAISS (`[distill]`), Chroma (`[chroma]`),
-      pgvector (`[pgvector]`); each lazily imports its own SDK
-- [x] Distill de-duplication pipeline (iterative threshold refinement +
-      union-find/Louvain clustering + hierarchical LLM merge + lifecycle
-      write-back, pure stdlib core + optional `[distill]` acceleration)
-- [x] Distill async job layer (`DistillJob` / `JobManager`: pollable state
-      machine + progress callbacks + cooperative cancellation) and LSH
-      candidate reduction (`LSHCandidateReducer`, auto-enabled ≥ 5000 vectors)
-- [x] Reproducible benchmark suite (IdeaBlock vs naive recursive splitter,
-      hit@k/MRR + token efficiency, zero-dependency HTML report)
-- [x] Dependency-free auto-tagging engine (`tags/`: RAKE / TF-IDF / TextRank
-      over the `Tokenizer` Protocol, CJK out of the box, optional jieba)
-- [x] Document-management service (`documents/`: `DocumentRecord` + free-form
-      tags + extractive summary + `DocumentStore` Protocol with in-memory and
-      durable SQLite backends)
-- [x] Query-time intent recognition + rewriting (`query/`: LLM + rule-based
-      `IntentClassifier` / `QueryRewriter`, multi-turn `ConversationContext`,
-      lenient→strict `QueryIntent` coercion, `QueryProcessor` interception)
-- [x] Query enhancements (multi-query `QueryExpander` + embedding-keyed
-      `InMemorySemanticCache` implementing `QACache`)
-- [x] Hybrid retrieval (`retrieve/`: pure-stdlib `BM25Retriever` over the
-      curated `keywords` field + dense kNN, `reciprocal_rank_fusion`,
-      `LLMReranker` / `IdentityReranker`, `Retriever` orchestrator with
-      `RetrievalFilter` tag/entity/language/kb_id scoping and
-      `RetrievedChunk`/`Citation` provenance)
-- [x] Grounded answer generation (`reader/`: `LLMAnswerGenerator` over the
-      QA-aligned `critical_question`+`trusted_answer` context with citation
-      binding to `source.locator`, `LLMFaithfulnessJudge`, `Reader` with
-      abstention gate)
-- [x] End-to-end QA engine (`qa/`: `QAEngine` query → retrieval → answer,
-      multi-query / sub-query RRF-fused retrieval, optional `QACache`)
-- [x] Multi-tenant knowledge base (`kb/`: `KnowledgeBase` aggregate root with
-      documents + blocks + consistent dense + lexical index, hash-aware
-      `update_document`, `reindex`, `kb_id` scoping, `KnowledgeBaseStore`)
-- [x] Feedback flywheel (`feedback/`: `FeedbackRecord` + `FeedbackStore` +
-      `extract_healing_signals` for coverage-gap / split-candidate signals back
-      to ingest)
-- [x] Answer-correctness evaluation (`eval/`: `QAEvaluator` over a `QATestCase`
-      set, pluggable `TokenOverlapJudge` / `LLMCorrectnessJudge`, reusing
-      `bench.evaluate_retrieval` for the retrieval metric)
-- [x] Cross-encoder re-ranking backend (`retrieve/backends/`:
-      `CrossEncoderReranker` under `[rerank]` via `sentence-transformers`, sigmoid-
-      normalized logits, lazy SDK import; the single largest point lever after
-      chunking strategy)
-- [x] Context-Cliff guard (`reader/budget.py`: `trim_to_token_budget` wired into
-      `Reader.max_context_tokens`, pure-stdlib token heuristic + pluggable
-      tokenizer, applied before generation *and* judging)
-- [x] Self-query decomposition (`query/self_query.py`: `SelfQueryParser` protocol
-      + `LLMSelfQueryParser` producing a `RetrievalFilter` from free text, tag
-      values read live from the `Tag` enum, lenient→strict coercion, identity
-      fallback)
-- [x] WEB API (FastAPI: `/convert`, `/generate`, `/documents` CRUD, `/tags`)
-
-Planned next:
-
-- [ ] `/api/v1/query` route wrapping `QAEngine`
-- [ ] `/api/v1/distill` route wrapping `JobManager` (submit / poll / cancel)
-- [ ] OpenAI-compatible ingest / distill / query API
+- [ ] **`/api/v1/query` route** wrapping `QAEngine` — a one-call HTTP endpoint for
+  grounded, cited answers, mirroring how `SparkSageService` wraps ingest.
+- [ ] **`/api/v1/distill` route** wrapping `JobManager` — submit / poll / cancel
+  long-running de-dup runs (the async job layer already exists; only the thin
+  web wrapper is missing).
+- [ ] **OpenAI-compatible ingest / distill / query API** — drop-in replacement
+  surface so existing OpenAI SDK callers can adopt SparkSage without code changes.
 
 ## License
 
