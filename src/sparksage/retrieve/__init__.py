@@ -21,9 +21,10 @@ Pipeline::
     query
         -> dense (VectorStore kNN over embedding_text)
         -> lexical (BM25Retriever over keywords + answer)   [optional]
-        -> reciprocal rank fusion                           [when >1 leg]
+        -> weighted reciprocal rank fusion                  [when >1 leg]
         -> RetrievalFilter scoping (tags / entities / ...)
         -> re-rank (LLMReranker)                             [optional]
+        -> score floor + decayed-retry / top-1 fallback      [optional]
         -> top-k RetrievedChunk list
 
 Example
@@ -47,8 +48,10 @@ Example
 from sparksage.retrieve.fusion import (
     DEFAULT_RRF_K,
     DEFAULT_TUNE_K_CANDIDATES,
+    DEFAULT_TUNE_WEIGHT_CANDIDATES,
     reciprocal_rank_fusion,
     tune_rrf_k,
+    tune_rrf_weights,
 )
 from sparksage.retrieve.grader import (
     DEFAULT_GRADE_TOP_K,
@@ -84,8 +87,13 @@ from sparksage.retrieve.models import (
 )
 from sparksage.retrieve.orchestrator import (
     DEFAULT_DEDUP_THRESHOLD,
+    DEFAULT_DENSE_WEIGHT,
     DEFAULT_FETCH_FACTOR,
+    DEFAULT_LEXICAL_WEIGHT,
     DEFAULT_MIN_FETCH,
+    DEFAULT_SCORE_MIN_TOP1,
+    DEFAULT_SCORE_RETRY_FACTOR,
+    DEFAULT_SCORE_RETRY_FLOOR,
     RetrievalConfig,
     Retriever,
 )
@@ -96,13 +104,19 @@ __all__ = [
     "Citation",
     "DEFAULT_B",
     "DEFAULT_DEDUP_THRESHOLD",
+    "DEFAULT_DENSE_WEIGHT",
     "DEFAULT_FETCH_FACTOR",
     "DEFAULT_GRADE_TOP_K",
     "DEFAULT_K1",
+    "DEFAULT_LEXICAL_WEIGHT",
     "DEFAULT_MIN_FETCH",
     "DEFAULT_RELEVANCE",
     "DEFAULT_RRF_K",
+    "DEFAULT_SCORE_MIN_TOP1",
+    "DEFAULT_SCORE_RETRY_FACTOR",
+    "DEFAULT_SCORE_RETRY_FLOOR",
     "DEFAULT_TUNE_K_CANDIDATES",
+    "DEFAULT_TUNE_WEIGHT_CANDIDATES",
     "GraderEmptyResponseError",
     "GraderError",
     "GraderResponseParseError",
@@ -130,4 +144,5 @@ __all__ = [
     "reciprocal_rank_fusion",
     "tokenize",
     "tune_rrf_k",
+    "tune_rrf_weights",
 ]

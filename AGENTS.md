@@ -345,14 +345,24 @@ PYTHONPATH=src python3 examples/build_chunks.py
   lexical recall boosting") plus the answer/question/name text; CJK is
   tokenized into unigrams + overlapping bigrams (dictionary-free, like the
   `tags` tokenizer). `reciprocal_rank_fusion` (`fusion.py`) is the
-  score-free RRF merge of dense + lexical (or multi-query) ranked lists. The
+  score-free RRF merge of dense + lexical (or multi-query) ranked lists; it
+  also supports *weighted* RRF (the WeKnora-style `w_i / (k + rank)`) via a
+  `weights=` arg — only the weight *ratio* affects the ordering, so the
+  equal-weight default (`None`) reproduces the original score-free RRF exactly,
+  and `tune_rrf_k` / `tune_rrf_weights` empirically pick the smoothing constant
+  and the dense/lexical split on labelled data. The
   `Reranker` protocol (`reranker.py`) ships an `LLMReranker` (reuses the
   existing `LLMClient`, lenient→strict index-list coercion, identity fallback
   on a bad response) and an `IdentityReranker` no-op. `Retriever`
   (`orchestrator.py`) wires it together: dense (kNN) + optional lexical →
-  RRF fuse → `RetrievalFilter` post-filter (`tags`/`entities`/`language`/
-  `kb_id`/`block_ids`, applied against a block registry since the store is
-  text-agnostic) → optional rerank → top-k `RetrievedChunk`s. `RetrievedChunk`
+  weighted RRF fuse (`dense_weight` / `lexical_weight`) → `RetrievalFilter`
+  post-filter (`tags`/`entities`/`language`/ `kb_id`/`block_ids`, applied
+  against a block registry since the store is text-agnostic) → optional rerank
+  → optional score-floor guard (`min_score` + WeKnora decayed-retry /
+  top-`0.15` fallback, which stops weak/irrelevant blocks from filling the
+  top-`k`; applied on the rerank path and the dense-only cosine path, skipped
+  on an un-reranked RRF score since RRF scores are not on an absolute scale) →
+  top-k `RetrievedChunk`s. `RetrievedChunk`
   / `Citation` (`models.py`) surface `source.uri` + `source.locator` — the
   provenance the reader grounds citations in. The filter is a *post-filter*
   over an over-fetched dense pool (the store is deliberately text-agnostic);

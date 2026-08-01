@@ -246,6 +246,7 @@ from sparksage.retrieve import (
     RetrievedChunk,
     Retriever,
     reciprocal_rank_fusion,
+    tune_rrf_weights,
 )
 from sparksage.schema.enums import (
     BlockStatus,
@@ -488,6 +489,7 @@ __all__ = [
     "QAResult",
     "QAService",
     "reciprocal_rank_fusion",
+    "tune_rrf_weights",
     # --- Phase 2: knowledge base ----------------------------------------- #
     "InMemoryKnowledgeBaseStore",
     "KnowledgeBase",

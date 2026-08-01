@@ -22,16 +22,21 @@ from sparksage.embed.store import SearchHit
 from sparksage.retrieve import (
     DEFAULT_DEDUP_THRESHOLD,
     DEFAULT_MIN_FETCH,
+    DEFAULT_SCORE_MIN_TOP1,
+    DEFAULT_TUNE_WEIGHT_CANDIDATES,
     BM25Retriever,
     IdentityReranker,
     LLMReranker,
     NullLexicalRetriever,
     RetrievalFilter,
     RetrievedChunk,
+    Retriever,
     tokenize,
     tune_rrf_k,
+    tune_rrf_weights,
 )
 from sparksage.retrieve.fusion import reciprocal_rank_fusion
+from sparksage.retrieve.orchestrator import _apply_score_floor
 from sparksage.schema.entity import Entity
 from sparksage.schema.enums import EntityType
 from sparksage.schema.source import SourceRef
@@ -48,6 +53,29 @@ def _block(name, q, a, *, tags=None, keywords=None, entities=None, kb_id=None):
         source=SourceRef(uri=f"file://{name}.md", title=name, locator="L10"),
         kb_id=kb_id,
     )
+
+
+class _FixedScoreReranker:
+    """Test reranker that assigns explicit (0, 1] scores by block name.
+
+    Sorts the pool by descending score (block_id tiebreak) and honours
+    ``top_n``. Implements the :class:`Reranker` protocol structurally so the
+    orchestrator treats it as a real (non-identity) reranker.
+    """
+
+    def __init__(self, score_by_name):
+        self._score_by_name = score_by_name
+
+    def rerank(self, query, chunks, *, top_n=None):
+        from dataclasses import replace
+
+        scored = [
+            replace(c, score=float(self._score_by_name.get(c.block.name, 0.0)))
+            for c in chunks
+        ]
+        scored.sort(key=lambda c: (-c.score, str(c.block.id)))
+        out = scored if top_n is None else scored[:top_n]
+        return [replace(c, rank=i) for i, c in enumerate(out)]
 
 
 # --------------------------------------------------------------------------- #
@@ -516,3 +544,340 @@ class TestTuneRRFK:
     def test_empty_candidates_raises(self):
         with pytest.raises(ValueError):
             tune_rrf_k([[SearchHit("a", 1.0)]], [{"a"}], k_candidates=[], top_n=1)
+
+
+# --------------------------------------------------------------------------- #
+# Weighted RRF
+# --------------------------------------------------------------------------- #
+class TestWeightedRRF:
+    def _two_lists(self):
+        # dense favours 'a', lexical favours 'b' -- weights decide the winner.
+        dense = [SearchHit("a", 0.9), SearchHit("b", 0.8)]
+        lex = [SearchHit("b", 11.0), SearchHit("a", 9.0)]
+        return dense, lex
+
+    def test_none_weights_equals_equal(self):
+        dense, lex = self._two_lists()
+        none_fused = reciprocal_rank_fusion([dense, lex])
+        eq_fused = reciprocal_rank_fusion([dense, lex], weights=(1.0, 1.0))
+        assert [h.block_id for h in none_fused] == [h.block_id for h in eq_fused]
+        assert [h.score for h in none_fused] == [h.score for h in eq_fused]
+
+    def test_dense_favoured_lifts_dense_top(self):
+        dense, lex = self._two_lists()
+        fused = reciprocal_rank_fusion([dense, lex], weights=(0.9, 0.1))
+        assert fused[0].block_id == "a"  # dense leg dominates
+
+    def test_lexical_favoured_lifts_lexical_top(self):
+        dense, lex = self._two_lists()
+        fused = reciprocal_rank_fusion([dense, lex], weights=(0.1, 0.9))
+        assert fused[0].block_id == "b"  # lexical leg dominates
+
+    def test_only_ratio_matters(self):
+        dense, lex = self._two_lists()
+        small = reciprocal_rank_fusion([dense, lex], weights=(0.7, 0.3))
+        big = reciprocal_rank_fusion([dense, lex], weights=(7.0, 3.0))
+        assert [h.block_id for h in small] == [h.block_id for h in big]
+
+    def test_zero_weight_drops_a_leg(self):
+        dense, lex = self._two_lists()
+        fused = reciprocal_rank_fusion([dense, lex], weights=(1.0, 0.0))
+        # lexical contributes nothing -> pure dense order
+        assert [h.block_id for h in fused] == ["a", "b"]
+
+    def test_length_mismatch_raises(self):
+        dense, lex = self._two_lists()
+        with pytest.raises(ValueError):
+            reciprocal_rank_fusion([dense, lex], weights=(0.5,))
+
+    def test_negative_weight_raises(self):
+        dense, lex = self._two_lists()
+        with pytest.raises(ValueError):
+            reciprocal_rank_fusion([dense, lex], weights=(0.7, -0.3))
+
+    def test_bool_weight_rejected(self):
+        dense, lex = self._two_lists()
+        with pytest.raises(TypeError):
+            reciprocal_rank_fusion([dense, lex], weights=(True, 0.5))  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# tune_rrf_weights
+# --------------------------------------------------------------------------- #
+class TestTuneRRFWeights:
+    def _two_leg_query(self):
+        # one query carrying two ranked legs (dense + lexical)
+        dense = [SearchHit("a", 0.9), SearchHit("b", 0.8)]
+        lex = [SearchHit("b", 11.0), SearchHit("a", 9.0)]
+        return [dense, lex]
+
+    def test_returns_default_when_no_data(self):
+        assert tune_rrf_weights([], []) == (0.5, 0.5)
+
+    def test_returns_tuple_in_grid(self):
+        best = tune_rrf_weights([self._two_leg_query()], [{"a", "b"}], top_n=2)
+        assert best in DEFAULT_TUNE_WEIGHT_CANDIDATES
+
+    def test_custom_candidates(self):
+        dense = [SearchHit("a", 1.0)]
+        lex = [SearchHit("a", 1.0)]
+        best = tune_rrf_weights(
+            [[dense, lex]], [{"a"}], weight_candidates=[(0.6, 0.4), (0.4, 0.6)], top_n=1
+        )
+        assert best in ((0.6, 0.4), (0.4, 0.6))
+
+    def test_picks_dense_favoured_when_dense_top_is_relevant(self):
+        # 'a' is dense-top; only a dense-favoured weight surfaces it at top-1.
+        best = tune_rrf_weights(
+            [self._two_leg_query()],
+            [{"a"}],
+            weight_candidates=[(0.9, 0.1), (0.1, 0.9)],
+            top_n=1,
+        )
+        assert best == (0.9, 0.1)
+
+    def test_candidate_length_mismatch_raises(self):
+        # candidates of differing lengths among themselves
+        with pytest.raises(ValueError):
+            tune_rrf_weights(
+                [self._two_leg_query()], [{"a"}],
+                weight_candidates=[(0.5,), (0.5, 0.5)], top_n=1,
+            )
+
+    def test_arity_mismatch_raises(self):
+        # candidate arity (1) != query leg count (2)
+        with pytest.raises(ValueError):
+            tune_rrf_weights(
+                [self._two_leg_query()], [{"a"}],
+                weight_candidates=[(1.0,)], top_n=1,
+            )
+
+    def test_empty_candidates_raises(self):
+        with pytest.raises(ValueError):
+            tune_rrf_weights(
+                [self._two_leg_query()], [{"a"}], weight_candidates=[], top_n=1
+            )
+
+    def test_bad_weight_value_raises(self):
+        with pytest.raises(ValueError):
+            tune_rrf_weights(
+                [self._two_leg_query()], [{"a"}],
+                weight_candidates=[(0.7, -0.3)], top_n=1,
+            )
+
+
+# --------------------------------------------------------------------------- #
+# Retriever weighted-fusion wiring
+# --------------------------------------------------------------------------- #
+class TestRetrieverWeights:
+    def _make(self, blocks, *, dense_weight=1.0, lexical_weight=1.0):
+        dim = 64
+        embedder = BlockEmbedder(FakeEmbeddingClient(dimension=dim))
+        store = InMemoryVectorStore(dimension=dim)
+        registry: dict[str, IdeaBlock] = {}
+        retriever = Retriever(
+            registry, store, embedder,
+            lexical=BM25Retriever(),
+            min_fetch=5, fetch_factor=2, dedup_threshold=None,
+            dense_weight=dense_weight, lexical_weight=lexical_weight,
+        )
+        retriever.index(blocks)
+        return retriever
+
+    def test_zero_lexical_weight_matches_dense_only(self):
+        blocks = [
+            _block("Deploy", "deploy?", "run pip install sparksage deploy", keywords=["deploy"]),
+            _block("Eat", "eat?", "try apples and oranges food", keywords=["eat"]),
+            _block("Sleep", "sleep?", "rest well at night bed", keywords=["sleep"]),
+        ]
+        zero_lex = self._make(blocks, lexical_weight=0.0)
+        fused_ids = [str(c.block.id) for c in zero_lex.search("deploy", k=3).chunks]
+        # baseline: dense-only
+        dense_only = self._make(blocks, lexical_weight=0.0)
+        baseline_ids = [
+            str(c.block.id)
+            for c in dense_only.search("deploy", k=3, use_lexical=False).chunks
+        ]
+        assert fused_ids == baseline_ids
+        assert zero_lex.search("deploy", k=3).fused
+
+    def test_weights_properties(self):
+        r = self._make([_block("A", "q?", "a")], dense_weight=0.7, lexical_weight=0.3)
+        assert r.dense_weight == 0.7
+        assert r.lexical_weight == 0.3
+
+    def test_bad_weight_raises(self):
+        dim = 8
+        with pytest.raises(ValueError):
+            Retriever(
+                {}, InMemoryVectorStore(dimension=dim),
+                BlockEmbedder(FakeEmbeddingClient(dimension=dim)),
+                dense_weight=-0.1,
+            )
+        with pytest.raises(TypeError):
+            Retriever(
+                {}, InMemoryVectorStore(dimension=dim),
+                BlockEmbedder(FakeEmbeddingClient(dimension=dim)),
+                dense_weight=True,  # type: ignore[arg-type]
+            )
+
+
+# --------------------------------------------------------------------------- #
+# Rerank score floor + WeKnora fallback
+# --------------------------------------------------------------------------- #
+class TestScoreFloor:
+    def _make(self, blocks, *, reranker, min_score, **kw):
+        dim = 64
+        embedder = BlockEmbedder(FakeEmbeddingClient(dimension=dim))
+        store = InMemoryVectorStore(dimension=dim)
+        registry: dict[str, IdeaBlock] = {}
+        defaults = dict(
+            min_fetch=5, fetch_factor=2, dedup_threshold=None,
+            score_retry_factor=0.7, score_retry_floor=0.3, score_min_top1=0.15,
+        )
+        defaults.update(kw)
+        retriever = Retriever(
+            registry, store, embedder, lexical=None, reranker=reranker,
+            min_score=min_score, **defaults,
+        )
+        retriever.index(blocks)
+        return retriever
+
+    def test_floor_drops_weak_chunks(self):
+        blocks = [_block("Strong", "q?", "deploy strong"), _block("Weak", "q?", "food weak")]
+        rr = _FixedScoreReranker({"Strong": 0.9, "Weak": 0.2})
+        retriever = self._make(blocks, reranker=rr, min_score=0.5)
+        result = retriever.search("deploy", k=2, use_lexical=False)
+        names = [c.block.name for c in result.chunks]
+        assert "Strong" in names
+        assert "Weak" not in names
+
+    def test_floor_retry_keeps_borderline(self):
+        # both just below the initial threshold but above the decayed level.
+        blocks = [_block("A", "q?", "deploy alpha"), _block("B", "q?", "deploy beta")]
+        rr = _FixedScoreReranker({"A": 0.4, "B": 0.4})
+        retriever = self._make(blocks, reranker=rr, min_score=0.5)
+        result = retriever.search("deploy", k=2, use_lexical=False)
+        # 0.5 -> empty; decay to 0.35 -> 0.4 passes -> both kept
+        assert len(result.chunks) == 2
+
+    def test_floor_top1_fallback(self):
+        # everything below every decayed threshold; best chunk clears top-1 floor.
+        blocks = [
+            _block("Best", "q?", "deploy best"), _block("Worst", "q?", "food worst"),
+        ]
+        rr = _FixedScoreReranker({"Best": 0.2, "Worst": 0.1})
+        retriever = self._make(blocks, reranker=rr, min_score=0.5)
+        result = retriever.search("deploy", k=2, use_lexical=False)
+        assert [c.block.name for c in result.chunks] == ["Best"]
+
+    def test_floor_empty_when_below_top1(self):
+        blocks = [_block("Low", "q?", "deploy low")]
+        rr = _FixedScoreReranker({"Low": 0.1})
+        retriever = self._make(blocks, reranker=rr, min_score=0.5)
+        result = retriever.search("deploy", k=2, use_lexical=False)
+        assert result.is_empty
+
+    def test_floor_off_when_none(self):
+        blocks = [_block("Strong", "q?", "deploy"), _block("Weak", "q?", "food")]
+        rr = _FixedScoreReranker({"Strong": 0.9, "Weak": 0.2})
+        retriever = self._make(blocks, reranker=rr, min_score=None)
+        result = retriever.search("deploy", k=2, use_lexical=False)
+        # no floor -> both fill the top-k
+        assert len(result.chunks) == 2
+
+    def test_floor_skipped_on_rrf_without_rerank(self):
+        # Hybrid + no rerank -> final score is an RRF score (not comparable to an
+        # absolute threshold). The floor must be skipped, else tiny RRF scores
+        # would wipe the result.
+        blocks = [
+            _block("Deploy", "deploy?", "run pip install sparksage deploy", keywords=["deploy"]),
+            _block("Eat", "eat?", "try apples and oranges food", keywords=["eat"]),
+            _block("Sleep", "sleep?", "rest well at night bed", keywords=["sleep"]),
+        ]
+        dim = 64
+        embedder = BlockEmbedder(FakeEmbeddingClient(dimension=dim))
+        store = InMemoryVectorStore(dimension=dim)
+        registry: dict[str, IdeaBlock] = {}
+        retriever = Retriever(
+            registry, store, embedder, lexical=BM25Retriever(),
+            min_fetch=5, fetch_factor=2, dedup_threshold=None, min_score=0.3,
+        )
+        retriever.index(blocks)
+        result = retriever.search("deploy", k=3)
+        assert result.fused
+        assert not result.reranked
+        assert len(result.chunks) == 3  # would be empty if the floor ran
+
+    def test_floor_applies_on_dense_only_cosine(self):
+        # No rerank, no lexical -> final scores are dense cosines; the floor
+        # still applies (cosines are comparable to a threshold) and the decayed
+        # retry rescues the top chunk.
+        blocks = [
+            _block("Deploy", "deploy?", "run pip install sparksage deploy"),
+            _block("Eat", "eat?", "try apples and oranges food"),
+            _block("Sleep", "sleep?", "rest well at night bed"),
+        ]
+        dim = 64
+        embedder = BlockEmbedder(FakeEmbeddingClient(dimension=dim))
+        store = InMemoryVectorStore(dimension=dim)
+        registry: dict[str, IdeaBlock] = {}
+        with_floor = Retriever(
+            registry, store, embedder, lexical=None,
+            min_fetch=5, fetch_factor=2, dedup_threshold=None, min_score=0.99,
+        )
+        with_floor.index(blocks)
+        res = with_floor.search("deploy", k=3, use_lexical=False, use_rerank=False)
+        assert len(res.chunks) == 1  # only the top cosine survives the retry
+
+    def test_floor_property(self):
+        r = self._make([_block("A", "q?", "a")], reranker=_FixedScoreReranker({}), min_score=0.4)
+        assert r.min_score == 0.4
+        assert r.score_retry_factor == 0.7
+        assert r.score_retry_floor == 0.3
+        assert r.score_min_top1 == DEFAULT_SCORE_MIN_TOP1 == 0.15
+
+    def test_bad_floor_params(self):
+        dim = 8
+        emb = BlockEmbedder(FakeEmbeddingClient(dimension=dim))
+        store = InMemoryVectorStore(dimension=dim)
+        with pytest.raises(ValueError):
+            Retriever({}, store, emb, min_score=1.5)  # > 1
+        with pytest.raises(ValueError):
+            Retriever({}, store, emb, min_score=0.2)  # < retry_floor (0.3)
+        with pytest.raises(ValueError):
+            Retriever({}, store, emb, score_min_top1=0.5, score_retry_floor=0.3)  # top1 > floor
+        with pytest.raises(ValueError):
+            Retriever({}, store, emb, score_retry_factor=0.0)  # factor must be > 0
+
+
+# --------------------------------------------------------------------------- #
+# _apply_score_floor helper (unit)
+# --------------------------------------------------------------------------- #
+class TestApplyScoreFloor:
+    def _chunks(self, scores):
+        blocks = [_block(f"B{i}", "q?", f"answer {i}") for i in range(len(scores))]
+        return [
+            RetrievedChunk(block=b, score=s, rank=i)
+            for i, (b, s) in enumerate(zip(blocks, scores, strict=True))
+        ]
+
+    def test_keeps_above_threshold(self):
+        chunks = self._chunks([0.9, 0.2])
+        out = _apply_score_floor(chunks, 0.5, retry_factor=0.7, retry_floor=0.3, min_top1=0.15)
+        assert [c.score for c in out] == [0.9]
+
+    def test_retry_at_decayed_level(self):
+        chunks = self._chunks([0.4, 0.4])
+        out = _apply_score_floor(chunks, 0.5, retry_factor=0.7, retry_floor=0.3, min_top1=0.15)
+        assert len(out) == 2  # 0.5 misses, 0.35 keeps
+
+    def test_top1_fallback(self):
+        chunks = self._chunks([0.2, 0.1])
+        out = _apply_score_floor(chunks, 0.5, retry_factor=0.7, retry_floor=0.3, min_top1=0.15)
+        assert [c.score for c in out] == [0.2]
+
+    def test_empty_below_top1(self):
+        chunks = self._chunks([0.1])
+        out = _apply_score_floor(chunks, 0.5, retry_factor=0.7, retry_floor=0.3, min_top1=0.15)
+        assert out == []
