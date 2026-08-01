@@ -60,7 +60,8 @@ ARG SPARKSAGE_EXTRAS="api,convert,llm,embed,rerank,distill,tags-zh"
 FROM node:20-slim AS frontend
 WORKDIR /web
 COPY web/package.json web/package-lock.json* ./
-RUN npm install --no-audit --no-fund
+RUN --mount=type=cache,target=/root/.npm \
+    npm install --no-audit --no-fund
 COPY web/ ./
 RUN npm run build
 
