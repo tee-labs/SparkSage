@@ -5,6 +5,7 @@ import type {
   ConfigResponse,
   ConfigUpdateResponse,
   ConvertResponse,
+  CreateKnowledgeBaseRequest,
   DocumentDetail,
   DocumentListResponse,
   FeedbackListResponse,
@@ -12,6 +13,8 @@ import type {
   FeedbackStats,
   GenerateResponse,
   KnowledgeBaseInfo,
+  KnowledgeBaseListResponse,
+  KnowledgeBaseSummary,
   TagsResponse,
 } from '@/types';
 
@@ -71,6 +74,7 @@ export const api = {
       tags?: string[];
       auto_tag?: boolean;
       top_k?: number;
+      kb_id?: string | null;
     } = {},
   ) => {
     const form = new FormData();
@@ -81,6 +85,7 @@ export const api = {
     if (opts.tags?.length) form.append('tags', opts.tags.join(','));
     form.append('auto_tag', String(opts.auto_tag ?? true));
     if (opts.top_k) form.append('top_k', String(opts.top_k));
+    if (opts.kb_id) form.append('kb_id', opts.kb_id);
     return client
       .post<GenerateResponse>('/knowledge_base/ingest', form)
       .then((r) => r.data);
@@ -103,20 +108,39 @@ export const api = {
   listTags: () => client.get<TagsResponse>('/tags').then((r) => r.data),
 
   // ---- knowledge base ----
-  kbInfo: () =>
-    client.get<KnowledgeBaseInfo>('/knowledge_base').then((r) => r.data),
+  kbInfo: (kbId?: string) =>
+    client
+      .get<KnowledgeBaseInfo>('/knowledge_base', { params: kbId ? { kb_id: kbId } : undefined })
+      .then((r) => r.data),
   listBlocks: (params: {
     tag?: string;
     language?: string;
     status?: string;
+    kb_id?: string;
     limit?: number;
     offset?: number;
   } = {}) => client.get<BlockListResponse>('/knowledge_base/blocks', { params }).then((r) => r.data),
-  kbTags: () => client.get<TagsResponse>('/knowledge_base/tags').then((r) => r.data),
+  kbTags: (kbId?: string) =>
+    client
+      .get<TagsResponse>('/knowledge_base/tags', { params: kbId ? { kb_id: kbId } : undefined })
+      .then((r) => r.data),
+
+  // ---- knowledge bases (multi-KB management) ----
+  listKnowledgeBases: (params: { limit?: number; offset?: number } = {}) =>
+    client.get<KnowledgeBaseListResponse>('/knowledge_bases', { params }).then((r) => r.data),
+  getKnowledgeBase: (kbId: string) =>
+    client.get<KnowledgeBaseSummary>(`/knowledge_bases/${kbId}`).then((r) => r.data),
+  createKnowledgeBase: (body: CreateKnowledgeBaseRequest) =>
+    client.post<KnowledgeBaseSummary>('/knowledge_bases', body).then((r) => r.data),
+  deleteKnowledgeBase: (kbId: string) =>
+    client.delete(`/knowledge_bases/${kbId}`).then((r) => r.data),
+  activateKnowledgeBase: (kbId: string) =>
+    client.post<KnowledgeBaseSummary>(`/knowledge_bases/${kbId}/activate`).then((r) => r.data),
 
   // ---- QA ----
   ask: (body: {
     query: string;
+    kb_id?: string;
     k?: number;
     use_lexical?: boolean;
     use_rerank?: boolean;

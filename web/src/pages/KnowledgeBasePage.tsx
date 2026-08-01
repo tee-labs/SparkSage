@@ -20,6 +20,8 @@ import {
 import { ReloadOutlined } from '@ant-design/icons';
 import { api } from '@/api';
 import type { BlockOut, KnowledgeBaseInfo } from '@/types';
+import KbSelector from '@/components/KbSelector';
+import { useKnowledgeBases } from '@/components/useKnowledgeBases';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -33,6 +35,7 @@ const STATUS_COLORS: Record<string, string> = {
 const PAGE_SIZE = 20;
 
 export default function KnowledgeBasePage() {
+  const { kbs, loading: kbLoading, selectedKbId, setSelectedKbId } = useKnowledgeBases();
   const [info, setInfo] = useState<KnowledgeBaseInfo | null>(null);
   const [blocks, setBlocks] = useState<BlockOut[]>([]);
   const [total, setTotal] = useState(0);
@@ -48,15 +51,16 @@ export default function KnowledgeBasePage() {
     setLoading(true);
     try {
       const [kb, blk, tagsRes] = await Promise.all([
-        api.kbInfo(),
+        api.kbInfo(selectedKbId ?? undefined),
         api.listBlocks({
           tag: tagFilter.length ? tagFilter.join(',') : undefined,
           language,
           status,
+          kb_id: selectedKbId ?? undefined,
           limit: PAGE_SIZE,
           offset: (page - 1) * PAGE_SIZE,
         }),
-        api.kbTags(),
+        api.kbTags(selectedKbId ?? undefined),
       ]);
       setInfo(kb);
       setBlocks(blk.items);
@@ -67,7 +71,7 @@ export default function KnowledgeBasePage() {
     } finally {
       setLoading(false);
     }
-  }, [tagFilter, language, status, page]);
+  }, [tagFilter, language, status, page, selectedKbId]);
 
   useEffect(() => {
     load();
@@ -127,6 +131,16 @@ export default function KnowledgeBasePage() {
 
       <Card size="small">
         <Space wrap>
+          <span>知识库：</span>
+          <KbSelector
+            value={selectedKbId}
+            onChange={(v) => {
+              setSelectedKbId(v);
+              setPage(1);
+            }}
+            kbs={kbs}
+            loading={kbLoading}
+          />
           <Select
             mode="multiple"
             allowClear

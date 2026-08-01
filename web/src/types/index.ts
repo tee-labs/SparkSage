@@ -123,6 +123,36 @@ export interface KnowledgeBaseInfo {
   language?: string;
   description?: string | null;
   tags: string[];
+  active?: boolean;
+}
+
+export interface KnowledgeBaseSummary {
+  kb_id: string;
+  name: string;
+  description?: string | null;
+  language: string;
+  tags: string[];
+  block_count: number;
+  document_count: number;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KnowledgeBaseListResponse {
+  items: KnowledgeBaseSummary[];
+  count: number;
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface CreateKnowledgeBaseRequest {
+  name: string;
+  description?: string | null;
+  language?: string;
+  tags?: string[] | null;
+  set_active?: boolean;
 }
 
 export interface BlockOut {

@@ -325,6 +325,13 @@ class AskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(..., min_length=1, description="The natural-language question.")
+    kb_id: str | None = Field(
+        default=None,
+        description=(
+            "Target knowledge base id. Defaults to the active KB. "
+            "Ignored when superseded by a tag/entity scoping that implies another KB."
+        ),
+    )
     k: int | None = Field(default=None, ge=1, description="Top-k chunks to retrieve.")
     use_lexical: bool | None = Field(
         default=None, description="Toggle the BM25 lexical leg of hybrid search."
@@ -422,6 +429,61 @@ class KnowledgeBaseResponse(BaseModel):
     language: str = Field(default="en", description="Default block language.")
     description: str | None = Field(default=None, description="Free-text description.")
     tags: list[str] = Field(default_factory=list, description="KB-level labels.")
+    active: bool = Field(
+        default=False,
+        description="Whether this is the active routing target.",
+    )
+
+
+class KnowledgeBaseSummary(BaseModel):
+    """One row in the multi-KB listing (lightweight, no block payload)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kb_id: str = Field(description="Stable unique id.")
+    name: str = Field(description="Human-readable KB name.")
+    description: str | None = Field(default=None, description="Free-text description.")
+    language: str = Field(default="en", description="Default block language.")
+    tags: list[str] = Field(default_factory=list, description="KB-level labels.")
+    block_count: int = Field(default=0, description="Number of indexed IdeaBlocks.")
+    document_count: int = Field(default=0, description="Number of stored documents.")
+    active: bool = Field(
+        default=False,
+        description="Whether this is the active routing target.",
+    )
+    created_at: datetime = Field(description="Creation time (UTC, ISO 8601).")
+    updated_at: datetime = Field(description="Last write time (UTC, ISO 8601).")
+
+
+class KnowledgeBaseListResponse(BaseModel):
+    """Paginated multi-KB listing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[KnowledgeBaseSummary] = Field(description="The current page of KBs.")
+    count: int = Field(description="Number of items in this page.")
+    total: int = Field(description="Total knowledge bases registered.")
+    limit: int = Field(description="Page size used.")
+    offset: int = Field(description="Offset used.")
+
+
+class CreateKnowledgeBaseRequest(BaseModel):
+    """JSON body for ``POST /api/v1/knowledge_bases``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, description="Human-readable KB name.")
+    description: str | None = Field(default=None, description="Free-text description.")
+    language: str = Field(
+        default="en", min_length=2, max_length=16, description="Default block language."
+    )
+    tags: list[str] | None = Field(
+        default=None, description="Free-form KB-level labels."
+    )
+    set_active: bool = Field(
+        default=True,
+        description="Make this KB the active routing target on creation.",
+    )
 
 
 class FeedbackRequest(BaseModel):
@@ -614,7 +676,12 @@ def _to_ingest_response(result: object) -> IngestAndIndexResponse:
 def _build_filter_from_request(
     body: AskRequest,
 ) -> tuple[RetrievalFilter | None, ConversationContext | None]:
-    """Translate an :class:`AskRequest` into the retrieval filter + context."""
+    """Translate an :class:`AskRequest` into the retrieval filter + context.
+
+    ``body.kb_id`` is *not* folded into the :class:`RetrievalFilter` here -- the
+    QAService resolves it to the right KB aggregate / engine directly. The
+    filter still carries tag / entity / language scoping.
+    """
     from sparksage.query.context import ConversationContext
     from sparksage.retrieve.models import RetrievalFilter
     from sparksage.schema.enums import Tag

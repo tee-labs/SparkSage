@@ -777,13 +777,16 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
         AskRequest,
         AskResponse,
         BlockListResponse,
+        CreateKnowledgeBaseRequest,
         FeedbackListResponse,
         FeedbackRecordOut,
         FeedbackRequest,
         FeedbackResponse,
         FeedbackStatsResponse,
         IngestAndIndexResponse,
+        KnowledgeBaseListResponse,
         KnowledgeBaseResponse,
+        KnowledgeBaseSummary,
         TagsResponse,
         _build_filter_from_request,
         _to_ask_response,
@@ -828,6 +831,10 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
         language: Annotated[
             str | None, Form(description="BCP-47 code written into every block.")
         ] = None,
+        kb_id: Annotated[
+            str | None,
+            Form(description="Target knowledge base id (defaults to the active KB)."),
+        ] = None,
     ) -> IngestAndIndexResponse:
         data = await file.read()
         parsed_tags = None
@@ -845,9 +852,12 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
                 top_k=top_k,
                 max_blocks=max_blocks,
                 language=language,
+                kb_id=kb_id,
             )
         except GenerationNotConfiguredError as exc:
             raise HTTPException(status_code=503, detail=_detail(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=_detail(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=422, detail=_detail(exc)) from exc
         return _to_ingest_response(result)
@@ -855,7 +865,7 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
     @app.post(
         "/api/v1/query",
         response_model=AskResponse,
-        summary="Ask a question against the knowledge base",
+        summary="Ask a question against a knowledge base",
     )
     async def ask(
         body: Annotated[AskRequest, Body(description="The question + options.")],
@@ -869,7 +879,10 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
                 k=body.k,
                 use_lexical=body.use_lexical,
                 use_rerank=body.use_rerank,
+                kb_id=body.kb_id,
             )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=_detail(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=_detail(exc)) from exc
         return _to_ask_response(result)
@@ -877,11 +890,108 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
     @app.get(
         "/api/v1/knowledge_base",
         response_model=KnowledgeBaseResponse,
-        summary="Knowledge-base snapshot (block / document counts)",
+        summary="Active knowledge-base snapshot (block / document counts)",
     )
-    async def kb_info() -> KnowledgeBaseResponse:
-        info = qa_svc.knowledge_base_info()
+    async def kb_info(
+        kb_id: Annotated[
+            str | None,
+            Query(description="Target KB (defaults to the active KB)."),
+        ] = None,
+    ) -> KnowledgeBaseResponse:
+        try:
+            info = qa_svc.knowledge_base_info(kb_id=kb_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=_detail(exc)) from exc
         return KnowledgeBaseResponse(**info)
+
+    # ------------------------------------------------------------------ #
+    # multi-knowledge-base management (create / list / delete / activate)
+    # ------------------------------------------------------------------ #
+    @app.post(
+        "/api/v1/knowledge_bases",
+        response_model=KnowledgeBaseSummary,
+        status_code=201,
+        summary="Create a new knowledge base",
+    )
+    async def create_kb(
+        body: Annotated[
+            CreateKnowledgeBaseRequest, Body(description="The new KB metadata.")
+        ],
+    ) -> KnowledgeBaseSummary:
+        try:
+            info = qa_svc.create_knowledge_base(
+                body.name,
+                description=body.description,
+                language=body.language,
+                tags=body.tags,
+                set_active=body.set_active,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail=_detail(exc)) from exc
+        snap = qa_svc.get_knowledge_base_info(info.kb_id)
+        return _to_kb_summary(snap or {})
+
+    @app.get(
+        "/api/v1/knowledge_bases",
+        response_model=KnowledgeBaseListResponse,
+        summary="List all knowledge bases",
+    )
+    async def list_kbs(
+        limit: Annotated[int, Query(ge=1, le=1000, description="Page size.")] = 100,
+        offset: Annotated[int, Query(ge=0, description="Page offset.")] = 0,
+    ) -> KnowledgeBaseListResponse:
+        page, total = qa_svc.list_knowledge_bases(limit=limit, offset=offset)
+        items = [_to_kb_summary(p) for p in page]
+        return KnowledgeBaseListResponse(
+            items=items, count=len(items), total=total, limit=limit, offset=offset
+        )
+
+    @app.get(
+        "/api/v1/knowledge_bases/{kb_id}",
+        response_model=KnowledgeBaseSummary,
+        summary="Get a single knowledge base by id",
+    )
+    async def get_kb(
+        kb_id: Annotated[str, Path(description="The knowledge base id.")],
+    ) -> KnowledgeBaseSummary:
+        snap = qa_svc.get_knowledge_base_info(kb_id)
+        if snap is None:
+            raise HTTPException(
+                status_code=404, detail=f"knowledge base not found: {kb_id}"
+            )
+        return _to_kb_summary(snap)
+
+    @app.delete(
+        "/api/v1/knowledge_bases/{kb_id}",
+        summary="Delete a knowledge base (metadata + live index)",
+    )
+    async def delete_kb(
+        kb_id: Annotated[str, Path(description="The knowledge base id.")],
+    ) -> dict[str, bool]:
+        try:
+            deleted = qa_svc.delete_knowledge_base(kb_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=_detail(exc)) from exc
+        if not deleted:
+            raise HTTPException(
+                status_code=404, detail=f"knowledge base not found: {kb_id}"
+            )
+        return {"deleted": True}
+
+    @app.post(
+        "/api/v1/knowledge_bases/{kb_id}/activate",
+        response_model=KnowledgeBaseSummary,
+        summary="Set a knowledge base as the active routing target",
+    )
+    async def activate_kb(
+        kb_id: Annotated[str, Path(description="The knowledge base id.")],
+    ) -> KnowledgeBaseSummary:
+        try:
+            qa_svc.set_active_knowledge_base(kb_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=_detail(exc)) from exc
+        snap = qa_svc.get_knowledge_base_info(kb_id)
+        return _to_kb_summary(snap or {})
 
     @app.delete(
         "/api/v1/knowledge_base/documents/{doc_id}",
@@ -889,8 +999,12 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
     )
     async def kb_remove_document(
         doc_id: Annotated[str, Path(description="The document id.")],
+        kb_id: Annotated[
+            str | None,
+            Query(description="Target KB (defaults to the active KB)."),
+        ] = None,
     ) -> dict[str, bool]:
-        deleted = qa_svc.remove_document(doc_id)
+        deleted = qa_svc.remove_document(doc_id, kb_id=kb_id)
         if not deleted:
             raise HTTPException(status_code=404, detail=f"document not found: {doc_id}")
         return {"deleted": True}
@@ -954,15 +1068,27 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
             str | None,
             Query(description="Lifecycle status: ACTIVE / MERGED / DRAFT / ARCHIVED."),
         ] = None,
+        kb_id: Annotated[
+            str | None,
+            Query(description="Target KB (defaults to the active KB)."),
+        ] = None,
         limit: Annotated[int, Query(ge=1, le=1000, description="Page size.")] = 100,
         offset: Annotated[int, Query(ge=0, description="Page offset.")] = 0,
     ) -> BlockListResponse:
         tags = None
         if tag:
             tags = [p.strip() for p in tag.split(",") if p.strip()]
-        page, total = qa_svc.list_blocks(
-            tags=tags, language=language, status=status, limit=limit, offset=offset
-        )
+        try:
+            page, total = qa_svc.list_blocks(
+                tags=tags,
+                language=language,
+                status=status,
+                limit=limit,
+                offset=offset,
+                kb_id=kb_id,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=_detail(exc)) from exc
         items = [_to_block_out(b) for b in page]
         return BlockListResponse(
             items=items, count=len(items), total=total, limit=limit, offset=offset
@@ -973,8 +1099,16 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
         response_model=TagsResponse,
         summary="Distinct tag vocabulary across indexed IdeaBlocks",
     )
-    async def kb_list_tags() -> TagsResponse:
-        return TagsResponse(tags=qa_svc.list_block_tags())
+    async def kb_list_tags(
+        kb_id: Annotated[
+            str | None,
+            Query(description="Target KB (defaults to the active KB)."),
+        ] = None,
+    ) -> TagsResponse:
+        try:
+            return TagsResponse(tags=qa_svc.list_block_tags(kb_id=kb_id))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=_detail(exc)) from exc
 
     @app.get(
         "/api/v1/feedback/records",
@@ -1008,6 +1142,24 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
 def _detail(exc: BaseException) -> str:
     msg = str(exc)
     return msg or exc.__class__.__name__
+
+
+def _to_kb_summary(snap: dict[str, Any]) -> Any:
+    """Build a :class:`KnowledgeBaseSummary` from a QAService KB snapshot dict."""
+    from sparksage.api.schemas import KnowledgeBaseSummary
+
+    return KnowledgeBaseSummary(
+        kb_id=snap["kb_id"],
+        name=snap["name"],
+        description=snap.get("description"),
+        language=snap.get("language", "en"),
+        tags=list(snap.get("tags", [])),
+        block_count=int(snap.get("block_count", 0)),
+        document_count=int(snap.get("document_count", 0)),
+        active=bool(snap.get("active", False)),
+        created_at=snap["created_at"],
+        updated_at=snap["updated_at"],
+    )
 
 
 def run(  # pragma: no cover - thin launcher

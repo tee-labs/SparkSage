@@ -572,7 +572,17 @@ The three
 previously "designed but unconsumed" IdeaBlock fields (`keywords`,
 `entities`/`tags`, `source.locator`) are now all wired into retrieval /
 filtering / citations.
-Planned next: an OpenAI-compatible API, a `/api/v1/query` route wrapping
-`QAEngine`, and a `/api/v1/distill` route wrapping `JobManager`.
+Also implemented now: multi-knowledge-base management at the web layer
+(`api/qa_service.py:QAService` holds a registry of `KnowledgeBase` aggregates
+keyed by `kb_id` backed by a `KnowledgeBaseStore`, with an "active" KB as the
+default routing target and per-call `kb_id=` on `ingest_and_index` / `ask` /
+`list_blocks` / feedback; `api/app.py` exposes `POST/GET/DELETE
+/api/v1/knowledge_bases` + `POST /api/v1/knowledge_bases/{kb_id}/activate`, the
+ingest route takes a `kb_id` form field, and `AskRequest.kb_id` routes the
+query to the right KB's lazily-built `QAEngine`; the React UI adds a
+`/knowledge-bases` management page and a shared `KbSelector` on ingest / QA /
+browse pages).
+Planned next: an OpenAI-compatible API and a `/api/v1/distill` route wrapping
+`JobManager`.
 Design schema additions so the Distill lifecycle fields (`status`, `parents`,
 `confidence`, `embedding`) remain usable.

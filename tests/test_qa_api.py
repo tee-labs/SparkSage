@@ -499,3 +499,195 @@ class TestRouteMounting:
 
         resp = client.get("/api/v1/knowledge_base")
         assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------- #
+# Multi-knowledge-base management
+# ---------------------------------------------------------------------------- #
+class TestMultiKnowledgeBaseService:
+    """QAService-level tests for create / list / delete + kb_id routing."""
+
+    def test_create_knowledge_base(self):
+        svc = _make_qa_service()
+        info = svc.create_knowledge_base("ops-docs", description="ops")
+        assert info.name == "ops-docs"
+        assert info.kb_id in svc.kb_store
+
+    def test_list_knowledge_bases_includes_default(self):
+        svc = _make_qa_service()
+        page, total = svc.list_knowledge_bases()
+        assert total == 1
+        assert page[0]["name"] == "default"
+
+    def test_list_reflects_live_counts(self):
+        svc = _make_qa_service()
+        svc.ingest_and_index(b"data", "guide.md")
+        page, _ = svc.list_knowledge_bases()
+        assert page[0]["block_count"] == 2
+        assert page[0]["document_count"] == 1
+
+    def test_ingest_routes_to_specified_kb(self):
+        svc = _make_qa_service()
+        new_info = svc.create_knowledge_base("second")
+        svc.ingest_and_index(b"data", "guide.md", kb_id=new_info.kb_id)
+        # default KB stays empty
+        assert svc.knowledge_base.block_count() == 0
+        # second KB has the blocks
+        second = svc._kbs[new_info.kb_id]
+        assert second.block_count() == 2
+
+    def test_ask_routes_via_kb_id(self):
+        svc = _make_qa_service()
+        new_info = svc.create_knowledge_base("second")
+        svc.ingest_and_index(b"data", "guide.md", kb_id=new_info.kb_id)
+        # asking the (empty) default KB abstains
+        res_default = svc.ask("How to install?", use_lexical=False)
+        assert res_default.abstained
+        # asking the second KB returns an answer
+        res_second = svc.ask(
+            "How to install?", use_lexical=False, kb_id=new_info.kb_id
+        )
+        assert not res_second.abstained
+
+    def test_delete_knowledge_base(self):
+        svc = _make_qa_service()
+        info = svc.create_knowledge_base("to-drop")
+        assert svc.delete_knowledge_base(info.kb_id) is True
+        assert info.kb_id not in svc.kb_store
+
+    def test_cannot_delete_last_kb(self):
+        svc = _make_qa_service()
+        with pytest.raises(ValueError):
+            svc.delete_knowledge_base(svc.active_kb_id)
+
+    def test_delete_falls_back_active(self):
+        svc = _make_qa_service()
+        first = svc.active_kb_id
+        svc.create_knowledge_base("second", set_active=True)
+        svc.delete_knowledge_base(svc.active_kb_id)
+        # active falls back to the remaining KB
+        assert svc.active_kb_id == first
+
+    def test_set_active_knowledge_base(self):
+        svc = _make_qa_service()
+        info = svc.create_knowledge_base("primary")
+        svc.set_active_knowledge_base(info.kb_id)
+        assert svc.active_kb_id == info.kb_id
+        assert svc.knowledge_base.kb_id == info.kb_id
+
+    def test_blocks_scoped_per_kb(self):
+        svc = _make_qa_service()
+        svc.ingest_and_index(b"data", "guide.md")
+        new_info = svc.create_knowledge_base("second")
+        page, total = svc.list_blocks(kb_id=new_info.kb_id)
+        assert total == 0
+        page, total = svc.list_blocks()
+        assert total == 2
+
+
+class TestMultiKnowledgeBaseRoutes:
+    """HTTP tests for /api/v1/knowledge_bases + kb_id propagation."""
+
+    def test_list_knowledge_bases(self, qa_client):
+        resp = qa_client.get("/api/v1/knowledge_bases")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 1
+        assert body["items"][0]["name"] == "default"
+        assert body["items"][0]["active"] is True
+
+    def test_create_knowledge_base(self, qa_client):
+        resp = qa_client.post(
+            "/api/v1/knowledge_bases",
+            json={"name": "ops", "set_active": False},
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["name"] == "ops"
+        assert body["active"] is False
+
+    def test_get_knowledge_base_404(self, qa_client):
+        resp = qa_client.get("/api/v1/knowledge_bases/missing")
+        assert resp.status_code == 404
+
+    def test_activate_knowledge_base(self, qa_client):
+        created = qa_client.post(
+            "/api/v1/knowledge_bases",
+            json={"name": "second", "set_active": False},
+        ).json()
+        resp = qa_client.post(f"/api/v1/knowledge_bases/{created['kb_id']}/activate")
+        assert resp.status_code == 200
+        assert resp.json()["active"] is True
+
+    def test_delete_knowledge_base(self, qa_client):
+        created = qa_client.post(
+            "/api/v1/knowledge_bases",
+            json={"name": "second", "set_active": False},
+        ).json()
+        resp = qa_client.delete(f"/api/v1/knowledge_bases/{created['kb_id']}")
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] is True
+
+    def test_delete_last_kb_returns_409(self, qa_client):
+        listing = qa_client.get("/api/v1/knowledge_bases").json()
+        default_id = listing["items"][0]["kb_id"]
+        resp = qa_client.delete(f"/api/v1/knowledge_bases/{default_id}")
+        assert resp.status_code == 409
+
+    def test_ingest_into_specific_kb(self, qa_client):
+        created = qa_client.post(
+            "/api/v1/knowledge_bases",
+            json={"name": "second", "set_active": False},
+        ).json()
+        kb_id = created["kb_id"]
+        resp = qa_client.post(
+            "/api/v1/knowledge_base/ingest",
+            files={"file": ("guide.md", b"data", "text/plain")},
+            data={"kb_id": kb_id},
+        )
+        assert resp.status_code == 200
+        # default KB info should still be empty
+        info = qa_client.get("/api/v1/knowledge_base").json()
+        assert info["block_count"] == 0
+        # the second KB has the blocks
+        blocks = qa_client.get(
+            "/api/v1/knowledge_base/blocks", params={"kb_id": kb_id}
+        ).json()
+        assert blocks["total"] == 2
+
+    def test_ask_with_kb_id(self, qa_client):
+        created = qa_client.post(
+            "/api/v1/knowledge_bases",
+            json={"name": "second", "set_active": False},
+        ).json()
+        kb_id = created["kb_id"]
+        qa_client.post(
+            "/api/v1/knowledge_base/ingest",
+            files={"file": ("guide.md", b"data", "text/plain")},
+            data={"kb_id": kb_id},
+        )
+        # querying the (empty) default KB abstains
+        resp = qa_client.post(
+            "/api/v1/query",
+            json={"query": "How to install?", "use_lexical": False},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["abstained"] is True
+        # querying the second KB returns an answer
+        resp = qa_client.post(
+            "/api/v1/query",
+            json={
+                "query": "How to install?",
+                "use_lexical": False,
+                "kb_id": kb_id,
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["abstained"] is False
+
+    def test_ask_unknown_kb_404(self, qa_client):
+        resp = qa_client.post(
+            "/api/v1/query",
+            json={"query": "x", "kb_id": "missing"},
+        )
+        assert resp.status_code == 404
