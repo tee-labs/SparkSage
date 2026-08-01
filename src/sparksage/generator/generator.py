@@ -16,6 +16,7 @@ unit-testable without network access.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 
@@ -29,6 +30,8 @@ from sparksage.generator.schema import (
 )
 from sparksage.schema.ideablock import IdeaBlock
 from sparksage.schema.source import SourceRef
+
+_logger = logging.getLogger(__name__)
 
 _FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*|\s*```\s*$", re.MULTILINE)
 
@@ -157,6 +160,14 @@ class IdeaBlockGenerator:
             language=lang,
         )
 
+        _logger.debug(
+            "generating blocks: text_len=%d max_blocks=%s lang=%s json_mode=%s",
+            len(text),
+            max_blocks,
+            lang,
+            self._use_json_mode,
+        )
+
         response_text = self._client.complete(
             messages,
             model=self._model,
@@ -167,8 +178,13 @@ class IdeaBlockGenerator:
         if not response_text or not response_text.strip():
             raise EmptyResponseError("the LLM returned an empty response")
 
+        _logger.debug(
+            "LLM response received: resp_len=%d", len(response_text)
+        )
+
         raw_result = self._parse(response_text)
         blocks, _stats = self._coerce_all(raw_result, source=source, language=lang)
+        _logger.info("generated %d blocks (raw=%d)", len(blocks), len(raw_result.blocks))
         return blocks
 
     def generate_with_stats(
@@ -192,6 +208,12 @@ class IdeaBlockGenerator:
         messages = build_messages(
             text, source=source, max_blocks=max_blocks, language=lang
         )
+        _logger.debug(
+            "generating blocks (with_stats): text_len=%d max_blocks=%s lang=%s",
+            len(text),
+            max_blocks,
+            lang,
+        )
         response_text = self._client.complete(
             messages,
             model=self._model,
@@ -200,6 +222,10 @@ class IdeaBlockGenerator:
         )
         if not response_text or not response_text.strip():
             raise EmptyResponseError("the LLM returned an empty response")
+
+        _logger.debug(
+            "LLM response received (with_stats): resp_len=%d", len(response_text)
+        )
 
         raw_result = self._parse(response_text)
         return self._coerce_all(raw_result, source=source, language=lang)
@@ -238,6 +264,7 @@ class IdeaBlockGenerator:
                 stats.errors.append(f"block #{i}: {exc}")
                 if self._strict:
                     raise GenerationError(f"block #{i}: {exc}") from exc
+                _logger.warning("skipped invalid block #%d: %s", i, exc)
                 stats.skipped += 1
                 continue
             blocks.append(block)

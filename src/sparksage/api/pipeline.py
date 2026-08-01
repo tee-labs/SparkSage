@@ -247,16 +247,32 @@ class SparkSageService:
             returning.
         """
         raw = data.encode("utf-8") if isinstance(data, str) else data
+        _logger.debug(
+            "convert request: filename=%s bytes=%d clean=%s",
+            filename,
+            len(raw),
+            clean,
+        )
         result = self._to_conversion_result(raw, filename)
 
         if clean:
             cleaned = self._cleaner.clean_result(result)
+            _logger.debug(
+                "convert done (cleaned): markdown_len=%d title=%s",
+                len(cleaned.text),
+                cleaned.title,
+            )
             return ConvertOutput(
                 markdown=cleaned.text,
                 title=cleaned.title,
                 source=cleaned.source_ref,
                 cleaned=True,
             )
+        _logger.debug(
+            "convert done: markdown_len=%d title=%s",
+            len(result.markdown),
+            result.title,
+        )
         return ConvertOutput(
             markdown=result.markdown,
             title=result.title,
@@ -303,6 +319,14 @@ class SparkSageService:
             )
 
         raw = data.encode("utf-8") if isinstance(data, str) else data
+        _logger.debug(
+            "generate request: filename=%s bytes=%d clean=%s max_blocks=%s lang=%s",
+            filename,
+            len(raw),
+            clean,
+            max_blocks,
+            language,
+        )
         result = self._to_conversion_result(raw, filename)
 
         if clean:
@@ -334,6 +358,12 @@ class SparkSageService:
             )
             stats = None
 
+        _logger.info(
+            "generate done: %d blocks (filename=%s, cleaned=%s)",
+            len(blocks),
+            filename,
+            clean,
+        )
         return GenerateOutput(
             blocks=blocks,
             title=title,

@@ -34,8 +34,12 @@ document anchor, which is exactly the intended asymmetry.
 
 from __future__ import annotations
 
+import logging
+
 from sparksage.embed.client import EmbeddingClient
 from sparksage.schema.ideablock import IdeaBlock
+
+_logger = logging.getLogger(__name__)
 
 #: Sentinel distinguishing "argument not passed" from an explicit ``None``.
 #:
@@ -166,6 +170,12 @@ class BlockEmbedder:
         if not blocks:
             return []
         prefix = self._resolve_prefix(context_prefix)
+        _logger.debug(
+            "embedding %d blocks (dim=%d, prefix=%s)",
+            len(blocks),
+            self._client.dimension,
+            bool(prefix),
+        )
         vectors = self._embed_texts_with_prefix(blocks, prefix)
         for block, vec in zip(blocks, vectors, strict=True):
             block.embedding = list(vec)

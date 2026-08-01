@@ -203,6 +203,11 @@ class KnowledgeBase:
             added.append(block)
 
         if added:
+            _logger.debug(
+                "add_blocks: embedding + indexing %d blocks into kb=%s",
+                len(added),
+                self.kb_id,
+            )
             self._embedder.embed_blocks(added)
             for b in added:
                 if b.embedding is not None:
@@ -291,8 +296,16 @@ class KnowledgeBase:
         """
         doc_id = str(doc_id)
         existed = self._document_store.delete(doc_id)
+        removed = 0
         for bid in list(self._doc_blocks.get(doc_id, set())):
             self.remove_block(bid)
+            removed += 1
+        _logger.info(
+            "removed document %s from kb=%s (cascaded %d blocks)",
+            doc_id,
+            self.kb_id,
+            removed,
+        )
         return existed
 
     def reindex(self) -> int:
@@ -307,6 +320,9 @@ class KnowledgeBase:
         self._lexical.index([])
         if not blocks:
             return 0
+        _logger.debug(
+            "reindex: re-embedding %d blocks into kb=%s", len(blocks), self.kb_id
+        )
         self._embedder.embed_blocks(blocks)
         vectors = self._embedder.vectors_for(blocks)
         self._store.add_many(vectors)
