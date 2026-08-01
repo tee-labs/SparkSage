@@ -34,6 +34,7 @@ from sparksage.documents.models import (
 from sparksage.documents.store import DocumentStore
 from sparksage.documents.summarizer import (
     ExtractiveSummarizer,
+    LLMSummarizer,
     Summarizer,
     default_summarizer,
     split_sentences,
@@ -43,6 +44,7 @@ __all__ = [
     "DocumentRecord",
     "DocumentStore",
     "ExtractiveSummarizer",
+    "LLMSummarizer",
     "InMemoryDocumentStore",
     "SqliteDocumentStore",
     "Summarizer",
