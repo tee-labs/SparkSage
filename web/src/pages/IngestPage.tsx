@@ -21,6 +21,8 @@ import type { UploadFile } from 'antd';
 import { api } from '@/api';
 import type { ConvertResponse, GenerateResponse, IdeaBlock } from '@/types';
 import Markdown from '@/components/Markdown';
+import KbSelector from '@/components/KbSelector';
+import { useKnowledgeBases } from '@/components/useKnowledgeBases';
 
 const { Dragger } = Upload;
 const { Text } = Typography;
@@ -31,6 +33,7 @@ interface LogEntry {
 }
 
 export default function IngestPage() {
+  const { kbs, loading: kbLoading, selectedKbId, setSelectedKbId } = useKnowledgeBases();
   const [files, setFiles] = useState<UploadFile[]>([]);
   const [form] = Form.useForm();
   const [mode, setMode] = useState<'convert' | 'generate'>('convert');
@@ -86,6 +89,7 @@ export default function IngestPage() {
           tags: values.tags,
           auto_tag: Boolean(values.auto_tag),
           top_k: values.top_k,
+          kb_id: selectedKbId,
         };
         const allBlocks: IdeaBlock[] = [];
         let last: GenerateResponse | null = null;
@@ -149,6 +153,15 @@ export default function IngestPage() {
 
       <Card title="参数" size="small">
         <Form form={form} layout="inline" initialValues={{ clean: true, auto_tag: true, top_k: 8, kb_ingest: false }}>
+          <Form.Item label="知识库">
+            <KbSelector
+              value={selectedKbId}
+              onChange={setSelectedKbId}
+              kbs={kbs}
+              loading={kbLoading}
+              placeholder="选择知识库"
+            />
+          </Form.Item>
           <Form.Item label="language" name="language">
             <Select
               allowClear

@@ -10,11 +10,13 @@ import {
   LikeOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  AppstoreOutlined,
 } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import ConfigPage from './pages/ConfigPage';
 import IngestPage from './pages/IngestPage';
 import DocumentsPage from './pages/DocumentsPage';
+import KnowledgeBasesPage from './pages/KnowledgeBasesPage';
 import KnowledgeBasePage from './pages/KnowledgeBasePage';
 import QaPage from './pages/QaPage';
 import FeedbackPage from './pages/FeedbackPage';
@@ -23,6 +25,7 @@ const { Header, Sider, Content } = Layout;
 
 const menuItems: MenuProps['items'] = [
   { key: '/config', icon: <SettingOutlined />, label: <Link to="/config">配置管理</Link> },
+  { key: '/knowledge-bases', icon: <AppstoreOutlined />, label: <Link to="/knowledge-bases">知识库管理</Link> },
   { key: '/ingest', icon: <CloudUploadOutlined />, label: <Link to="/ingest">文档上传</Link> },
   { key: '/documents', icon: <FileTextOutlined />, label: <Link to="/documents">文档管理</Link> },
   { key: '/knowledge-base', icon: <DatabaseOutlined />, label: <Link to="/knowledge-base">知识库浏览</Link> },
@@ -95,6 +98,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Navigate to="/config" replace />} />
             <Route path="/config" element={<ConfigPage />} />
+            <Route path="/knowledge-bases" element={<KnowledgeBasesPage />} />
             <Route path="/ingest" element={<IngestPage />} />
             <Route path="/documents" element={<DocumentsPage />} />
             <Route path="/knowledge-base" element={<KnowledgeBasePage />} />

@@ -25,6 +25,8 @@ import {
 import { api } from '@/api';
 import type { AskResponse, FeedbackRating } from '@/types';
 import Markdown from '@/components/Markdown';
+import KbSelector from '@/components/KbSelector';
+import { useKnowledgeBases } from '@/components/useKnowledgeBases';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -35,6 +37,7 @@ interface Turn {
 }
 
 export default function QaPage() {
+  const { kbs, loading: kbLoading, selectedKbId, setSelectedKbId } = useKnowledgeBases();
   const [query, setQuery] = useState('');
   const [k, setK] = useState(5);
   const [useLexical, setUseLexical] = useState(true);
@@ -51,6 +54,7 @@ export default function QaPage() {
     try {
       const res = await api.ask({
         query,
+        kb_id: selectedKbId ?? undefined,
         k,
         use_lexical: useLexical,
         use_rerank: useRerank,
@@ -112,6 +116,13 @@ export default function QaPage() {
 
       <Card size="small" title="参数">
         <Space wrap>
+          <span>知识库：</span>
+          <KbSelector
+            value={selectedKbId}
+            onChange={setSelectedKbId}
+            kbs={kbs}
+            loading={kbLoading}
+          />
           <span>k：</span>
           <InputNumber min={1} max={50} value={k} onChange={(v) => setK(v ?? 5)} />
           <span>use_lexical</span>
