@@ -20,7 +20,6 @@ import {
   LikeOutlined,
   DislikeOutlined,
   EditOutlined,
-  LoadingOutlined,
 } from '@ant-design/icons';
 import { api } from '@/api';
 import type { AskResponse, FeedbackRating } from '@/types';
@@ -189,7 +188,7 @@ export default function QaPage() {
         />
         <div style={{ marginTop: 8, display: 'flex', justifyContent: 'flex-end' }}>
           <Button type="primary" onClick={ask} loading={loading} disabled={loading}>
-            {loading && <LoadingOutlined />} 提问
+            提问
           </Button>
         </div>
       </Card>
