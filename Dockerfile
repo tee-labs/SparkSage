@@ -66,17 +66,28 @@ RUN npm run build
 
 FROM python:${PYTHON_VERSION}-slim AS builder
 
+ARG SPARKSAGE_EXTRAS
+
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /build
 
+# Third-party dependency wheels. This layer is cached by pyproject.toml +
+# SPARKSAGE_EXTRAS ONLY — never by application source. A throwaway stub package
+# is created so pip can resolve the extras without needing the real src/.
 COPY pyproject.toml README.md ./
-COPY src ./src
-
 RUN --mount=type=cache,target=/root/.cache/pip \
+    mkdir -p src/sparksage && touch src/sparksage/__init__.py && \
     python -m pip install --upgrade pip setuptools wheel && \
+    python -m pip wheel --wheel-dir /deps ".[${SPARKSAGE_EXTRAS}]" && \
+    rm -f /deps/sparksage-*.whl
+
+# Application wheel. Rebuilds whenever src/ changes, but it is tiny (pure Python)
+# and never invalidates the dependency layer above.
+COPY src ./src
+RUN --mount=type=cache,target=/root/.cache/pip \
     python -m pip wheel --no-deps --wheel-dir /wheels .
 
 FROM python:${PYTHON_VERSION}-slim AS runtime
@@ -95,11 +106,19 @@ RUN groupadd --system --gid 1001 sparksage && \
 
 WORKDIR /app
 
-COPY --from=builder /wheels /wheels
+# Stable layer: install all third-party dependencies from the pre-built local
+# wheels (--no-index = no network). Cache hits as long as pyproject.toml and the
+# extras set are unchanged, regardless of application source edits.
+COPY --from=builder /deps /deps
+RUN python -m pip install --upgrade pip && \
+    python -m pip install --no-index --find-links=/deps /deps/*.whl && \
+    rm -rf /deps
 
+# Volatile layer: only the lightweight sparksage wheel. Re-runs on every code
+# change but completes in well under a second.
+COPY --from=builder /wheels /wheels
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install --upgrade pip && \
-    python -m pip install /wheels/sparksage-*.whl "sparksage[${SPARKSAGE_EXTRAS}]" && \
+    python -m pip install --no-deps /wheels/sparksage-*.whl && \
     rm -rf /wheels && \
     python -c "import sparksage; print(sparksage.__version__)"
 
