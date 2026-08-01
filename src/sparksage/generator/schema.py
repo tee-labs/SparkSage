@@ -160,13 +160,20 @@ def coerce_block(
         ent_name = raw_entity.entity_name.strip()
         if not ent_name:
             continue
-        entities.append(
-            Entity(
-                entity_name=ent_name,
-                entity_type=_map_entity_type(raw_entity.entity_type, strict=strict),
-                aliases=raw_entity.aliases,
+        try:
+            entities.append(
+                Entity(
+                    entity_name=ent_name,
+                    entity_type=_map_entity_type(
+                        raw_entity.entity_type, strict=strict
+                    ),
+                    aliases=raw_entity.aliases,
+                )
             )
-        )
+        except ValidationError as exc:
+            if strict:
+                raise CoercionError(f"invalid entity {ent_name!r}: {exc}") from exc
+            continue
 
     keywords = [kw.strip() for kw in raw.keywords if kw and kw.strip()]
 
