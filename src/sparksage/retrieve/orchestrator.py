@@ -52,11 +52,31 @@ DEFAULT_FETCH_FACTOR = 8
 #: The ``50`` floor keeps the reranker effective for small ``k``.
 DEFAULT_MIN_FETCH = 50
 
+#: Default RRF weight for the dense leg (equal weighting preserves the original
+#: score-free RRF). WeKnora favours ``0.7`` here; sweep it with
+#: :func:`~sparksage.retrieve.fusion.tune_rrf_weights` on labelled data.
+DEFAULT_DENSE_WEIGHT = 1.0
+#: Default RRF weight for the lexical leg. WeKnora favours ``0.3`` here; only
+#: the ratio to :data:`DEFAULT_DENSE_WEIGHT` affects the fused ordering.
+DEFAULT_LEXICAL_WEIGHT = 1.0
+
 #: Default cosine threshold above which two post-rerank chunks are treated as
 #: semantic near-duplicates and the weaker one is dropped. ``0.9`` is strict --
 #: only near-identical blocks (paraphrases / copies) collapse -- so distinct
 #: content is never wrongly merged. See :func:`_dedup_chunks_by_embedding`.
 DEFAULT_DEDUP_THRESHOLD = 0.9
+
+#: Default score-floor fallback decay (WeKnora): when a score floor wipes out
+#: every candidate, relax the threshold by multiplying it by this factor and
+#: retry, down to :data:`DEFAULT_SCORE_RETRY_FLOOR`.
+DEFAULT_SCORE_RETRY_FACTOR = 0.7
+#: Default lower bound for the retry threshold (WeKnora ``0.3``): retrying stops
+#: once the decayed threshold would drop below this.
+DEFAULT_SCORE_RETRY_FLOOR = 0.3
+#: Default last-resort floor for the top-1 fallback (WeKnora ``0.15``): when the
+#: decayed threshold still yields nothing, the single best chunk is kept only if
+#: its score is at least this high -- otherwise the result is genuinely empty.
+DEFAULT_SCORE_MIN_TOP1 = 0.15
 
 
 class Retriever:
@@ -85,12 +105,34 @@ class Retriever:
     fetch_factor, min_fetch:
         The dense pool size is ``max(min_fetch, k * fetch_factor)`` -- large
         enough that post-filtering rarely starves the final ``k``.
+    dense_weight, lexical_weight:
+        Per-leg RRF weights (generalized / weighted RRF, the WeKnora-style
+        ``weight / (k + rank)``). Defaults are equal (``1.0`` / ``1.0``) so the
+        fused ordering is identical to the original score-free RRF; only the
+        *ratio* matters, so WeKnora's ``0.7`` / ``0.3`` is a drop-in starting
+        point. Sweep it with
+        :func:`~sparksage.retrieve.fusion.tune_rrf_weights` on labelled data.
     dedup_threshold:
         Optional cosine threshold above which two post-rerank chunks are treated
         as semantic near-duplicates and the weaker one is dropped (default
         :data:`DEFAULT_DEDUP_THRESHOLD` = ``0.9``). Blocks whose embeddings
         reach the threshold collapse, keeping the best-scoring representative
         and saving reader context / token budget. ``None`` disables dedup.
+    min_score:
+        Optional absolute floor on each chunk's final ``score`` (the WeKnora
+        rerank-threshold guard). Chunks scoring below it are dropped so weak /
+        irrelevant blocks no longer fill the top-``k`` just because the pool was
+        over-fetched. When that filter would empty the result, the threshold
+        decays by ``score_retry_factor`` (down to ``score_retry_floor``); if
+        still empty the single best chunk survives when it clears
+        ``score_min_top1``. Calibrated for normalized scores -- it applies on
+        the re-rank path and the dense-only (cosine) path; it is **skipped**
+        when the final score is an un-reranked RRF fusion score (RRF scores are
+        rank-based, not comparable to an absolute threshold). ``None`` (the
+        default) disables the guard, preserving the original "fill k" behaviour.
+    score_retry_factor, score_retry_floor, score_min_top1:
+        The three WeKnora fallback knobs (defaults ``0.7`` / ``0.3`` / ``0.15``).
+        See ``min_score``.
 
     Examples
     --------
@@ -117,12 +159,20 @@ class Retriever:
         reranker: Reranker | None = None,
         fetch_factor: int = DEFAULT_FETCH_FACTOR,
         min_fetch: int = DEFAULT_MIN_FETCH,
+        dense_weight: float = DEFAULT_DENSE_WEIGHT,
+        lexical_weight: float = DEFAULT_LEXICAL_WEIGHT,
         dedup_threshold: float | None = DEFAULT_DEDUP_THRESHOLD,
+        min_score: float | None = None,
+        score_retry_factor: float = DEFAULT_SCORE_RETRY_FACTOR,
+        score_retry_floor: float = DEFAULT_SCORE_RETRY_FLOOR,
+        score_min_top1: float = DEFAULT_SCORE_MIN_TOP1,
     ) -> None:
         if fetch_factor < 1:
             raise ValueError("fetch_factor must be >= 1")
         if min_fetch < 1:
             raise ValueError("min_fetch must be >= 1")
+        dense_weight = _check_weight(dense_weight, "dense_weight")
+        lexical_weight = _check_weight(lexical_weight, "lexical_weight")
         if dedup_threshold is not None:
             if isinstance(dedup_threshold, bool) or not isinstance(
                 dedup_threshold, (int, float)
@@ -130,6 +180,21 @@ class Retriever:
                 raise TypeError("dedup_threshold must be a float or None")
             if not 0.0 <= dedup_threshold <= 1.0:
                 raise ValueError("dedup_threshold must be in [0.0, 1.0] or None")
+        score_retry_factor = _check_score_param(
+            score_retry_factor, "score_retry_factor", allow_zero=False
+        )
+        score_retry_floor = _check_score_param(
+            score_retry_floor, "score_retry_floor", allow_zero=False
+        )
+        score_min_top1 = _check_score_param(
+            score_min_top1, "score_min_top1", allow_zero=True
+        )
+        if not score_min_top1 <= score_retry_floor:
+            raise ValueError("score_min_top1 must be <= score_retry_floor")
+        if min_score is not None:
+            min_score = _check_score_param(min_score, "min_score", allow_zero=False)
+            if min_score < score_retry_floor:
+                raise ValueError("min_score must be >= score_retry_floor")
         self._registry = registry
         self._store = store
         self._embedder = embedder
@@ -137,7 +202,13 @@ class Retriever:
         self._reranker: Reranker = reranker if reranker is not None else IdentityReranker()
         self._fetch_factor = fetch_factor
         self._min_fetch = min_fetch
+        self._dense_weight = dense_weight
+        self._lexical_weight = lexical_weight
         self._dedup_threshold: float | None = dedup_threshold
+        self._min_score: float | None = min_score
+        self._score_retry_factor = score_retry_factor
+        self._score_retry_floor = score_retry_floor
+        self._score_min_top1 = score_min_top1
 
     @property
     def store(self) -> VectorStore:
@@ -159,6 +230,36 @@ class Retriever:
     def dedup_threshold(self) -> float | None:
         """The post-rerank semantic-dedup cosine threshold, or ``None`` if off."""
         return self._dedup_threshold
+
+    @property
+    def dense_weight(self) -> float:
+        """RRF weight applied to the dense leg."""
+        return self._dense_weight
+
+    @property
+    def lexical_weight(self) -> float:
+        """RRF weight applied to the lexical leg."""
+        return self._lexical_weight
+
+    @property
+    def min_score(self) -> float | None:
+        """The post-rerank score floor, or ``None`` when the guard is off."""
+        return self._min_score
+
+    @property
+    def score_retry_factor(self) -> float:
+        """Per-retry decay applied to :attr:`min_score` (WeKnora ``0.7``)."""
+        return self._score_retry_factor
+
+    @property
+    def score_retry_floor(self) -> float:
+        """Lower bound for the decayed retry threshold (WeKnora ``0.3``)."""
+        return self._score_retry_floor
+
+    @property
+    def score_min_top1(self) -> float:
+        """Top-1 last-resort floor (WeKnora ``0.15``)."""
+        return self._score_min_top1
 
     def index(self, blocks: list[IdeaBlock]) -> None:
         """(Re)build the dense + lexical indexes from ``blocks``.
@@ -229,7 +330,14 @@ class Retriever:
             rankings.append(lexical_hits)
 
         if len(rankings) > 1:
-            fused = reciprocal_rank_fusion(rankings, top_n=pool)
+            # Weighted RRF: only the dense/lexical weight *ratio* affects the
+            # ordering; the equal-weight default (1.0 / 1.0) reproduces the
+            # original score-free RRF exactly.
+            fused = reciprocal_rank_fusion(
+                rankings,
+                weights=[self._dense_weight, self._lexical_weight],
+                top_n=pool,
+            )
             did_fuse = True
         else:
             fused = dense_hits[:pool]
@@ -242,11 +350,21 @@ class Retriever:
         )
 
         dedup_on = self._dedup_threshold is not None
+        will_rerank = use_rerank and not isinstance(self._reranker, IdentityReranker)
+        # The score floor is calibrated for normalized scores (reranker output
+        # or a dense cosine). It is meaningless on an un-reranked RRF fusion
+        # score -- RRF scores are rank-based, not on an absolute scale -- so it
+        # is skipped in exactly that one path.
+        floor_applies = (
+            self._min_score is not None and not (did_fuse and not will_rerank)
+        )
+        # When dedup or the score floor needs to look past rank ``k`` (to recover
+        # deeper chunks after weaker ones are dropped), keep the full reranked
+        # pool; the slice to ``k`` happens at the very end.
+        keep_full_pool = dedup_on or floor_applies
 
-        if use_rerank and not isinstance(self._reranker, IdentityReranker):
-            # When dedup is on, keep the full reranked pool so dedup does not
-            # starve the final ``k``; the slice to ``k`` happens at the end.
-            rerank_top = None if dedup_on else k
+        if will_rerank:
+            rerank_top = None if keep_full_pool else k
             resolved = self._reranker.rerank(query, resolved, top_n=rerank_top)
             reranked = True
         else:
@@ -263,8 +381,27 @@ class Retriever:
                     self._dedup_threshold,
                 )
             resolved = [_replaced(c, rank=i) for i, c in enumerate(resolved)]
-        elif not reranked:
+        elif not reranked and not keep_full_pool:
             resolved = [_replaced(c, rank=i) for i, c in enumerate(resolved[:k])]
+
+        if floor_applies:
+            assert self._min_score is not None  # noqa: S101 (narrowed by floor_applies)
+            before = len(resolved)
+            resolved = _apply_score_floor(
+                resolved,
+                self._min_score,
+                retry_factor=self._score_retry_factor,
+                retry_floor=self._score_retry_floor,
+                min_top1=self._score_min_top1,
+            )
+            if len(resolved) < before:
+                _logger.debug(
+                    "score floor %d -> %d chunks (min_score=%.2f)",
+                    before,
+                    len(resolved),
+                    self._min_score,
+                )
+            resolved = [_replaced(c, rank=i) for i, c in enumerate(resolved)]
 
         resolved = resolved[:k]
 
@@ -366,6 +503,58 @@ def _dedup_chunks_by_embedding(
     return kept
 
 
+def _check_weight(value: float, name: str) -> float:
+    """Validate a non-negative RRF leg weight (``bool`` rejected)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a float")
+    if value < 0:
+        raise ValueError(f"{name} must be >= 0")
+    return float(value)
+
+
+def _check_score_param(value: float, name: str, *, allow_zero: bool) -> float:
+    """Validate a score-threshold knob in ``[0, 1]`` (``bool`` rejected)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a float")
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"{name} must be in [0.0, 1.0]")
+    if not allow_zero and value <= 0.0:
+        raise ValueError(f"{name} must be > 0")
+    return float(value)
+
+
+def _apply_score_floor(
+    chunks: list[RetrievedChunk],
+    min_score: float,
+    *,
+    retry_factor: float,
+    retry_floor: float,
+    min_top1: float,
+) -> list[RetrievedChunk]:
+    """WeKnora-style score floor with decayed-retry + top-1 fallback.
+
+    ``chunks`` is assumed best-first by ``score``. Chunks scoring below
+    ``min_score`` are dropped; when that would empty the list the threshold
+    decays by ``retry_factor`` (floored at ``retry_floor``) and the filter
+    retries, until the threshold stops changing. If every decayed level still
+    yields nothing, the single best chunk is kept only when it clears
+    ``min_top1`` -- otherwise the result is genuinely empty. This prevents a
+    too-strict floor from silently returning nothing while still blocking
+    irrelevant context that would otherwise fill the top-``k``.
+    """
+    threshold = min_score
+    seen: set[float] = set()
+    while threshold not in seen:
+        seen.add(threshold)
+        kept = [c for c in chunks if c.score >= threshold]
+        if kept:
+            return kept
+        threshold = max(threshold * retry_factor, retry_floor)
+    if chunks and chunks[0].score >= min_top1:
+        return [chunks[0]]
+    return []
+
+
 @dataclass
 class RetrievalConfig:
     """Convenience bundle for the knobs :class:`Retriever.search` exposes.
@@ -377,15 +566,26 @@ class RetrievalConfig:
     k: int = 5
     fetch_factor: int = DEFAULT_FETCH_FACTOR
     min_fetch: int = DEFAULT_MIN_FETCH
+    dense_weight: float = DEFAULT_DENSE_WEIGHT
+    lexical_weight: float = DEFAULT_LEXICAL_WEIGHT
     dedup_threshold: float | None = DEFAULT_DEDUP_THRESHOLD
+    min_score: float | None = None
+    score_retry_factor: float = DEFAULT_SCORE_RETRY_FACTOR
+    score_retry_floor: float = DEFAULT_SCORE_RETRY_FLOOR
+    score_min_top1: float = DEFAULT_SCORE_MIN_TOP1
     use_lexical: bool = True
     use_rerank: bool = True
 
 
 __all__ = [
     "DEFAULT_DEDUP_THRESHOLD",
+    "DEFAULT_DENSE_WEIGHT",
     "DEFAULT_FETCH_FACTOR",
+    "DEFAULT_LEXICAL_WEIGHT",
     "DEFAULT_MIN_FETCH",
+    "DEFAULT_SCORE_MIN_TOP1",
+    "DEFAULT_SCORE_RETRY_FACTOR",
+    "DEFAULT_SCORE_RETRY_FLOOR",
     "RetrievalConfig",
     "Retriever",
 ]
