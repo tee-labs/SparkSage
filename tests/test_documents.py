@@ -15,6 +15,7 @@ from sparksage import (
     DocumentStore,
     ExtractiveSummarizer,
     InMemoryDocumentStore,
+    LLMSummarizer,
     SqliteDocumentStore,
     Summarizer,
     content_hash_of,
@@ -326,3 +327,137 @@ class TestSummarizer:
         parts = split_sentences("## Heading\n**Bold** start. Normal end.")
         joined = " ".join(parts)
         assert "#" not in joined
+
+    def test_split_sentences_handles_cjk_semicolon_colon(self):
+        # CJK ；and ：are also terminators now (regression guard for the old
+        # splitter that only split on 。！？).
+        s = split_sentences("收入增长；亚太扩张：下一步进入欧洲。")
+        assert len(s) == 3
+
+    def test_strips_code_fence(self):
+        text = (
+            "Intro sentence about revenue.\n\n"
+            "```python\nfor i in range(10):\n    print(i)\n```\n\n"
+            "The growth came from APAC expansion."
+        )
+        out = ExtractiveSummarizer().summarize(text, max_sentences=2)
+        assert "print" not in out and "range" not in out
+        assert "revenue" in out.lower()
+
+    def test_strips_tables_and_images(self):
+        text = (
+            "Revenue grew strongly.\n\n"
+            "| Quarter | Revenue |\n|---|---|\n| Q1 | 10 |\n\n"
+            "![chart](https://example.com/chart.png)\n\n"
+            "APAC was the driver."
+        )
+        out = ExtractiveSummarizer().summarize(text, max_sentences=2)
+        assert "example.com" not in out
+        assert "---" not in out
+
+    def test_lead_bias_prefers_early_sentence(self):
+        # The opening sentence carries the document's gist and is the longest
+        # topical run; it should be the single selected summary sentence.
+        text = (
+            "SparkSage turns documents into structured knowledge chunks. "
+            "The package is open source. Releases happen monthly. Tests run fast."
+        )
+        out = ExtractiveSummarizer().summarize(text, max_sentences=1)
+        assert "SparkSage turns documents" in out
+
+    def test_mmr_avoids_duplicate_sentences(self):
+        # A verbatim-restated sentence (identical tokens -> Jaccard = 1.0)
+        # must be skipped in favour of a distinct third sentence.
+        text = (
+            "The quarterly revenue grew by twelve percent overall. "
+            "The quarterly revenue grew by twelve percent overall. "
+            "Operating costs were reduced through automation."
+        )
+        out = ExtractiveSummarizer().summarize(text, max_sentences=2)
+        assert "costs were reduced" in out.lower()
+        assert out.lower().count("quarterly revenue grew") == 1
+
+    def test_inline_links_keep_anchor_text(self):
+        text = (
+            "We use [Kubernetes](https://k8s.io) for orchestration. "
+            "The platform scales horizontally."
+        )
+        out = ExtractiveSummarizer().summarize(text, max_sentences=1)
+        assert "k8s.io" not in out
+
+
+# ---------------------------------------------------------------------------- #
+# LLM summarizer
+# ---------------------------------------------------------------------------- #
+class TestLLMSummarizer:
+    def test_is_summarizer(self):
+        from sparksage.generator import FakeLLMClient
+
+        assert isinstance(LLMSummarizer(FakeLLMClient(responses=["x"])), Summarizer)
+
+    def test_parses_json_summary(self):
+        from sparksage.generator import FakeLLMClient
+
+        client = FakeLLMClient(responses=['{"summary": "A concise doc summary."}'])
+        out = LLMSummarizer(client, use_json_mode=False).summarize("Some body.")
+        assert out == "A concise doc summary."
+
+    def test_parses_fenced_json(self):
+        from sparksage.generator import FakeLLMClient
+
+        client = FakeLLMClient(
+            responses=['```json\n{"summary": "Fenced summary."}\n```']
+        )
+        out = LLMSummarizer(client, use_json_mode=False).summarize("Some body.")
+        assert out == "Fenced summary."
+
+    def test_falls_back_to_raw_text_when_not_json(self):
+        from sparksage.generator import FakeLLMClient
+
+        client = FakeLLMClient(responses=["Just a plain-text summary."])
+        out = LLMSummarizer(client, use_json_mode=False).summarize("Some body.")
+        assert out == "Just a plain-text summary."
+
+    def test_empty_response_uses_fallback(self):
+        from sparksage.generator import FakeLLMClient
+
+        client = FakeLLMClient(responses=[""])
+        out = LLMSummarizer(client, use_json_mode=False).summarize(
+            "Revenue grew. APAC expanded."
+        )
+        # Falls back to the extractive summarizer -> still returns content.
+        assert isinstance(out, str) and out
+
+    def test_client_exception_uses_fallback(self):
+        class BoomClient:
+            def complete(self, messages, **kwargs):
+                raise RuntimeError("network down")
+
+        out = LLMSummarizer(BoomClient(), use_json_mode=False).summarize(
+            "Revenue grew. APAC expanded."
+        )
+        assert isinstance(out, str) and out
+
+    def test_validation(self):
+        from sparksage.generator import FakeLLMClient
+
+        s = LLMSummarizer(FakeLLMClient(responses=["x"]))
+        with pytest.raises(ValueError, match="max_sentences"):
+            s.summarize("body", max_sentences=0)
+        with pytest.raises(TypeError, match="max_sentences"):
+            s.summarize("body", max_sentences=2.5)  # type: ignore[arg-type]
+
+    def test_empty_body_returned_verbatim(self):
+        from sparksage.generator import FakeLLMClient
+
+        client = FakeLLMClient(responses=['{"summary": "should not be called"}'])
+        out = LLMSummarizer(client).summarize("   ")
+        assert out == ""
+
+    def test_messages_capture_body(self):
+        from sparksage.generator import FakeLLMClient
+
+        client = FakeLLMClient(responses=['{"summary": "ok"}'])
+        LLMSummarizer(client, use_json_mode=False).summarize("Revenue grew.")
+        assert client.last_messages is not None
+        assert any("Revenue grew" in m["content"] for m in client.last_messages)

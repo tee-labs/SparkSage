@@ -51,6 +51,7 @@ from sparksage.convert.backend import MarkItDownBackend
 from sparksage.convert.converter import MarkdownConverter
 from sparksage.documents.backends import SqliteDocumentStore
 from sparksage.documents.backends.memory import InMemoryDocumentStore
+from sparksage.documents.summarizer import LLMSummarizer
 from sparksage.generator.client import OpenAICompatibleClient
 from sparksage.generator.generator import GenerationError, IdeaBlockGenerator
 from sparksage.logging_config import ENV_LOG_LEVEL, configure_logging
@@ -132,6 +133,9 @@ def build_default_service() -> SparkSageService:
     * Generator: an :class:`IdeaBlockGenerator` over
       :class:`OpenAICompatibleClient` when an API key is present; ``None``
       otherwise (the ``/generate`` route returns ``503`` in that case).
+    * Summarizer: an :class:`LLMSummarizer` reusing the same client when an API
+      key is present (it degrades to the extractive summarizer on any LLM
+      failure); the pure-stdlib :class:`ExtractiveSummarizer` otherwise.
 
     Recognized env vars (``SPARKSAGE_*`` take priority over ``OPENAI_*``):
 
@@ -158,6 +162,7 @@ def build_default_service() -> SparkSageService:
     cleaner = TextCleaner()
 
     generator: IdeaBlockGenerator | None = None
+    summarizer = None
     api_key = _env(ENV_API_KEY) or _env(ENV_OPENAI_API_KEY)
     if api_key:
         base_url = _env(ENV_BASE_URL) or _env(ENV_OPENAI_BASE_URL)
@@ -168,6 +173,11 @@ def build_default_service() -> SparkSageService:
             base_url=base_url, api_key=api_key, model=model, stream=stream
         )
         generator = IdeaBlockGenerator(client, language=language)
+        # Reuse the same client for high-quality LLM summaries (degrades to the
+        # extractive summarizer on any failure, so ingest never loses a summary).
+        summarizer = LLMSummarizer(
+            client, model=model, language=language, use_json_mode=False
+        )
         _logger.info("generator configured with model=%s stream=%s", model, stream)
     else:
         _logger.warning(
@@ -189,6 +199,7 @@ def build_default_service() -> SparkSageService:
         generator=generator,
         document_store=doc_store,
         keyword_extractor=keyword_extractor,
+        summarizer=summarizer,
     )
 
 
