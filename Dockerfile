@@ -87,7 +87,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Application wheel. Rebuilds whenever src/ changes, but it is tiny (pure Python)
 # and never invalidates the dependency layer above.
 COPY src ./src
+# The dependency step above built a throwaway *stub* sparksage (empty
+# __init__.py) in this same workdir to let pip resolve the extras, leaving
+# stale setuptools artifacts behind (build/lib/ + src/*.egg-info). Drop them
+# before building the real wheel: setuptools' incremental build_py reuses
+# build/lib/, so it would otherwise package the empty stub __init__.py and
+# ship a wheel that installs but has no __version__ / public API.
 RUN --mount=type=cache,target=/root/.cache/pip \
+    rm -rf build src/*.egg-info && \
     python -m pip wheel --no-deps --wheel-dir /wheels .
 
 FROM python:${PYTHON_VERSION}-slim AS runtime
