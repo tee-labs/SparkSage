@@ -20,6 +20,11 @@ layer (which itself depends on the core). Plug in a real tokenizer via
 The :class:`~sparksage.reader.Reader` applies this before both generation and
 faithfulness judging, so the judge scores the answer against the *same* context
 the generator actually saw.
+
+:func:`reorder_head_tail` is the complementary lost-in-the-middle guard: after
+trimming it interleaves the best-first list so the strongest chunks sit at the
+head *and* tail (where LLMs attend most), rather than only at the head. The
+:class:`~sparksage.reader.Reader` applies it optionally (``reorder_context=``).
 """
 
 from __future__ import annotations
@@ -120,9 +125,34 @@ def trim_to_token_budget(
     return kept
 
 
+def reorder_head_tail(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+    """Reorder a best-first list so the strongest chunks sit at head and tail.
+
+    "Lost in the middle" studies (Liu et al., 2023) show LLMs attend most to the
+    *beginning* and *end* of a stuffed context and drop information in the
+    middle. :func:`trim_to_token_budget` keeps the best-first prefix but leaves
+    the strongest chunk at the head only. This function interleaves so the most
+    relevant chunks land at **both** ends, sandwiching weaker ones in the middle
+    where they are least harmful.
+
+    The best-first list ``[a, b, c, d, e, f]`` (``a`` strongest) becomes
+    ``[a, c, e, f, d, b]``: even-ranked items keep their order at the head, the
+    odd-ranked items are reversed and appended so the second-strongest (``b``)
+    lands at the very tail. The function is a pure permutation (no chunk is
+    dropped, no score changed); it is idempotent-free by design -- apply it once
+    after trimming. Empty / single-element lists are returned unchanged.
+    """
+    if len(chunks) < 2:
+        return list(chunks)
+    front = chunks[0::2]
+    back = chunks[1::2]
+    return [*front, *reversed(back)]
+
+
 __all__ = [
     "DEFAULT_CHARS_PER_TOKEN",
     "DEFAULT_KEEP_MIN",
     "approx_tokens",
+    "reorder_head_tail",
     "trim_to_token_budget",
 ]

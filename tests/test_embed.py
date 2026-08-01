@@ -349,6 +349,94 @@ class TestBlockEmbedder:
 
 
 # ---------------------------------------------------------------------------- #
+# BlockEmbedder -- Contextual Retrieval context_prefix
+# ---------------------------------------------------------------------------- #
+class TestContextPrefix:
+    def test_constructor_prefix_default_none(self):
+        assert BlockEmbedder(FakeEmbeddingClient()).context_prefix is None
+
+    def test_constructor_prefix_stored(self):
+        e = BlockEmbedder(FakeEmbeddingClient(), context_prefix="doc summary")
+        assert e.context_prefix == "doc summary"
+
+    def test_prefix_changes_embedded_vector_embed_blocks(self):
+        block = _make_block("A", "What is a?", "answer a")
+        client = FakeEmbeddingClient(dimension=128)
+        plain = BlockEmbedder(client).embed_blocks([block])[0].embedding
+        block2 = _make_block("A", "What is a?", "answer a")
+        prefixed = BlockEmbedder(client, context_prefix="CONTEXT").embed_blocks([block2])[0]
+        assert prefixed.embedding is not None
+        assert prefixed.embedding != plain
+
+    def test_prefix_prepended_text_matches_manual(self):
+        block = _make_block("MyName", "My question?", "My answer.")
+        client = FakeEmbeddingClient(dimension=128)
+        BlockEmbedder(client, context_prefix="PRE").embed_blocks([block])
+        expected = client._embed(f"PRE\n{block.embedding_text}")
+        assert block.embedding == pytest.approx(expected)
+
+    def test_prefix_does_not_mutate_embedding_text_property(self):
+        block = _make_block("A", "q?", "a")
+        before = block.embedding_text
+        BlockEmbedder(FakeEmbeddingClient(dimension=64), context_prefix="CTX").embed_blocks([block])
+        assert block.embedding_text == before  # property unchanged
+
+    def test_prefix_applied_to_vectors_for(self):
+        block = _make_block("A", "q?", "a")
+        client = FakeEmbeddingClient(dimension=128)
+        plain = BlockEmbedder(client).vectors_for([block])[str(block.id)]
+        block2 = _make_block("A", "q?", "a")
+        prefixed = BlockEmbedder(client, context_prefix="CTX").vectors_for([block2])[str(block2.id)]
+        assert prefixed != plain
+        # and not stored on the block
+        assert block2.embedding is None
+
+    def test_per_call_override_takes_precedence(self):
+        block = _make_block("A", "q?", "a")
+        client = FakeEmbeddingClient(dimension=128)
+        e = BlockEmbedder(client, context_prefix="CTOR")
+        via_ctor = e.embed_blocks([block])[0].embedding
+        block2 = _make_block("A", "q?", "a")
+        via_override = e.embed_blocks([block2], context_prefix="OVERRIDE")[0].embedding
+        assert via_override != via_ctor
+
+    def test_per_call_none_disables_constructor_prefix(self):
+        block = _make_block("A", "q?", "a")
+        client = FakeEmbeddingClient(dimension=128)
+        plain = BlockEmbedder(client).embed_blocks([block])[0].embedding
+        block2 = _make_block("A", "q?", "a")
+        e = BlockEmbedder(client, context_prefix="CTOR")
+        via_none = e.embed_blocks([block2], context_prefix=None)[0].embedding
+        assert via_none == plain  # no prefix -> same as plain
+
+    def test_embed_texts_ignores_prefix(self):
+        e = BlockEmbedder(FakeEmbeddingClient(dimension=128), context_prefix="CTX")
+        plain_e = BlockEmbedder(FakeEmbeddingClient(dimension=128))
+        # query side must NOT carry the prefix
+        assert e.embed_texts(["how to deploy"]) == plain_e.embed_texts(["how to deploy"])
+
+    def test_empty_blocks_with_prefix_returns_empty(self):
+        e = BlockEmbedder(FakeEmbeddingClient(), context_prefix="CTX")
+        assert e.embed_blocks([], context_prefix="x") == []
+        assert e.vectors_for([], context_prefix="x") == {}
+
+    def test_bad_prefix_type_raises(self):
+        e = BlockEmbedder(FakeEmbeddingClient())
+        with pytest.raises(TypeError):
+            e.embed_blocks([_make_block()], context_prefix=123)  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            e.vectors_for([_make_block()], context_prefix=123)  # type: ignore[arg-type]
+
+    def test_empty_prefix_string_is_no_prefix(self):
+        block = _make_block("A", "q?", "a")
+        client = FakeEmbeddingClient(dimension=128)
+        plain = BlockEmbedder(client).embed_blocks([block])[0].embedding
+        block2 = _make_block("A", "q?", "a")
+        empty_pref = BlockEmbedder(client, context_prefix="").embed_blocks([block2])[0].embedding
+        assert empty_pref == plain
+
+
+# ---------------------------------------------------------------------------- #
 # TechnicalBlock embedding_text is respected
 # ---------------------------------------------------------------------------- #
 class TestTechnicalBlockEmbedding:

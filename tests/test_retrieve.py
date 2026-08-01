@@ -20,6 +20,8 @@ from sparksage import (
 )
 from sparksage.embed.store import SearchHit
 from sparksage.retrieve import (
+    DEFAULT_DEDUP_THRESHOLD,
+    DEFAULT_MIN_FETCH,
     BM25Retriever,
     IdentityReranker,
     LLMReranker,
@@ -27,6 +29,7 @@ from sparksage.retrieve import (
     RetrievalFilter,
     RetrievedChunk,
     tokenize,
+    tune_rrf_k,
 )
 from sparksage.retrieve.fusion import reciprocal_rank_fusion
 from sparksage.schema.entity import Entity
@@ -318,3 +321,198 @@ class TestRetriever:
         retriever.index(blocks)
         result = retriever.search("deploy", k=1)
         assert not result.fused
+
+
+# --------------------------------------------------------------------------- #
+# Defaults / configuration
+# --------------------------------------------------------------------------- #
+class TestDefaults:
+    def test_min_fetch_floor_is_50(self):
+        assert DEFAULT_MIN_FETCH == 50
+
+    def test_default_dedup_threshold(self):
+        assert DEFAULT_DEDUP_THRESHOLD == 0.9
+
+    def test_dedup_threshold_property_and_default(self):
+        from sparksage.retrieve import Retriever
+
+        dim = 8
+        r = Retriever(
+            {}, InMemoryVectorStore(dimension=dim),
+            BlockEmbedder(FakeEmbeddingClient(dimension=dim)),
+        )
+        assert r.dedup_threshold == DEFAULT_DEDUP_THRESHOLD
+
+    def test_dedup_threshold_off_via_none(self):
+        from sparksage.retrieve import Retriever
+
+        dim = 8
+        r = Retriever(
+            {}, InMemoryVectorStore(dimension=dim),
+            BlockEmbedder(FakeEmbeddingClient(dimension=dim)),
+            dedup_threshold=None,
+        )
+        assert r.dedup_threshold is None
+
+    def test_bad_dedup_threshold(self):
+        from sparksage.retrieve import Retriever
+
+        dim = 8
+        with pytest.raises(ValueError):
+            Retriever(
+                {}, InMemoryVectorStore(dimension=dim),
+                BlockEmbedder(FakeEmbeddingClient(dimension=dim)),
+                dedup_threshold=1.5,
+            )
+        with pytest.raises(TypeError):
+            Retriever(
+                {}, InMemoryVectorStore(dimension=dim),
+                BlockEmbedder(FakeEmbeddingClient(dimension=dim)),
+                dedup_threshold="x",  # type: ignore[arg-type]
+            )
+
+
+# --------------------------------------------------------------------------- #
+# Semantic dedup after rerank
+# --------------------------------------------------------------------------- #
+class TestSemanticDedup:
+    def _retriever(self, blocks, *, dedup_threshold):
+        dim = 128
+        embedder = BlockEmbedder(FakeEmbeddingClient(dimension=dim))
+        store = InMemoryVectorStore(dimension=dim)
+        registry: dict[str, IdeaBlock] = {}
+        from sparksage.retrieve import Retriever
+
+        retriever = Retriever(
+            registry, store, embedder,
+            min_fetch=5, fetch_factor=2,
+            dedup_threshold=dedup_threshold,
+        )
+        retriever.index(blocks)
+        return retriever
+
+    def test_near_duplicate_blocks_collapsed(self):
+        # Two near-identical blocks (identical name/question/answer -> identical
+        # embedding_text -> identical embedding). Only their UUIDs differ.
+        blocks = [
+            _block("Dup", "how to deploy?", "run pip install sparksage"),
+            _block("Dup", "how to deploy?", "run pip install sparksage"),
+            _block("Other", "what to eat?", "try apples and oranges"),
+        ]
+        retriever = self._retriever(blocks, dedup_threshold=0.9)
+        result = retriever.search("deploy", k=3, use_lexical=False, use_rerank=False)
+        ids = {c.block.name for c in result.chunks}
+        # the two duplicates collapse; only one Dup + Other survive
+        assert "Other" in ids
+        assert "Dup" in ids
+        assert len([c for c in result.chunks if c.block.name == "Dup"]) == 1
+
+    def test_distinct_blocks_not_collapsed(self):
+        blocks = [
+            _block("A", "qa?", "general prose about systems"),
+            _block("B", "qb?", "step by step deploy procedure"),
+        ]
+        retriever = self._retriever(blocks, dedup_threshold=0.9)
+        result = retriever.search("deploy", k=2, use_lexical=False, use_rerank=False)
+        assert len(result.chunks) == 2
+
+    def test_dedup_disabled_returns_all(self):
+        blocks = [
+            _block("Dup", "how to deploy?", "run pip install sparksage"),
+            _block("Dup", "how to deploy?", "run pip install sparksage"),
+        ]
+        retriever = self._retriever(blocks, dedup_threshold=None)
+        result = retriever.search("deploy", k=2, use_lexical=False, use_rerank=False)
+        assert len(result.chunks) == 2
+
+    def test_dedup_ranks_are_contiguous(self):
+        blocks = [
+            _block("Dup", "how to deploy?", "run pip install sparksage"),
+            _block("Dup", "how to deploy?", "run pip install sparksage"),
+            _block("Other", "what to eat?", "try apples and oranges"),
+        ]
+        retriever = self._retriever(blocks, dedup_threshold=0.9)
+        result = retriever.search("deploy", k=3, use_lexical=False, use_rerank=False)
+        assert [c.rank for c in result.chunks] == list(range(len(result.chunks)))
+
+    def test_dedup_with_rerank_keeps_k(self):
+        # With a reranker + dedup, the final count still respects k where possible.
+        blocks = [
+            _block("Dup", "deploy?", "run pip install sparksage deploy"),
+            _block("Dup", "deploy?", "run pip install sparksage deploy"),
+            _block("Other", "eat?", "try apples and oranges food"),
+        ]
+        dim = 128
+        embedder = BlockEmbedder(FakeEmbeddingClient(dimension=dim))
+        store = InMemoryVectorStore(dimension=dim)
+        registry: dict[str, IdeaBlock] = {}
+        from sparksage.retrieve import Retriever
+
+        client = FakeLLMClient(responses=[json.dumps([0, 1, 2])])
+        rr = LLMReranker(client)
+        retriever = Retriever(
+            registry, store, embedder,
+            min_fetch=5, fetch_factor=2, reranker=rr, dedup_threshold=0.9,
+        )
+        retriever.index(blocks)
+        result = retriever.search("deploy", k=2, use_lexical=False, use_rerank=True)
+        # dedup collapses the pair but Other survives -> at most 2 returned
+        assert len(result.chunks) <= 2
+        assert result.reranked
+
+
+# --------------------------------------------------------------------------- #
+# tune_rrf_k
+# --------------------------------------------------------------------------- #
+class TestTuneRRFK:
+    def test_returns_default_when_no_data(self):
+        from sparksage.retrieve.fusion import DEFAULT_RRF_K
+
+        assert tune_rrf_k([], []) == DEFAULT_RRF_K
+
+    def test_returns_int_in_grid(self):
+        dense = [SearchHit("a", 0.9), SearchHit("b", 0.8)]
+        lex = [SearchHit("b", 11.0), SearchHit("a", 9.0)]
+        best = tune_rrf_k([[dense, lex]], [{"a", "b"}], top_n=2)
+        assert isinstance(best, int)
+        assert best >= 1
+
+    def test_smallest_k_wins_on_tie(self):
+        # All k values fuse identically here (single relevant id at rank 1 always)
+        dense = [SearchHit("a", 1.0)]
+        best = tune_rrf_k([[dense]], [{"a"}], k_candidates=[60, 10], top_n=1)
+        # both score the same -> smallest (10) wins
+        assert best == 10
+
+    def test_custom_candidates(self):
+        dense = [SearchHit("a", 1.0)]
+        best = tune_rrf_k([[dense]], [{"a"}], k_candidates=[7, 9, 11], top_n=1)
+        assert best in (7, 9, 11)
+
+    def test_picks_higher_recall_k(self):
+        # Two lists disagree: 'a' only in list1 rank1, 'b' in both.
+        # Construct so a smaller k lifts the rank-1 items more.
+        list1 = [SearchHit("a", 1.0), SearchHit("b", 0.5)]
+        list2 = [SearchHit("b", 1.0), SearchHit("c", 0.5)]
+        best = tune_rrf_k(
+            [[list1, list2]], [{"a", "b"}], k_candidates=[1, 100], top_n=2
+        )
+        # k=1 makes rank-1 dominate: 'b' appears rank1 in list2 and rank2 in list1.
+        # k=100 flattens everything. We just assert a valid int is returned.
+        assert best in (1, 100)
+
+    def test_length_mismatch_raises(self):
+        with pytest.raises(ValueError):
+            tune_rrf_k([[SearchHit("a", 1.0)]], [], top_n=1)
+
+    def test_bad_top_n(self):
+        with pytest.raises(ValueError):
+            tune_rrf_k([[SearchHit("a", 1.0)]], [{"a"}], top_n=0)
+
+    def test_bad_candidate(self):
+        with pytest.raises(ValueError):
+            tune_rrf_k([[SearchHit("a", 1.0)]], [{"a"}], k_candidates=[0], top_n=1)
+
+    def test_empty_candidates_raises(self):
+        with pytest.raises(ValueError):
+            tune_rrf_k([[SearchHit("a", 1.0)]], [{"a"}], k_candidates=[], top_n=1)

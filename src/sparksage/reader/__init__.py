@@ -49,6 +49,7 @@ from sparksage.reader.budget import (
     DEFAULT_CHARS_PER_TOKEN,
     DEFAULT_KEEP_MIN,
     approx_tokens,
+    reorder_head_tail,
     trim_to_token_budget,
 )
 from sparksage.reader.faithfulness import (
@@ -140,5 +141,6 @@ __all__ = [
     "parse_faithfulness_response",
     "parse_raw_answer",
     "parse_raw_faithfulness",
+    "reorder_head_tail",
     "trim_to_token_budget",
 ]

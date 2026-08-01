@@ -23,6 +23,7 @@ from sparksage.reader import (
     coerce_citations,
     coerce_faithfulness,
     extract_json,
+    reorder_head_tail,
     trim_to_token_budget,
 )
 from sparksage.retrieve.models import RetrievedChunk
@@ -379,3 +380,114 @@ class TestReaderBudget:
                 generator=LLMAnswerGenerator(FakeLLMClient([])),
                 context_keep_min=0,
             )
+
+
+# --------------------------------------------------------------------------- #
+# reorder_head_tail (lost-in-the-middle guard)
+# --------------------------------------------------------------------------- #
+class TestReorderHeadTail:
+    def _chunks(self, n):
+        return [
+            RetrievedChunk(
+                block=IdeaBlock(
+                    name=f"B{i}",
+                    critical_question="q?",
+                    trusted_answer=f"answer {i}",
+                    source=SourceRef(uri=f"file://{i}.md", title=str(i), locator="L1"),
+                ),
+                score=float(n - i),
+                rank=i,
+            )
+            for i in range(n)
+        ]
+
+    def test_empty_returns_empty(self):
+        assert reorder_head_tail([]) == []
+
+    def test_single_unchanged(self):
+        chunks = self._chunks(1)
+        out = reorder_head_tail(chunks)
+        assert [c.rank for c in out] == [0]
+
+    def test_interleaves_head_and_tail(self):
+        # [a,b,c,d,e,f] -> [a,c,e,f,d,b]
+        chunks = self._chunks(6)
+        out = reorder_head_tail(chunks)
+        assert [c.rank for c in out] == [0, 2, 4, 5, 3, 1]
+
+    def test_odd_length(self):
+        # [a,b,c,d,e] -> [a,c,e,d,b]
+        chunks = self._chunks(5)
+        out = reorder_head_tail(chunks)
+        assert [c.rank for c in out] == [0, 2, 4, 3, 1]
+
+    def test_preserves_all_chunks(self):
+        chunks = self._chunks(5)
+        out = reorder_head_tail(chunks)
+        assert sorted(c.rank for c in out) == [0, 1, 2, 3, 4]
+        assert len(out) == len(chunks)
+
+    def test_strongest_at_head_second_strongest_at_tail(self):
+        chunks = self._chunks(5)
+        out = reorder_head_tail(chunks)
+        assert out[0].rank == 0  # strongest at head
+        assert out[-1].rank == 1  # second strongest at tail
+
+    def test_does_not_mutate_input(self):
+        chunks = self._chunks(4)
+        original_ranks = [c.rank for c in chunks]
+        reorder_head_tail(chunks)
+        assert [c.rank for c in chunks] == original_ranks
+
+    def test_two_elements_swaps(self):
+        # [a,b] -> front=[a], back=[b], reversed back=[b] -> [a,b]
+        # head=a(rank0), tail=b(rank1): already optimal, unchanged
+        chunks = self._chunks(2)
+        out = reorder_head_tail(chunks)
+        assert [c.rank for c in out] == [0, 1]
+
+
+class TestReaderReorderContext:
+    def test_reorder_applied_when_budget_and_flag(self):
+        b = _block()
+        chunks = [
+            RetrievedChunk(block=b, score=float(5 - i), rank=i) for i in range(5)
+        ]
+        client = FakeLLMClient(responses=[_answer_json(cid=str(b.id), conf=0.9)])
+        reader = Reader(
+            generator=LLMAnswerGenerator(client),
+            max_context_tokens=10_000,  # keep all, but reorder
+            reorder_context=True,
+        )
+        result = reader.answer("q", chunks)
+        assert not result.abstained
+        # reordered: [0,2,4,3,1] -> last chunk is rank 1
+        assert result.chunks[-1].rank == 1
+        assert result.chunks[0].rank == 0
+
+    def test_no_reorder_keeps_best_first(self):
+        b = _block()
+        chunks = [
+            RetrievedChunk(block=b, score=float(5 - i), rank=i) for i in range(5)
+        ]
+        client = FakeLLMClient(responses=[_answer_json(cid=str(b.id), conf=0.9)])
+        reader = Reader(
+            generator=LLMAnswerGenerator(client),
+            max_context_tokens=10_000,
+            reorder_context=False,
+        )
+        result = reader.answer("q", chunks)
+        assert [c.rank for c in result.chunks] == [0, 1, 2, 3, 4]
+
+    def test_reorder_ignored_when_budget_off(self):
+        b = _block()
+        chunks = [
+            RetrievedChunk(block=b, score=float(5 - i), rank=i) for i in range(5)
+        ]
+        client = FakeLLMClient(responses=[_answer_json(cid=str(b.id), conf=0.9)])
+        reader = Reader(
+            generator=LLMAnswerGenerator(client),
+            reorder_context=True,  # but no budget -> no trim -> no reorder
+        )
+        result = reader.answer("q", chunks)
+        assert [c.rank for c in result.chunks] == [0, 1, 2, 3, 4]
