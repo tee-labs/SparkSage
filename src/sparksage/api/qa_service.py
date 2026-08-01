@@ -427,6 +427,18 @@ class QAService:
         page = filtered[offset : offset + limit]
         return page, total
 
+    def list_block_tags(self) -> list[str]:
+        """Return the distinct coarse ``Tag`` vocabulary across KB blocks.
+
+        Sorted ascending. Powers the knowledge-base tag filter dropdown so its
+        options do not shrink to the current page of blocks.
+        """
+        seen: set[str] = set()
+        for b in self._kb.blocks():
+            for t in getattr(b, "tags", []) or []:
+                seen.add(t.value if hasattr(t, "value") else str(t))
+        return sorted(seen)
+
     def list_feedback(
         self,
         *,

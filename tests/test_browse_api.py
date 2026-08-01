@@ -193,6 +193,30 @@ class TestBlocksRoutes:
         assert data["block_count"] == 2
         assert data["document_count"] == 1
 
+    def test_kb_tags_route(self, http_client):
+        client, svc = http_client
+        _ingest(svc)
+        resp = client.get("/api/v1/knowledge_base/tags")
+        assert resp.status_code == 200
+        assert resp.json()["tags"] == ["PROCESS", "TECHNOLOGY"]
+
+
+class TestDocumentsRoutes:
+    def test_documents_multi_tag_any_match_route(self, http_client):
+        client, qa_svc = http_client
+        docs = qa_svc.service
+        docs.ingest_document(b"a", "a.md", tags=["alpha"])
+        docs.ingest_document(b"b", "b.md", tags=["beta"])
+        docs.ingest_document(b"c", "c.md", tags=["gamma"])
+        resp = client.get("/api/v1/documents", params={"tag": "alpha,beta"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+        assert data["count"] == 2
+        # single literal "alpha,beta" tag must NOT match (regression guard)
+        resp_single = client.get("/api/v1/documents", params={"tag": "alpha"})
+        assert resp_single.json()["total"] == 1
+
 
 class TestFeedbackRoutes:
     def test_feedback_records_route(self, http_client):

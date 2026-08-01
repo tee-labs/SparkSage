@@ -48,6 +48,7 @@ class DocumentStore(Protocol):
         self,
         *,
         tag: str | None = None,
+        tags: list[str] | None = None,
         q: str | None = None,
         limit: int = 100,
         offset: int = 0,
@@ -58,6 +59,9 @@ class DocumentStore(Protocol):
         ----------
         tag:
             When set, only records carrying this exact tag are returned.
+        tags:
+            When set, only records carrying at least one of these tags are
+            returned (any-match OR). Combined with ``tag`` when both are given.
         q:
             When set, only records whose ``title`` or ``body_markdown`` contain
             the substring (case-insensitive) are returned.
@@ -70,8 +74,11 @@ class DocumentStore(Protocol):
         """Remove ``doc_id``. Return whether a record was actually deleted."""
         ...
 
-    def count(self, *, tag: str | None = None) -> int:
-        """Number of records, optionally restricted to those carrying ``tag``."""
+    def count(self, *, tag: str | None = None, tags: list[str] | None = None) -> int:
+        """Number of records, optionally restricted to those carrying ``tag``.
+
+        ``tags`` (any-match OR) is combined with ``tag`` when both are given.
+        """
         ...
 
     def list_tags(self) -> list[str]:
@@ -92,6 +99,27 @@ def _validate_pagination(limit: int, offset: int) -> None:
         raise ValueError("limit must be a positive int")
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
         raise ValueError("offset must be a non-negative int")
+
+
+def _normalize_tags(
+    tag: str | None = None, tags: list[str] | None = None
+) -> set[str]:
+    """Collect the required-tag set from ``tag`` and/or ``tags``.
+
+    Empty / blank entries are dropped. A record matches when it carries *any*
+    of the returned tags (any-match OR). Returns an empty set for "no filter".
+    """
+    required: set[str] = set()
+    if tag:
+        norm = tag.strip()
+        if norm:
+            required.add(norm)
+    if tags:
+        for raw in tags:
+            norm = raw.strip() if isinstance(raw, str) else None
+            if norm:
+                required.add(norm)
+    return required
 
 
 __all__ = [

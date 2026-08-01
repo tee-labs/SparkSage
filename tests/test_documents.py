@@ -171,6 +171,19 @@ class TestStoreCore:
         assert {r.doc_id for r in store.list(tag="alpha")} == {"a"}
         assert store.list(tag="missing") == []
 
+    def test_multi_tag_filter_any_match(self, factory):
+        store = factory()
+        store.save(_record(doc_id="a", tags=["alpha", "shared"]))
+        store.save(_record(doc_id="b", tags=["beta", "shared"]))
+        store.save(_record(doc_id="c", tags=["gamma"]))
+        assert {r.doc_id for r in store.list(tags=["alpha", "beta"])} == {"a", "b"}
+        assert {r.doc_id for r in store.list(tags=["alpha", "gamma"])} == {"a", "c"}
+        assert store.list(tags=["missing"]) == []
+        assert {r.doc_id for r in store.list(tags=["alpha", ""])} == {"a"}
+        assert store.count(tags=["alpha", "beta"]) == 2
+        assert store.count(tags=["gamma"]) == 1
+        assert store.count(tags=[]) == 3
+
     def test_text_query(self, factory):
         store = factory()
         store.save(_record(doc_id="a", title="Revenue Q3", body="quarterly numbers"))

@@ -69,7 +69,7 @@ export default function QaPage() {
   };
 
   const removeTurn = (idx: number) => {
-    setHistory((prev) => prev.filter((_, i) => i !== idx && i !== idx - 1));
+    setHistory((prev) => prev.filter((_, i) => i !== idx && i !== idx + 1));
   };
 
   const editTurn = (idx: number) => {
@@ -101,6 +101,7 @@ export default function QaPage() {
   const tagOptions = [
     'IMPORTANT', 'WARNING', 'TECHNOLOGY', 'PROCESS', 'REFERENCE',
     'FAQ', 'TROUBLESHOOTING', 'SECURITY', 'ARCHITECTURE', 'API',
+    'DATASET', 'POLICY',
   ].map((t) => ({ value: t, label: t }));
 
   return (
@@ -284,6 +285,8 @@ function FeedbackBar({
 }) {
   const res = turn.result!;
   const current = feedback[res.query];
+  const [editing, setEditing] = useState(false);
+  const correctionValue = corrections[res.query] ?? '';
   return (
     <>
       <Divider style={{ margin: '8px 0' }} />
@@ -309,21 +312,35 @@ function FeedbackBar({
             size="small"
             type={current === 'corrected' ? 'primary' : 'default'}
             icon={<EditOutlined />}
-            onClick={() => onSubmit(turn, 'corrected')}
+            onClick={() => setEditing((e) => !e)}
           />
         </Tooltip>
         {current && <AntTag color="green">已反馈：{current}</AntTag>}
       </Space>
-      {current === 'corrected' && (
-        <Input.TextArea
-          rows={2}
-          style={{ marginTop: 8 }}
-          placeholder="请输入正确答案…"
-          value={corrections[res.query] ?? ''}
-          onChange={(e) =>
-            setCorrections((prev) => ({ ...prev, [res.query]: e.target.value }))
-          }
-        />
+      {editing && (
+        <div style={{ marginTop: 8 }}>
+          <Input.TextArea
+            rows={2}
+            placeholder="请输入正确答案…"
+            value={correctionValue}
+            onChange={(e) =>
+              setCorrections((prev) => ({ ...prev, [res.query]: e.target.value }))
+            }
+          />
+          <div style={{ marginTop: 4, textAlign: 'right' }}>
+            <Button
+              size="small"
+              type="primary"
+              disabled={!correctionValue.trim()}
+              onClick={() => {
+                onSubmit(turn, 'corrected');
+                setEditing(false);
+              }}
+            >
+              提交纠正
+            </Button>
+          </div>
+        </div>
       )}
     </>
   );
