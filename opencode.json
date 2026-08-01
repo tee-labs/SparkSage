@@ -7,7 +7,7 @@
       "options": {
         "baseURL": "https://open.bigmodel.cn/api/coding/paas/v4",
         "headers": {
-          "Authorization": "Bearer {env:API_KEY}"
+          "Authorization": "Bearer {env:GLM_API_KEY}"
         }
       },
       "models": {
@@ -19,6 +19,21 @@
         },
         "glm-5.2": {
           "name": "glm-5.2"
+        }
+      }
+    },
+    "zen": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "zen",
+      "options": {
+        "baseURL": "https://opencode.ai/zen/v1",
+        "headers": {
+          "Authorization": "Bearer {env:OPENCODE_API_KEY}"
+        }
+      },
+      "models": {
+        "deepseek-v4-flash-free": {
+          "name": "deepseek-v4-flash-free"
         }
       }
     }
