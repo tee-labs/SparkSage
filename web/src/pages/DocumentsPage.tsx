@@ -140,9 +140,10 @@ export default function DocumentsPage() {
     {
       title: '标题',
       dataIndex: 'title',
-      render: (v: string, r: DocumentSummary) => (
-        <a onClick={() => openDetail(r)}>{v || r.doc_id}</a>
-      ),
+      render: (v: string, r: DocumentSummary) => {
+        const fallback = r.source?.uri?.split('/').pop() || r.doc_id;
+        return <a onClick={() => openDetail(r)}>{v || fallback}</a>;
+      },
     },
     {
       title: '标签',
