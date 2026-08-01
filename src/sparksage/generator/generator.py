@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 
 from sparksage.generator.client import JSON_RESPONSE_FORMAT, LLMClient
@@ -160,30 +161,43 @@ class IdeaBlockGenerator:
             language=lang,
         )
 
+        prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
         _logger.debug(
-            "generating blocks: text_len=%d max_blocks=%s lang=%s json_mode=%s",
+            "generating blocks: text_len=%d max_blocks=%s lang=%s json_mode=%s "
+            "prompt_msgs=%d prompt_chars=%d",
             len(text),
             max_blocks,
             lang,
             self._use_json_mode,
+            len(messages),
+            prompt_chars,
         )
 
+        t0 = time.perf_counter()
         response_text = self._client.complete(
             messages,
             model=self._model,
             temperature=self._temperature,
             response_format=JSON_RESPONSE_FORMAT if self._use_json_mode else None,
         )
+        elapsed = time.perf_counter() - t0
 
         if not response_text or not response_text.strip():
             raise EmptyResponseError("the LLM returned an empty response")
 
         _logger.debug(
-            "LLM response received: resp_len=%d", len(response_text)
+            "LLM response received: resp_len=%d elapsed=%.2fs",
+            len(response_text),
+            elapsed,
         )
 
         raw_result = self._parse(response_text)
         blocks, _stats = self._coerce_all(raw_result, source=source, language=lang)
+        if _logger.isEnabledFor(logging.DEBUG):
+            names = [b.name[:40] for b in blocks]
+            _logger.debug(
+                "generated blocks detail: names=%s", names
+            )
         _logger.info("generated %d blocks (raw=%d)", len(blocks), len(raw_result.blocks))
         return blocks
 
@@ -208,23 +222,31 @@ class IdeaBlockGenerator:
         messages = build_messages(
             text, source=source, max_blocks=max_blocks, language=lang
         )
+        prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
         _logger.debug(
-            "generating blocks (with_stats): text_len=%d max_blocks=%s lang=%s",
+            "generating blocks (with_stats): text_len=%d max_blocks=%s lang=%s "
+            "prompt_msgs=%d prompt_chars=%d",
             len(text),
             max_blocks,
             lang,
+            len(messages),
+            prompt_chars,
         )
+        t0 = time.perf_counter()
         response_text = self._client.complete(
             messages,
             model=self._model,
             temperature=self._temperature,
             response_format=JSON_RESPONSE_FORMAT if self._use_json_mode else None,
         )
+        elapsed = time.perf_counter() - t0
         if not response_text or not response_text.strip():
             raise EmptyResponseError("the LLM returned an empty response")
 
         _logger.debug(
-            "LLM response received (with_stats): resp_len=%d", len(response_text)
+            "LLM response received (with_stats): resp_len=%d elapsed=%.2fs",
+            len(response_text),
+            elapsed,
         )
 
         raw_result = self._parse(response_text)
@@ -269,4 +291,12 @@ class IdeaBlockGenerator:
                 continue
             blocks.append(block)
             stats.emitted += 1
+        if _logger.isEnabledFor(logging.DEBUG):
+            _logger.debug(
+                "coerce blocks: raw=%d emitted=%d skipped=%d errors=%d",
+                stats.raw_block_count,
+                stats.emitted,
+                stats.skipped,
+                len(stats.errors),
+            )
         return blocks, stats

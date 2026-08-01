@@ -21,6 +21,7 @@ unit-testable without the optional dependency.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -189,12 +190,15 @@ class MarkdownConverter:
     def convert(self, source: Any) -> ConversionResult:
         """Convert a single file path / URI / stream to a :class:`ConversionResult."""
         _logger.debug("converting %s", _source_descriptor(source))
+        t0 = time.perf_counter()
         markdown, title = self._backend.convert(source)
+        elapsed = time.perf_counter() - t0
         _logger.debug(
-            "converted %s: markdown_len=%d title=%s",
+            "converted %s: markdown_len=%d title=%s elapsed=%.2fs",
             _source_descriptor(source),
             len(markdown),
             title,
+            elapsed,
         )
         return ConversionResult(
             markdown=markdown,

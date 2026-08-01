@@ -325,6 +325,18 @@ class Retriever:
             raw_lexical = self._lexical.search(query, k=pool)
             lexical_hits = self._apply_filter_to_hits(raw_lexical, flt)
 
+        _logger.debug(
+            "retrieval legs: dense=%d (filtered=%d) lexical=%d (filtered=%d) "
+            "pool=%d k=%d store_size=%d",
+            len(raw_dense),
+            len(dense_hits),
+            len(raw_lexical),
+            len(lexical_hits),
+            pool,
+            k,
+            len(self._store),
+        )
+
         rankings: list[list[SearchHit]] = [dense_hits]
         if lexical_hits:
             rankings.append(lexical_hits)
@@ -404,6 +416,18 @@ class Retriever:
             resolved = [_replaced(c, rank=i) for i, c in enumerate(resolved)]
 
         resolved = resolved[:k]
+
+        if _logger.isEnabledFor(logging.DEBUG) and resolved:
+            top_scores = [f"{c.score:.3f}" for c in resolved[: min(5, len(resolved))]]
+            _logger.debug(
+                "retrieval result: %d chunks (fused=%s reranked=%s filtered_out=%d) "
+                "top_scores=%s",
+                len(resolved),
+                did_fuse,
+                reranked,
+                max(filtered_out, 0),
+                top_scores,
+            )
 
         return RetrievalResult(
             query=str(query),

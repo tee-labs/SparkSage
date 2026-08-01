@@ -20,6 +20,7 @@ it is fully unit-testable with :class:`~sparksage.generator.FakeLLMClient`.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Protocol, runtime_checkable
 
 from sparksage.generator.client import JSON_RESPONSE_FORMAT, LLMClient
@@ -132,20 +133,44 @@ class LLMAnswerGenerator:
         valid_ids = set(id_to_citation)
 
         messages = answer_messages(query, chunks)
+        prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
+        _logger.debug(
+            "answer generation: query=%r chunks=%d prompt_msgs=%d prompt_chars=%d",
+            query[:80],
+            len(chunks),
+            len(messages),
+            prompt_chars,
+        )
+        t0 = time.perf_counter()
         response_text = self._client.complete(
             messages,
             model=self._model,
             temperature=self._temperature,
             response_format=JSON_RESPONSE_FORMAT if self._use_json_mode else None,
         )
+        elapsed = time.perf_counter() - t0
         if not response_text or not response_text.strip():
             raise AnswerEmptyResponseError("the LLM returned an empty response")
 
+        _logger.debug(
+            "answer LLM response: resp_len=%d elapsed=%.2fs",
+            len(response_text),
+            elapsed,
+        )
+
         try:
             raw: RawAnswer = parse_answer_response(response_text)
-            return coerce_answer(
+            answer = coerce_answer(
                 raw, valid_ids, id_to_citation, strict=self._strict
             )
+            _logger.debug(
+                "answer coerced: text_len=%d citations=%d confidence=%.2f abstained=%s",
+                len(answer.text),
+                len(answer.citations),
+                answer.confidence,
+                answer.abstained,
+            )
+            return answer
         except CoercionError as exc:
             raise AnswerResponseParseError(str(exc)) from exc
 
