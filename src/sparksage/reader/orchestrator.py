@@ -22,6 +22,7 @@ runs fully offline under :class:`~sparksage.generator.FakeLLMClient`.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -215,7 +216,19 @@ class Reader:
 
         chunks = self._apply_budget(chunks)
 
+        t0 = time.perf_counter()
         answer = self._generator.generate(query, chunks)
+        elapsed_gen = time.perf_counter() - t0
+        _logger.debug(
+            "reader generated: text_len=%d confidence=%.2f abstained=%s "
+            "citations=%d chunks=%d elapsed=%.2fs",
+            len(answer.text),
+            answer.confidence,
+            answer.abstained,
+            len(answer.citations),
+            len(chunks),
+            elapsed_gen,
+        )
 
         if answer.abstained:
             return AnswerResult(
@@ -230,8 +243,16 @@ class Reader:
 
         faithfulness: FaithfulnessResult | None = None
         if self._judge is not None:
+            t0 = time.perf_counter()
             faithfulness = self._judge.judge(query, answer.text, chunks)
+            elapsed_judge = time.perf_counter() - t0
             answer.faithfulness = faithfulness.score
+            _logger.debug(
+                "reader judged faithfulness: score=%.2f reasoning=%s elapsed=%.2fs",
+                faithfulness.score,
+                (faithfulness.reasoning or "")[:80],
+                elapsed_judge,
+            )
             if faithfulness.score < self._min_faithfulness:
                 return self._abstain(
                     query,
@@ -259,6 +280,12 @@ class Reader:
         eff_conf = answer.confidence
         if faithfulness is not None:
             eff_conf = answer.confidence * faithfulness.score
+        _logger.debug(
+            "reader answer accepted: eff_conf=%.2f (conf=%.2f faith=%s)",
+            eff_conf,
+            answer.confidence,
+            f"{faithfulness.score:.2f}" if faithfulness is not None else None,
+        )
         return AnswerResult(
             query=query,
             answer=answer,
@@ -279,6 +306,15 @@ class Reader:
         """
         if self._max_context_tokens is None:
             return chunks
+        approx_tokens = sum(
+            len(c.block.embedding_text) for c in chunks
+        ) / self._chars_per_token
+        _logger.debug(
+            "context budget: chunks=%d approx_tokens=%.0f max=%s",
+            len(chunks),
+            approx_tokens,
+            self._max_context_tokens,
+        )
         trimmed = trim_to_token_budget(
             chunks,
             self._max_context_tokens,
@@ -295,6 +331,7 @@ class Reader:
             )
         if self._reorder_context and len(trimmed) > 1:
             trimmed = reorder_head_tail(trimmed)
+            _logger.debug("context reordered head/tail (%d chunks)", len(trimmed))
         return trimmed
 
     def _abstain(

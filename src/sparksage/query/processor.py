@@ -23,6 +23,7 @@ route will be a thin FastAPI wrapper around it, exactly as
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
@@ -30,6 +31,8 @@ from sparksage.query.classifier import IntentClassifier, IntentResult
 from sparksage.query.context import ConversationContext
 from sparksage.query.rewriter import QueryRewriter, RewriteResult
 from sparksage.schema.enums import QueryIntent
+
+_logger = logging.getLogger(__name__)
 
 #: Default intents that short-circuit the pipeline (skip the rewrite entirely).
 DEFAULT_REJECTED_INTENTS: frozenset[QueryIntent] = frozenset(
@@ -136,9 +139,25 @@ class QueryProcessor:
     ) -> QueryResult:
         """Classify, intercept, and (if accepted) rewrite ``query``."""
         original = str(query)
+        _logger.debug(
+            "query process start: query=%r has_context=%s",
+            original[:80],
+            context is not None,
+        )
         intent = self.classifier.classify(query, context)
+        _logger.debug(
+            "query classified: intent=%s confidence=%.2f",
+            intent.intent.value,
+            intent.confidence,
+        )
 
         if self._should_reject(intent):
+            _logger.debug(
+                "query rejected: intent=%s (in rejected=%s below_floor=%s)",
+                intent.intent.value,
+                intent.intent in self.rejected_intents,
+                intent.confidence < self.min_confidence,
+            )
             return QueryResult(
                 intent=intent,
                 rewrite=_identity_rewrite(original),
@@ -148,6 +167,12 @@ class QueryProcessor:
             )
 
         rewrite = self.rewriter.rewrite(query, context=context, intent=intent)
+        _logger.debug(
+            "query rewritten: %r -> %r sub_queries=%d",
+            original[:60],
+            rewrite.rewritten_query[:80],
+            len(rewrite.sub_queries or []),
+        )
         return QueryResult(
             intent=intent,
             rewrite=rewrite,

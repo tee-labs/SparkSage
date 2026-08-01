@@ -35,6 +35,7 @@ document anchor, which is exactly the intended asymmetry.
 from __future__ import annotations
 
 import logging
+import time
 
 from sparksage.embed.client import EmbeddingClient
 from sparksage.schema.ideablock import IdeaBlock
@@ -124,7 +125,16 @@ class BlockEmbedder:
         """
         if not texts:
             return []
-        return self._client.embed_batch(list(texts))
+        t0 = time.perf_counter()
+        vectors = self._client.embed_batch(list(texts))
+        elapsed = time.perf_counter() - t0
+        _logger.debug(
+            "embed_texts: count=%d dim=%d elapsed=%.2fs",
+            len(texts),
+            self._client.dimension,
+            elapsed,
+        )
+        return vectors
 
     def _resolve_prefix(self, context_prefix: object) -> str | None:
         if context_prefix is _UNSET:
@@ -176,7 +186,14 @@ class BlockEmbedder:
             self._client.dimension,
             bool(prefix),
         )
+        t0 = time.perf_counter()
         vectors = self._embed_texts_with_prefix(blocks, prefix)
+        elapsed = time.perf_counter() - t0
+        _logger.debug(
+            "embed_blocks done: count=%d elapsed=%.2fs",
+            len(blocks),
+            elapsed,
+        )
         for block, vec in zip(blocks, vectors, strict=True):
             block.embedding = list(vec)
         return blocks

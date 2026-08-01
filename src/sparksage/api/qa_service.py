@@ -45,6 +45,7 @@ and indexes stay isolated while sharing one embedder / reader / query processor.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -425,35 +426,61 @@ class QAService:
             max_blocks,
             language,
         )
+        t_total = time.perf_counter()
+
+        t0 = time.perf_counter()
         conv = self._service.convert(data, filename, clean=clean)
+        elapsed_conv = time.perf_counter() - t0
         text = conv.markdown
         source = conv.source
         resolved_title = title if title is not None else conv.title
         _logger.debug(
-            "ingest convert done: markdown_len=%d title=%s", len(text), resolved_title
+            "ingest convert done: markdown_len=%d title=%s elapsed=%.2fs",
+            len(text),
+            resolved_title,
+            elapsed_conv,
         )
 
         gen = self._service.generator
         assert gen is not None
+        t0 = time.perf_counter()
         blocks = gen.generate(
             text,
             source=source,
             max_blocks=max_blocks,
             language=language,
         )
-        _logger.debug("ingest generate done: %d blocks", len(blocks))
+        elapsed_gen = time.perf_counter() - t0
+        _logger.debug(
+            "ingest generate done: %d blocks elapsed=%.2fs",
+            len(blocks),
+            elapsed_gen,
+        )
 
         final_tags = list(tags) if tags else []
         if not final_tags and auto_tag:
+            t0 = time.perf_counter()
             final_tags = self._service.auto_tag(text, top_k=top_k)
-            _logger.debug("ingest auto-tag done: %d tags", len(final_tags))
+            elapsed_tag = time.perf_counter() - t0
+            _logger.debug(
+                "ingest auto-tag done: %d tags elapsed=%.2fs tags=%s",
+                len(final_tags),
+                elapsed_tag,
+                final_tags,
+            )
 
         summary: str | None = None
         if summarize:
+            t0 = time.perf_counter()
             summary = self._service.summarize_text(
                 text, max_sentences=max_summary_sentences
             )
-            _logger.debug("ingest summarize done: %d chars", len(summary or ""))
+            elapsed_sum = time.perf_counter() - t0
+            _logger.debug(
+                "ingest summarize done: %d chars elapsed=%.2fs",
+                len(summary or ""),
+                elapsed_sum,
+            )
 
         record = new_record(
             title=resolved_title,
@@ -463,13 +490,21 @@ class QAService:
             source=SourceRef(uri=source.uri, title=resolved_title),
         )
 
+        t0 = time.perf_counter()
         stored = kb.add_document(record, blocks=blocks)
+        elapsed_index = time.perf_counter() - t0
+        elapsed_total = time.perf_counter() - t_total
         _logger.info(
-            "ingested %s: %d blocks indexed (kb=%s, doc=%s)",
+            "ingested %s: %d blocks indexed (kb=%s, doc=%s) "
+            "elapsed=%.2fs (convert=%.2fs gen=%.2s index=%.2fs)",
             filename or source.uri,
             len(blocks),
             kb.kb_id,
             stored.doc_id,
+            elapsed_total,
+            elapsed_conv,
+            elapsed_gen,
+            elapsed_index,
         )
         return IngestResult(
             doc_id=stored.doc_id,
@@ -518,6 +553,7 @@ class QAService:
             use_lexical,
             use_rerank,
         )
+        t0 = time.perf_counter()
         result = engine.ask(
             query,
             context=context,
@@ -527,13 +563,28 @@ class QAService:
             use_rerank=use_rerank,
             use_cache=use_cache,
         )
+        elapsed = time.perf_counter() - t0
         n_chunks = len(result.retrieval.chunks) if result.retrieval else 0
+        intent_str = (
+            result.query_result.intent.intent.value
+            if result.query_result is not None
+            else "n/a"
+        )
+        top_score = (
+            result.retrieval.chunks[0].score
+            if result.retrieval and result.retrieval.chunks
+            else None
+        )
         _logger.info(
-            "answered %r: abstained=%s chunks=%d cached=%s",
+            "answered %r: abstained=%s chunks=%d cached=%s intent=%s "
+            "top_score=%s elapsed=%.2fs",
             query[:80],
             result.abstained,
             n_chunks,
             result.cached,
+            intent_str,
+            f"{top_score:.3f}" if top_score is not None else None,
+            elapsed,
         )
         return result
 

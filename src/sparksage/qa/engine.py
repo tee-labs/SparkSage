@@ -34,6 +34,7 @@ the ingest pipeline.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -365,15 +366,34 @@ class QAEngine:
             immediately and a miss stores the new result.
         """
         query = str(query)
+        _logger.debug("qa ask start: query=%r cached_enabled=%s", query[:80], use_cache)
         if use_cache and self._cache is not None:
             hit = self._cache.lookup(query)
             if hit is not None:
+                _logger.debug("qa cache hit: query=%r", query[:80])
                 return QAResult(query=query, cached=True, **_without_cached(hit))
 
         query_result: QueryResult | None = None
         if self._query_processor is not None:
+            t0 = time.perf_counter()
             query_result = self._query_processor.process(query, context)
+            elapsed_qp = time.perf_counter() - t0
+            _logger.debug(
+                "qa query processed: intent=%s confidence=%.2f accepted=%s "
+                "rewritten=%r sub_queries=%d elapsed=%.2fs",
+                query_result.intent.intent.value,
+                query_result.intent.confidence,
+                query_result.accepted,
+                query_result.rewrite.rewritten_query[:80],
+                len(query_result.rewrite.sub_queries or []),
+                elapsed_qp,
+            )
             if not query_result.accepted:
+                _logger.debug(
+                    "qa query rejected: intent=%s reply=%r",
+                    query_result.intent.intent.value,
+                    (query_result.default_reply or "")[:80],
+                )
                 result = QAResult(query=query, query_result=query_result)
                 self._maybe_store(query, result, use_cache)
                 return result
@@ -390,6 +410,13 @@ class QAEngine:
             if query_result is not None and query_result.rewrite.sub_queries
             else None
         )
+        if _logger.isEnabledFor(logging.DEBUG):
+            _logger.debug(
+                "qa retrieval: search_query=%r sub_queries=%s",
+                search_query[:80],
+                len(sub_queries) if sub_queries else 0,
+            )
+        t0 = time.perf_counter()
         retrieval = self._retrieve(
             search_query,
             context=context,
@@ -398,6 +425,14 @@ class QAEngine:
             use_lexical=use_lexical,
             use_rerank=use_rerank,
             sub_queries=sub_queries,
+        )
+        elapsed_ret = time.perf_counter() - t0
+        _logger.debug(
+            "qa retrieval done: chunks=%d fused=%s reranked=%s elapsed=%.2fs",
+            len(retrieval.chunks),
+            retrieval.fused,
+            retrieval.reranked,
+            elapsed_ret,
         )
 
         relevance, retrieval, refined_query, iterations = self._reflective_retrieve(
@@ -410,8 +445,24 @@ class QAEngine:
             use_lexical=use_lexical,
             use_rerank=use_rerank,
         )
+        if iterations > 0 and _logger.isEnabledFor(logging.DEBUG):
+            _logger.debug(
+                "qa reflective loop: iterations=%d refined=%r relevance=%.2f",
+                iterations,
+                (refined_query or "")[:80],
+                relevance.score if relevance else 0.0,
+            )
 
+        t0 = time.perf_counter()
         answer = self._reader.answer(query, retrieval.chunks)
+        elapsed_ans = time.perf_counter() - t0
+        _logger.debug(
+            "qa answer done: abstained=%s reason=%s eff_conf=%.2f elapsed=%.2fs",
+            answer.abstained,
+            answer.abstention_reason,
+            answer.confidence,
+            elapsed_ans,
+        )
         result = QAResult(
             query=query,
             query_result=query_result,

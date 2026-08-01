@@ -15,12 +15,15 @@ domain.
 from __future__ import annotations
 
 import fnmatch
+import logging
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 from sparksage.clean.rules import CleaningRule
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -93,8 +96,30 @@ class CleaningRegistry:
 
     def clean(self, text: str, source: str | None = None) -> str:
         """Apply every applicable rule to ``text`` in order and return it."""
-        for rule in self.rules_for(source):
+        rules = self.rules_for(source)
+        if _logger.isEnabledFor(logging.DEBUG):
+            _logger.debug(
+                "cleaning text: len=%d rules=%d source=%s",
+                len(text),
+                len(rules),
+                source,
+            )
+        for i, rule in enumerate(rules):
+            before_len = len(text)
             text = rule.clean(text, source)
+            after_len = len(text)
+            if _logger.isEnabledFor(logging.DEBUG):
+                name = type(rule).__name__
+                delta = before_len - after_len
+                _logger.debug(
+                    "clean rule %d/%d %s: %d -> %d chars (delta=%d)",
+                    i + 1,
+                    len(rules),
+                    name,
+                    before_len,
+                    after_len,
+                    delta,
+                )
         return text
 
     def __len__(self) -> int:

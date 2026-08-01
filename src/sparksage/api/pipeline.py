@@ -256,11 +256,16 @@ class SparkSageService:
         result = self._to_conversion_result(raw, filename)
 
         if clean:
+            before_len = len(result.markdown)
             cleaned = self._cleaner.clean_result(result)
+            after_len = len(cleaned.text)
             _logger.debug(
-                "convert done (cleaned): markdown_len=%d title=%s",
-                len(cleaned.text),
+                "convert done (cleaned): markdown_len=%d title=%s clean_delta=%d (%d -> %d)",
+                after_len,
                 cleaned.title,
+                before_len - after_len,
+                before_len,
+                after_len,
             )
             return ConvertOutput(
                 markdown=cleaned.text,
@@ -330,10 +335,17 @@ class SparkSageService:
         result = self._to_conversion_result(raw, filename)
 
         if clean:
+            before_len = len(result.markdown)
             cleaned = self._cleaner.clean_result(result)
             text = cleaned.text
             source_ref = cleaned.source_ref
             title = cleaned.title
+            _logger.debug(
+                "generate clean done: %d -> %d chars (delta=%d)",
+                before_len,
+                len(text),
+                before_len - len(text),
+            )
         else:
             text = result.markdown
             source_ref = result.source_ref
