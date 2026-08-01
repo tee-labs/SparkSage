@@ -234,6 +234,49 @@ class TestRobustness:
         gen = IdeaBlockGenerator(FakeLLMClient(responses=['{"blocks": []}']))
         assert gen.generate(SAMPLE_TEXT) == []
 
+    def test_oversized_entity_dropped_in_non_strict(self):
+        # An LLM can emit an entity_name longer than the 200-char cap; in
+        # non-strict mode the bad entity is dropped (not the whole block) so
+        # one noisy field never aborts a whole ingest batch.
+        payload = json.dumps(
+            {
+                "blocks": [
+                    {
+                        "name": "ok block",
+                        "critical_question": "q?",
+                        "trusted_answer": "a fine answer.",
+                        "entities": [
+                            {"entity_name": "X" * 250, "entity_type": "CONCEPT"},
+                            {"entity_name": "GoodEntity", "entity_type": "PRODUCT"},
+                        ],
+                    }
+                ]
+            }
+        )
+        gen = IdeaBlockGenerator(FakeLLMClient(responses=[payload]))
+        blocks = gen.generate(SAMPLE_TEXT)
+        assert len(blocks) == 1
+        assert [e.entity_name for e in blocks[0].entities] == ["GoodEntity"]
+
+    def test_oversized_entity_raises_in_strict(self):
+        payload = json.dumps(
+            {
+                "blocks": [
+                    {
+                        "name": "x",
+                        "critical_question": "q?",
+                        "trusted_answer": "a.",
+                        "entities": [
+                            {"entity_name": "X" * 250, "entity_type": "CONCEPT"},
+                        ],
+                    }
+                ]
+            }
+        )
+        gen = IdeaBlockGenerator(FakeLLMClient(responses=[payload]), strict=True)
+        with pytest.raises(GenerationError):
+            gen.generate(SAMPLE_TEXT)
+
 
 class TestEnumMapping:
     def test_unknown_tag_dropped_in_non_strict(self):
