@@ -171,6 +171,56 @@ class TestIngestAndIndex:
 
 
 # ---------------------------------------------------------------------------- #
+# Regression: KB ingest must be visible in the document-management store
+# (https://github.com/tee-labs/SparkSage/issues — "文档管理里什么都看不到")
+# ---------------------------------------------------------------------------- #
+class TestSharedDocumentStore:
+    def test_kb_ingest_visible_in_service_store(self):
+        svc = _make_qa_service()
+        svc.ingest_and_index(b"data", "guide.md")
+        docs = svc.service.list_documents()
+        assert len(docs) == 1
+        assert docs[0].title == "Guide"
+
+    def test_kb_ingest_count_in_service_store(self):
+        svc = _make_qa_service()
+        svc.ingest_and_index(b"data", "guide.md")
+        assert svc.service.count_documents() == 1
+
+    def test_multi_kb_document_count_stays_scoped(self):
+        svc = _make_qa_service()
+        svc.ingest_and_index(b"data", "guide.md")
+        new_info = svc.create_knowledge_base("second")
+        svc.ingest_and_index(b"data", "guide2.md", kb_id=new_info.kb_id)
+        assert svc.knowledge_base.document_count() == 1
+        assert svc._kbs[new_info.kb_id].document_count() == 1
+        assert svc.service.count_documents() == 2
+
+    def test_cross_kb_remove_document_is_safe(self):
+        svc = _make_qa_service()
+        new_info = svc.create_knowledge_base("second")
+        result = svc.ingest_and_index(b"data", "guide.md", kb_id=new_info.kb_id)
+        deleted = svc.knowledge_base.remove_document(result.doc_id)
+        assert deleted is False
+        assert svc.service.get_document(result.doc_id) is not None
+        assert svc._kbs[new_info.kb_id].document_count() == 1
+
+    def test_cross_kb_update_document_raises(self):
+        svc = _make_qa_service()
+        new_info = svc.create_knowledge_base("second")
+        result = svc.ingest_and_index(b"data", "guide.md", kb_id=new_info.kb_id)
+        with pytest.raises(KeyError):
+            svc.knowledge_base.update_document(result.doc_id)
+
+    def test_kb_remove_also_removes_from_service_store(self):
+        svc = _make_qa_service()
+        result = svc.ingest_and_index(b"data", "guide.md")
+        assert svc.knowledge_base.remove_document(result.doc_id) is True
+        assert svc.service.get_document(result.doc_id) is None
+        assert svc.service.count_documents() == 0
+
+
+# ---------------------------------------------------------------------------- #
 # QAService.ask
 # ---------------------------------------------------------------------------- #
 class TestAsk:
@@ -308,6 +358,21 @@ class TestKBIngestRoute:
             files={"file": ("guide.md", b"data", "text/plain")},
         )
         assert resp.status_code == 503
+
+    def test_kb_ingest_visible_in_documents_route(self, qa_client):
+        _ingest(qa_client)
+        resp = qa_client.get("/api/v1/documents")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 1
+        assert body["items"][0]["title"] == "Guide"
+
+    def test_kb_remove_also_removes_from_documents_route(self, qa_client):
+        body = _ingest(qa_client)
+        doc_id = body["doc_id"]
+        qa_client.delete(f"/api/v1/knowledge_base/documents/{doc_id}")
+        resp = qa_client.get("/api/v1/documents")
+        assert resp.json()["total"] == 0
 
 
 class TestQueryRoute:
