@@ -1178,8 +1178,15 @@ def run(  # pragma: no cover - thin launcher
     port: int = 8000,
     reload: bool = False,
 ) -> None:
-    """Convenience launcher: ``python -m sparksage.api.app``."""
+    """Convenience launcher: ``python -m sparksage.api.app``.
+
+    Passes a unified ``log_config`` so uvicorn's startup / access logs share the
+    same ``%(asctime)s %(levelname)s %(name)s:`` shape as the ``sparksage``
+    application logger (see :func:`sparksage.logging_config.build_uvicorn_log_config`).
+    """
     import uvicorn
+
+    from sparksage.logging_config import build_uvicorn_log_config
 
     uvicorn.run(
         "sparksage.api.app:create_app",
@@ -1187,6 +1194,7 @@ def run(  # pragma: no cover - thin launcher
         port=port,
         reload=reload,
         factory=True,
+        log_config=build_uvicorn_log_config(),
     )
 
 
