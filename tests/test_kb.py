@@ -7,7 +7,14 @@ from __future__ import annotations
 
 import pytest
 
-from sparksage import BlockEmbedder, FakeEmbeddingClient, IdeaBlock, Tag, new_record
+from sparksage import (
+    BlockEmbedder,
+    FakeEmbeddingClient,
+    IdeaBlock,
+    InMemoryDocumentStore,
+    Tag,
+    new_record,
+)
 from sparksage.kb import (
     InMemoryKnowledgeBaseStore,
     KnowledgeBase,
@@ -167,3 +174,65 @@ class TestKnowledgeBase:
         kb.add_blocks([_block("A")])
         result = kb.search("deploy", k=3, filter=RetrievalFilter(kb_id=kb.kb_id))
         assert len(result.chunks) == 1
+
+
+class TestSharedDocumentStore:
+    """Several KBs may share one DocumentStore (the QAService wiring); the
+    per-KB document accounting + scoped mutation must still hold."""
+
+    def _two_kbs(self):
+        shared = InMemoryDocumentStore()
+        embedder = BlockEmbedder(FakeEmbeddingClient(dimension=64))
+        kb1 = KnowledgeBase(
+            info=KnowledgeBaseInfo(name="a"),
+            embedder=embedder,
+            document_store=shared,
+        )
+        kb2 = KnowledgeBase(
+            info=KnowledgeBaseInfo(name="b"),
+            embedder=embedder,
+            document_store=shared,
+        )
+        return shared, kb1, kb2
+
+    def test_document_count_isolated_per_kb(self):
+        shared, kb1, kb2 = self._two_kbs()
+        rec = new_record(body_markdown="body", source="file://d.md")
+        kb1.add_document(rec, blocks=[_block("A")])
+        # only kb1 counts it, even though the store is shared
+        assert kb1.document_count() == 1
+        assert kb2.document_count() == 0
+        assert len(shared) == 1
+
+    def test_owns_document_reflects_membership(self):
+        _shared, kb1, kb2 = self._two_kbs()
+        rec = new_record(body_markdown="body", source="file://d.md")
+        kb1.add_document(rec, blocks=[_block("A")])
+        assert kb1.owns_document(rec.doc_id)
+        assert not kb2.owns_document(rec.doc_id)
+
+    def test_remove_only_own_document(self):
+        shared, kb1, kb2 = self._two_kbs()
+        rec = new_record(body_markdown="body", source="file://d.md")
+        kb1.add_document(rec, blocks=[_block("A"), _block("B")])
+        # kb2 must not be able to remove kb1's document from the shared store
+        assert kb2.remove_document(rec.doc_id) is False
+        assert kb1.document_count() == 1
+        assert len(shared) == 1
+        assert kb1.block_count() == 2
+
+    def test_remove_cascades_within_owning_kb(self):
+        shared, kb1, kb2 = self._two_kbs()
+        rec = new_record(body_markdown="body", source="file://d.md")
+        kb1.add_document(rec, blocks=[_block("A"), _block("B")])
+        assert kb1.remove_document(rec.doc_id) is True
+        assert kb1.document_count() == 0
+        assert kb1.block_count() == 0
+        assert len(shared) == 0
+
+    def test_update_scoped_to_owning_kb(self):
+        _shared, kb1, kb2 = self._two_kbs()
+        rec = new_record(body_markdown="body", source="file://d.md")
+        kb1.add_document(rec, blocks=[_block("A")])
+        with pytest.raises(KeyError):
+            kb2.update_document(rec.doc_id)

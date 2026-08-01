@@ -162,10 +162,7 @@ class QAService:
         default_kb = (
             kb
             if kb is not None
-            else KnowledgeBase(
-                info=KnowledgeBaseInfo(name="default"),
-                embedder=embedder,
-            )
+            else self._new_knowledge_base(KnowledgeBaseInfo(name="default"))
         )
         self._register_kb(default_kb)
         self._active_kb_id: str = default_kb.kb_id
@@ -224,6 +221,22 @@ class QAService:
     # ------------------------------------------------------------------ #
     # multi-knowledge-base management
     # ------------------------------------------------------------------ #
+    def _new_knowledge_base(self, info: KnowledgeBaseInfo) -> KnowledgeBase:
+        """Construct a KB that shares the service's document store.
+
+        Every KB built here is wired onto ``SparkSageService.document_store`` so
+        a document ingested into any KB is immediately visible on the (global)
+        document-management page -- closing the gap where the page read a
+        different, never-written store. Each KB still owns its own document
+        accounting (:meth:`KnowledgeBase.document_count`) for per-KB browse
+        counts, and a separate dense + lexical index for retrieval isolation.
+        """
+        return KnowledgeBase(
+            info=info,
+            embedder=self._embedder,
+            document_store=self._service.document_store,
+        )
+
     def _register_kb(self, kb: KnowledgeBase) -> KnowledgeBase:
         """Register a live aggregate + persist its metadata to the store."""
         self._kbs[kb.kb_id] = kb
@@ -277,7 +290,7 @@ class QAService:
             tags=list(tags) if tags else [],
             **({"kb_id": kb_id} if kb_id else {}),
         )
-        kb = KnowledgeBase(info=info, embedder=self._embedder)
+        kb = self._new_knowledge_base(info)
         self._register_kb(kb)
         if set_active or len(self._kbs) == 1:
             self._active_kb_id = kb.kb_id
@@ -466,6 +479,23 @@ class QAService:
         """Remove a document *and* cascade-remove its indexed blocks."""
         kb = self._resolve_kb(kb_id)
         return kb.remove_document(doc_id)
+
+    def delete_document(self, doc_id: str) -> bool:
+        """Delete a document from whichever KB owns it (cascading blocks).
+
+        Because every KB shares the service document store, the (global)
+        document-management page can target any document; this finds the owning
+        KB and routes the removal through it so the linked IdeaBlocks are
+        cascade-removed too (no orphaned, still-retrievable chunks). A document
+        not owned by any KB (e.g. added through the document-management route
+        alone) falls back to a plain store delete. Returns whether a document
+        was removed.
+        """
+        doc_id = str(doc_id)
+        for kb in self._kbs.values():
+            if kb.owns_document(doc_id):
+                return kb.remove_document(doc_id)
+        return self._service.document_store.delete(doc_id)
 
     # ------------------------------------------------------------------ #
     # query: ask the knowledge base

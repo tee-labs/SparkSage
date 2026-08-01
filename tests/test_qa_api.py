@@ -169,6 +169,18 @@ class TestIngestAndIndex:
         result = svc.ingest_and_index(b"data", "docs/report.pdf")
         assert result.source.uri == "docs/report.pdf"
 
+    def test_ingest_visible_in_document_management(self):
+        # Regression: the document-management page reads svc.document_store,
+        # which must be the same store the KB writes to (issue: page was empty).
+        svc = _make_qa_service()
+        result = svc.ingest_and_index(b"data", "guide.md")
+        docs = svc.service.list_documents()
+        assert len(docs) == 1
+        assert docs[0].doc_id == result.doc_id
+        assert svc.service.count_documents() == 1
+        # round-trips through get too
+        assert svc.service.get_document(result.doc_id) is not None
+
 
 # ---------------------------------------------------------------------------- #
 # QAService.ask
@@ -388,6 +400,30 @@ class TestKnowledgeBaseRoute:
         assert resp.status_code == 404
 
 
+class TestDocumentManagementRoute:
+    """The global /api/v1/documents page must see QA-ingested documents."""
+
+    def test_documents_listed_after_kb_ingest(self, qa_client):
+        body = _ingest(qa_client)
+        resp = qa_client.get("/api/v1/documents")
+        assert resp.status_code == 200
+        page = resp.json()
+        assert page["total"] == 1
+        assert page["items"][0]["doc_id"] == body["doc_id"]
+
+    def test_delete_via_documents_route_cascades_blocks(self, qa_client):
+        body = _ingest(qa_client)
+        # document is visible, KB has 2 blocks
+        assert qa_client.get("/api/v1/documents").json()["total"] == 1
+        assert qa_client.get("/api/v1/knowledge_base").json()["block_count"] == 2
+        # deleting on the document-management page cascades to the KB index
+        resp = qa_client.delete(f"/api/v1/documents/{body['doc_id']}")
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] is True
+        assert qa_client.get("/api/v1/documents").json()["total"] == 0
+        assert qa_client.get("/api/v1/knowledge_base").json()["block_count"] == 0
+
+
 class TestFeedbackRoute:
     def test_record_feedback(self, qa_client):
         resp = qa_client.post(
@@ -583,6 +619,28 @@ class TestMultiKnowledgeBaseService:
         assert total == 0
         page, total = svc.list_blocks()
         assert total == 2
+
+    def test_document_counts_isolated_but_globally_visible(self):
+        # KBs share one document store; per-KB counts stay isolated while the
+        # (global) document-management page sees every ingested document.
+        svc = _make_qa_service()
+        svc.ingest_and_index(b"data", "guide.md")
+        second = svc.create_knowledge_base("second")
+        svc.ingest_and_index(b"data", "second.md", kb_id=second.kb_id)
+        assert svc.knowledge_base.document_count() == 1
+        assert svc._kbs[second.kb_id].document_count() == 1
+        # global document-management view aggregates across KBs
+        assert svc.service.count_documents() == 2
+
+    def test_delete_document_cascades_to_owning_kb(self):
+        svc = _make_qa_service()
+        result = svc.ingest_and_index(b"data", "guide.md")
+        assert svc.knowledge_base.block_count() == 2
+        # global delete routes to the owning KB and removes its blocks too
+        assert svc.delete_document(result.doc_id) is True
+        assert svc.knowledge_base.block_count() == 0
+        assert svc.knowledge_base.document_count() == 0
+        assert svc.service.count_documents() == 0
 
 
 class TestMultiKnowledgeBaseRoutes:

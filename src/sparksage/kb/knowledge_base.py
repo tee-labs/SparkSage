@@ -108,6 +108,8 @@ class KnowledgeBase:
         self._registry: dict[str, IdeaBlock] = {}
         self._doc_blocks: dict[str, set[str]] = {}
         self._block_doc: dict[str, str] = {}
+        # Doc ids owned by this KB (per-KB accounting over a possibly-shared store).
+        self._doc_ids: set[str] = set()
         self._retriever = Retriever(
             self._registry,
             self._store,
@@ -156,8 +158,17 @@ class KnowledgeBase:
         return len(self._registry)
 
     def document_count(self) -> int:
-        """Number of documents currently stored."""
-        return len(self._document_store)
+        """Number of documents owned by this knowledge base.
+
+        With a shared (multi-tenant) store this is the *per-KB* count -- only
+        documents added through this KB are counted -- so the knowledge-base
+        browse page stays accurate even when several KBs share one store.
+        """
+        return len(self._doc_ids)
+
+    def owns_document(self, doc_id: str) -> bool:
+        """Whether this KB owns ``doc_id`` (added via :meth:`add_document`)."""
+        return str(doc_id) in self._doc_ids
 
     def blocks(self) -> list[IdeaBlock]:
         """Return a snapshot of all blocks in the registry."""
@@ -243,6 +254,7 @@ class KnowledgeBase:
         :meth:`update_document` for hash-aware incremental re-indexing.
         """
         stored = self._document_store.save(record)
+        self._doc_ids.add(str(stored.doc_id))
         if blocks is not None:
             self.add_blocks(blocks, doc_id=stored.doc_id)
         return stored
@@ -263,6 +275,8 @@ class KnowledgeBase:
         document (the consistency gap the analysis flagged).
         """
         doc_id = str(doc_id)
+        if doc_id not in self._doc_ids:
+            raise KeyError(f"document not found: {doc_id}")
         existing = self._document_store.get(doc_id)
         if existing is None:
             raise KeyError(f"document not found: {doc_id}")
@@ -287,13 +301,18 @@ class KnowledgeBase:
 
         This is the index<->storage consistency guarantee: deleting a document
         also deletes its block vectors + registry entries, so the index can
-        never serve orphaned chunks from a removed document.
+        never serve orphaned chunks from a removed document. With a shared
+        store only this KB's own documents are removable -- a ``doc_id`` owned
+        by another KB is left untouched (returns ``False``).
         """
         doc_id = str(doc_id)
-        existed = self._document_store.delete(doc_id)
+        if doc_id not in self._doc_ids:
+            return False
+        self._doc_ids.discard(doc_id)
+        self._document_store.delete(doc_id)
         for bid in list(self._doc_blocks.get(doc_id, set())):
             self.remove_block(bid)
-        return existed
+        return True
 
     def reindex(self) -> int:
         """Rebuild the dense + lexical indexes from the live registry.
