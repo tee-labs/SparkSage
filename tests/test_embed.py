@@ -168,8 +168,23 @@ class TestOpenAIEmbeddingClientWiring:
         client = OpenAIEmbeddingClient(model="text-embedding-3-small", dimension=42)
         assert client.dimension == 42
 
-    def test_unknown_dimension_raises_before_first_call(self, monkeypatch):
-        _install_fake_openai(monkeypatch)
+    def test_unknown_dimension_probed_on_access(self, monkeypatch):
+        _install_fake_openai(monkeypatch, dim=7)
+        client = OpenAIEmbeddingClient(model="custom-model")
+        assert client.dimension == 7
+
+    def test_unknown_dimension_raises_when_probe_fails(self, monkeypatch):
+        def _boom(**kwargs: Any):
+            raise RuntimeError("endpoint unreachable")
+
+        module = types.ModuleType("openai")
+
+        class _OpenAI:
+            def __init__(self, **kwargs: Any) -> None:
+                self.embeddings = SimpleNamespace(create=_boom)
+
+        module.OpenAI = _OpenAI
+        monkeypatch.setitem(sys.modules, "openai", module)
         client = OpenAIEmbeddingClient(model="custom-model")
         with pytest.raises(RuntimeError, match="dimension"):
             _ = client.dimension

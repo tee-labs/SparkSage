@@ -186,12 +186,35 @@ class OpenAIEmbeddingClient:
     @property
     def dimension(self) -> int:
         if self._dim is None:
+            self._probe_dimension()
+        if self._dim is None:
             raise RuntimeError(
                 "embedding dimension is unknown for model "
-                f"{self._model!r}; call embed_batch() first or pass "
-                "dimension= to the constructor"
+                f"{self._model!r}; pass dimension= to the constructor"
             )
         return self._dim
+
+    def _probe_dimension(self) -> None:
+        """Probe the endpoint with a single short text to discover the dimension.
+
+        Called lazily the first time :attr:`dimension` is accessed for a model
+        not in :data:`_KNOWN_DIMS` and without an explicit ``dimension=`` (e.g.
+        when a :class:`~sparksage.kb.KnowledgeBase` sizes its vector store at
+        construction). A single short text is embedded; the length of the
+        returned vector fixes ``_dim``. Errors are swallowed so callers see the
+        :class:`RuntimeError` from :attr:`dimension` with actionable guidance.
+        """
+        try:
+            sample = self.embed_batch(["dimension probe"])
+            if sample and sample[0]:
+                self._dim = len(sample[0])
+                _logger.debug(
+                    "probed embedding dimension for %r: %d", self._model, self._dim
+                )
+        except Exception as exc:
+            _logger.debug(
+                "dimension probe failed for %r: %s", self._model, exc
+            )
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         if not texts:
