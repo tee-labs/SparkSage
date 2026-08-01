@@ -445,7 +445,8 @@ class SparkSageService:
             See :meth:`convert`. ``clean`` defaults to ``True`` here because raw
             converted text is rarely tag-extraction-ready.
         title:
-            Explicit title override. Falls back to the backend-extracted title.
+            Explicit title override. Falls back to the backend-extracted title,
+            then to the uploaded filename's stem.
         tags:
             Caller-supplied tags. When non-empty they win; otherwise
             ``auto_tag`` fills them.
@@ -466,7 +467,8 @@ class SparkSageService:
         """
         conv = self.convert(data, filename, clean=clean)
         text = conv.markdown
-        resolved_title = title if title is not None else conv.title
+        title_fallback = conv.title or (Path(filename).stem if filename else None)
+        resolved_title = title if title is not None else title_fallback
 
         final_tags = list(tags) if tags else []
         if not final_tags and auto_tag:

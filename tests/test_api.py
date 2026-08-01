@@ -439,9 +439,11 @@ DOC_MARKDOWN = (
 )
 
 
-def _doc_service(*, markdown: str = DOC_MARKDOWN) -> SparkSageService:
+def _doc_service(
+    *, markdown: str = DOC_MARKDOWN, title: str | None = "Revenue Report"
+) -> SparkSageService:
     return SparkSageService(
-        converter=_fake_converter(markdown=markdown, title="Revenue Report"),
+        converter=_fake_converter(markdown=markdown, title=title),
         cleaner=TextCleaner(),
         generator=None,
     )
@@ -500,6 +502,17 @@ class TestServiceDocuments:
         )
         assert rec.title == "Custom"
         assert rec.doc_id == "my-id"
+
+    def test_ingest_falls_back_to_filename_stem_when_no_title(self):
+        svc = _doc_service(markdown="# Body", title=None)
+        rec = svc.ingest_document(b"data", "quarterly-report.pdf", top_k=4)
+        assert rec.title == "quarterly-report"
+        assert rec.source.title == "quarterly-report"
+
+    def test_ingest_title_none_when_no_title_and_no_filename(self):
+        svc = _doc_service(markdown="# Body", title=None)
+        rec = svc.ingest_document(b"data", None)
+        assert rec.title is None
 
     def test_list_filter_and_count(self):
         svc = _doc_service()
