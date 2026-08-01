@@ -45,7 +45,18 @@ _logger = logging.getLogger(__name__)
 #: How large a dense pool to fetch relative to ``k`` before post-filtering.
 DEFAULT_FETCH_FACTOR = 8
 #: Absolute floor on the dense pool size (so tiny ``k`` still over-fetches).
-DEFAULT_MIN_FETCH = 30
+#:
+#: Empirically a reranker needs a candidate pool of at least ~50 before it has
+#: enough selection space to move the needle -- with the previous ``30`` a
+#: typical ``k=5`` query produced a pool of only ``40``, just under that line.
+#: The ``50`` floor keeps the reranker effective for small ``k``.
+DEFAULT_MIN_FETCH = 50
+
+#: Default cosine threshold above which two post-rerank chunks are treated as
+#: semantic near-duplicates and the weaker one is dropped. ``0.9`` is strict --
+#: only near-identical blocks (paraphrases / copies) collapse -- so distinct
+#: content is never wrongly merged. See :func:`_dedup_chunks_by_embedding`.
+DEFAULT_DEDUP_THRESHOLD = 0.9
 
 
 class Retriever:
@@ -74,6 +85,12 @@ class Retriever:
     fetch_factor, min_fetch:
         The dense pool size is ``max(min_fetch, k * fetch_factor)`` -- large
         enough that post-filtering rarely starves the final ``k``.
+    dedup_threshold:
+        Optional cosine threshold above which two post-rerank chunks are treated
+        as semantic near-duplicates and the weaker one is dropped (default
+        :data:`DEFAULT_DEDUP_THRESHOLD` = ``0.9``). Blocks whose embeddings
+        reach the threshold collapse, keeping the best-scoring representative
+        and saving reader context / token budget. ``None`` disables dedup.
 
     Examples
     --------
@@ -100,11 +117,19 @@ class Retriever:
         reranker: Reranker | None = None,
         fetch_factor: int = DEFAULT_FETCH_FACTOR,
         min_fetch: int = DEFAULT_MIN_FETCH,
+        dedup_threshold: float | None = DEFAULT_DEDUP_THRESHOLD,
     ) -> None:
         if fetch_factor < 1:
             raise ValueError("fetch_factor must be >= 1")
         if min_fetch < 1:
             raise ValueError("min_fetch must be >= 1")
+        if dedup_threshold is not None:
+            if isinstance(dedup_threshold, bool) or not isinstance(
+                dedup_threshold, (int, float)
+            ):
+                raise TypeError("dedup_threshold must be a float or None")
+            if not 0.0 <= dedup_threshold <= 1.0:
+                raise ValueError("dedup_threshold must be in [0.0, 1.0] or None")
         self._registry = registry
         self._store = store
         self._embedder = embedder
@@ -112,6 +137,7 @@ class Retriever:
         self._reranker: Reranker = reranker if reranker is not None else IdentityReranker()
         self._fetch_factor = fetch_factor
         self._min_fetch = min_fetch
+        self._dedup_threshold: float | None = dedup_threshold
 
     @property
     def store(self) -> VectorStore:
@@ -128,6 +154,11 @@ class Retriever:
     @property
     def reranker(self) -> Reranker:
         return self._reranker
+
+    @property
+    def dedup_threshold(self) -> float | None:
+        """The post-rerank semantic-dedup cosine threshold, or ``None`` if off."""
+        return self._dedup_threshold
 
     def index(self, blocks: list[IdeaBlock]) -> None:
         """(Re)build the dense + lexical indexes from ``blocks``.
@@ -210,12 +241,32 @@ class Retriever:
             len(raw_lexical) - len(lexical_hits)
         )
 
+        dedup_on = self._dedup_threshold is not None
+
         if use_rerank and not isinstance(self._reranker, IdentityReranker):
-            resolved = self._reranker.rerank(query, resolved, top_n=k)
+            # When dedup is on, keep the full reranked pool so dedup does not
+            # starve the final ``k``; the slice to ``k`` happens at the end.
+            rerank_top = None if dedup_on else k
+            resolved = self._reranker.rerank(query, resolved, top_n=rerank_top)
             reranked = True
         else:
-            resolved = [_replaced(c, rank=i) for i, c in enumerate(resolved[:k])]
             reranked = False
+
+        if dedup_on:
+            before = len(resolved)
+            resolved = _dedup_chunks_by_embedding(resolved, self._dedup_threshold)  # type: ignore[arg-type]
+            if len(resolved) < before:
+                _logger.debug(
+                    "semantic dedup %d -> %d chunks (threshold=%.2f)",
+                    before,
+                    len(resolved),
+                    self._dedup_threshold,
+                )
+            resolved = [_replaced(c, rank=i) for i, c in enumerate(resolved)]
+        elif not reranked:
+            resolved = [_replaced(c, rank=i) for i, c in enumerate(resolved[:k])]
+
+        resolved = resolved[:k]
 
         return RetrievalResult(
             query=str(query),
@@ -282,6 +333,39 @@ def _replaced(chunk: RetrievedChunk, *, rank: int) -> RetrievedChunk:
     return replace(chunk, rank=rank)
 
 
+def _dot(a: list[float], b: list[float]) -> float:
+    """Pure-Python dot product (vectors are L2-normalized, so cosine)."""
+    return sum(x * y for x, y in zip(a, b, strict=True))
+
+
+def _dedup_chunks_by_embedding(
+    chunks: list[RetrievedChunk],
+    threshold: float,
+) -> list[RetrievedChunk]:
+    """Greedy near-duplicate removal over an ordered (best-first) chunk list.
+
+    Walks ``chunks`` in order and keeps a chunk unless its block embedding is
+    at or above ``threshold`` cosine similarity to any *already kept* chunk --
+    so the best-scoring representative survives and its near-duplicate
+    paraphrases / copies are dropped. Blocks without an embedding are always
+    kept (nothing to compare against). This is the query-time counterpart of
+    :func:`sparksage.embed.find_similar_pairs`, applied to an *ordered* single
+    retrieval result rather than an all-pairs corpus scan.
+    """
+    kept: list[RetrievedChunk] = []
+    kept_vecs: list[list[float]] = []
+    for chunk in chunks:
+        vec = chunk.block.embedding
+        if vec is None:
+            kept.append(chunk)
+            continue
+        if any(_dot(vec, kv) >= threshold for kv in kept_vecs):
+            continue
+        kept.append(chunk)
+        kept_vecs.append(list(vec))
+    return kept
+
+
 @dataclass
 class RetrievalConfig:
     """Convenience bundle for the knobs :class:`Retriever.search` exposes.
@@ -293,11 +377,13 @@ class RetrievalConfig:
     k: int = 5
     fetch_factor: int = DEFAULT_FETCH_FACTOR
     min_fetch: int = DEFAULT_MIN_FETCH
+    dedup_threshold: float | None = DEFAULT_DEDUP_THRESHOLD
     use_lexical: bool = True
     use_rerank: bool = True
 
 
 __all__ = [
+    "DEFAULT_DEDUP_THRESHOLD",
     "DEFAULT_FETCH_FACTOR",
     "DEFAULT_MIN_FETCH",
     "RetrievalConfig",

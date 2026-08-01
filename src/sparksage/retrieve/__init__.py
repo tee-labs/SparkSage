@@ -44,7 +44,12 @@ Example
     result = retriever.search("how to deploy", k=5)
 """
 
-from sparksage.retrieve.fusion import DEFAULT_RRF_K, reciprocal_rank_fusion
+from sparksage.retrieve.fusion import (
+    DEFAULT_RRF_K,
+    DEFAULT_TUNE_K_CANDIDATES,
+    reciprocal_rank_fusion,
+    tune_rrf_k,
+)
 from sparksage.retrieve.grader import (
     DEFAULT_GRADE_TOP_K,
     DEFAULT_RELEVANCE,
@@ -78,6 +83,7 @@ from sparksage.retrieve.models import (
     RetrievedChunk,
 )
 from sparksage.retrieve.orchestrator import (
+    DEFAULT_DEDUP_THRESHOLD,
     DEFAULT_FETCH_FACTOR,
     DEFAULT_MIN_FETCH,
     RetrievalConfig,
@@ -89,12 +95,14 @@ __all__ = [
     "BM25Retriever",
     "Citation",
     "DEFAULT_B",
+    "DEFAULT_DEDUP_THRESHOLD",
     "DEFAULT_FETCH_FACTOR",
     "DEFAULT_GRADE_TOP_K",
     "DEFAULT_K1",
     "DEFAULT_MIN_FETCH",
     "DEFAULT_RELEVANCE",
     "DEFAULT_RRF_K",
+    "DEFAULT_TUNE_K_CANDIDATES",
     "GraderEmptyResponseError",
     "GraderError",
     "GraderResponseParseError",
@@ -121,4 +129,5 @@ __all__ = [
     "parse_relevance_response",
     "reciprocal_rank_fusion",
     "tokenize",
+    "tune_rrf_k",
 ]

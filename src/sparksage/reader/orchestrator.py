@@ -25,7 +25,11 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from sparksage.reader.budget import DEFAULT_CHARS_PER_TOKEN, trim_to_token_budget
+from sparksage.reader.budget import (
+    DEFAULT_CHARS_PER_TOKEN,
+    reorder_head_tail,
+    trim_to_token_budget,
+)
 from sparksage.reader.faithfulness import FaithfulnessJudge
 from sparksage.reader.generator import AnswerGenerator
 from sparksage.reader.schema import FaithfulnessResult, GeneratedAnswer
@@ -109,6 +113,12 @@ class Reader:
     context_keep_min:
         Minimum chunks to retain even when the first chunk exceeds the budget
         (default ``1``). See :func:`~sparksage.reader.budget.trim_to_token_budget`.
+    reorder_context:
+        When ``True`` and ``max_context_tokens`` is set, interleave the trimmed
+        best-first list so the strongest chunks land at the head *and* tail --
+        the lost-in-the-middle guard (see
+        :func:`~sparksage.reader.budget.reorder_head_tail`). Default ``False``
+        to preserve legacy head-only ordering. Ignored when trimming is off.
 
     Examples
     --------
@@ -132,6 +142,7 @@ class Reader:
         chars_per_token: float = DEFAULT_CHARS_PER_TOKEN,
         token_counter: Callable[[str], int] | None = None,
         context_keep_min: int = 1,
+        reorder_context: bool = False,
     ) -> None:
         if not isinstance(generator, AnswerGenerator):
             raise TypeError("generator must implement the AnswerGenerator protocol")
@@ -167,6 +178,7 @@ class Reader:
         self._chars_per_token = chars_per_token
         self._token_counter = token_counter
         self._context_keep_min = context_keep_min
+        self._reorder_context = reorder_context
 
     @property
     def generator(self) -> AnswerGenerator:
@@ -261,7 +273,9 @@ class Reader:
         """Trim ``chunks`` to the configured token budget (no-op when off).
 
         Applied once, before generation and judging, so the judge scores the
-        answer against exactly the context the generator saw.
+        answer against exactly the context the generator saw. When
+        ``reorder_context`` is set the trimmed list is interleaved head/tail so
+        the strongest chunks sit at both ends -- the lost-in-the-middle guard.
         """
         if self._max_context_tokens is None:
             return chunks
@@ -279,6 +293,8 @@ class Reader:
                 len(trimmed),
                 self._max_context_tokens,
             )
+        if self._reorder_context and len(trimmed) > 1:
+            trimmed = reorder_head_tail(trimmed)
         return trimmed
 
     def _abstain(
