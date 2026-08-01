@@ -165,6 +165,7 @@ class QAService:
             else KnowledgeBase(
                 info=KnowledgeBaseInfo(name="default"),
                 embedder=embedder,
+                document_store=self._service.document_store,
             )
         )
         self._register_kb(default_kb)
@@ -277,7 +278,11 @@ class QAService:
             tags=list(tags) if tags else [],
             **({"kb_id": kb_id} if kb_id else {}),
         )
-        kb = KnowledgeBase(info=info, embedder=self._embedder)
+        kb = KnowledgeBase(
+            info=info,
+            embedder=self._embedder,
+            document_store=self._service.document_store,
+        )
         self._register_kb(kb)
         if set_active or len(self._kbs) == 1:
             self._active_kb_id = kb.kb_id

@@ -108,6 +108,7 @@ class KnowledgeBase:
         self._registry: dict[str, IdeaBlock] = {}
         self._doc_blocks: dict[str, set[str]] = {}
         self._block_doc: dict[str, str] = {}
+        self._doc_ids: set[str] = set()
         self._retriever = Retriever(
             self._registry,
             self._store,
@@ -156,8 +157,13 @@ class KnowledgeBase:
         return len(self._registry)
 
     def document_count(self) -> int:
-        """Number of documents currently stored."""
-        return len(self._document_store)
+        """Number of documents owned by this knowledge base.
+
+        When the document store is shared across KBs (as in
+        :class:`~sparksage.api.qa_service.QAService`), this tracks only the
+        documents added via :meth:`add_document`, not the whole store.
+        """
+        return len(self._doc_ids)
 
     def blocks(self) -> list[IdeaBlock]:
         """Return a snapshot of all blocks in the registry."""
@@ -248,6 +254,7 @@ class KnowledgeBase:
         :meth:`update_document` for hash-aware incremental re-indexing.
         """
         stored = self._document_store.save(record)
+        self._doc_ids.add(stored.doc_id)
         if blocks is not None:
             self.add_blocks(blocks, doc_id=stored.doc_id)
         return stored
@@ -268,9 +275,9 @@ class KnowledgeBase:
         document (the consistency gap the analysis flagged).
         """
         doc_id = str(doc_id)
-        existing = self._document_store.get(doc_id)
-        if existing is None:
+        if doc_id not in self._doc_ids:
             raise KeyError(f"document not found: {doc_id}")
+        existing = self._document_store.get(doc_id)
 
         new_record = record if record is not None else existing
         body_changed = (new_record.content_hash or content_hash_of(
@@ -295,7 +302,10 @@ class KnowledgeBase:
         never serve orphaned chunks from a removed document.
         """
         doc_id = str(doc_id)
+        if doc_id not in self._doc_ids:
+            return False
         existed = self._document_store.delete(doc_id)
+        self._doc_ids.discard(doc_id)
         removed = 0
         for bid in list(self._doc_blocks.get(doc_id, set())):
             self.remove_block(bid)
