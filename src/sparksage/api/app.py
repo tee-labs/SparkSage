@@ -580,15 +580,21 @@ def create_app(
         summary="List stored documents (optionally filter by tag / text)",
     )
     async def list_documents(
-        tag: Annotated[str | None, Query(description="Filter to documents with this tag.")] = None,
+        tag: Annotated[
+            str | None,
+            Query(description="Comma-separated tag filter (any-match OR)."),
+        ] = None,
         q: Annotated[
             str | None, Query(description="Substring search over title + body.")
         ] = None,
         limit: Annotated[int, Query(ge=1, le=1000, description="Page size.")] = 100,
         offset: Annotated[int, Query(ge=0, description="Page offset.")] = 0,
     ) -> DocumentListResponse:
-        items = svc.list_documents(tag=tag, q=q, limit=limit, offset=offset)
-        total = svc.count_documents(tag=tag)
+        tags = None
+        if tag:
+            tags = [p.strip() for p in tag.split(",") if p.strip()]
+        items = svc.list_documents(tags=tags, q=q, limit=limit, offset=offset)
+        total = svc.count_documents(tags=tags)
         return to_document_list_response(
             items, total=total, tag=tag, q=q, limit=limit, offset=offset
         )
@@ -778,6 +784,7 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
         FeedbackStatsResponse,
         IngestAndIndexResponse,
         KnowledgeBaseResponse,
+        TagsResponse,
         _build_filter_from_request,
         _to_ask_response,
         _to_block_out,
@@ -960,6 +967,14 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
         return BlockListResponse(
             items=items, count=len(items), total=total, limit=limit, offset=offset
         )
+
+    @app.get(
+        "/api/v1/knowledge_base/tags",
+        response_model=TagsResponse,
+        summary="Distinct tag vocabulary across indexed IdeaBlocks",
+    )
+    async def kb_list_tags() -> TagsResponse:
+        return TagsResponse(tags=qa_svc.list_block_tags())
 
     @app.get(
         "/api/v1/feedback/records",

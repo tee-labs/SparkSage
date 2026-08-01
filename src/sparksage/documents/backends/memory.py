@@ -14,7 +14,7 @@ Postgres backend) without touching the service.
 from __future__ import annotations
 
 from sparksage.documents.models import DocumentRecord
-from sparksage.documents.store import _validate_pagination
+from sparksage.documents.store import _normalize_tags, _validate_pagination
 
 
 class InMemoryDocumentStore:
@@ -48,12 +48,13 @@ class InMemoryDocumentStore:
         self,
         *,
         tag: str | None = None,
+        tags: list[str] | None = None,
         q: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[DocumentRecord]:
         _validate_pagination(limit, offset)
-        tag_norm = tag.strip() if tag else None
+        required = _normalize_tags(tag, tags)
         query_norm = q.strip().lower() if q else None
         records = sorted(
             self._records.values(),
@@ -62,7 +63,7 @@ class InMemoryDocumentStore:
         )
         out: list[DocumentRecord] = []
         for rec in records:
-            if tag_norm is not None and tag_norm not in rec.tags:
+            if required and not (set(rec.tags) & required):
                 continue
             if query_norm is not None:
                 hay = (
@@ -76,11 +77,13 @@ class InMemoryDocumentStore:
     def delete(self, doc_id: str) -> bool:
         return self._records.pop(str(doc_id), None) is not None
 
-    def count(self, *, tag: str | None = None) -> int:
-        if tag is None:
+    def count(self, *, tag: str | None = None, tags: list[str] | None = None) -> int:
+        required = _normalize_tags(tag, tags)
+        if not required:
             return len(self._records)
-        tag_norm = tag.strip()
-        return sum(1 for r in self._records.values() if tag_norm in r.tags)
+        return sum(
+            1 for r in self._records.values() if set(r.tags) & required
+        )
 
     def list_tags(self) -> list[str]:
         seen: set[str] = set()

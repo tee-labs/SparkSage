@@ -29,12 +29,11 @@ export default function ConfigPage() {
     setLoading(true);
     try {
       const data = await api.getConfig();
-      const norm = { ...data.variables };
-      norm.SPARKSAGE_TAGS_ZH = norm.SPARKSAGE_TAGS_ZH
-        ? ['1', 'true', 'yes', 'on'].includes(norm.SPARKSAGE_TAGS_ZH.toLowerCase())
-          ? 'true'
-          : 'false'
-        : 'false';
+      const norm: Record<string, unknown> = { ...data.variables };
+      const raw = norm.SPARKSAGE_TAGS_ZH;
+      norm.SPARKSAGE_TAGS_ZH = ['1', 'true', 'yes', 'on'].includes(
+        (typeof raw === 'string' ? raw : '').toLowerCase(),
+      );
       form.setFieldsValue(norm);
       setResult(null);
     } catch (e) {
@@ -54,10 +53,10 @@ export default function ConfigPage() {
     setSaving(true);
     try {
       const patch: Record<string, string> = {};
-      Object.entries(values as Record<string, string | undefined>).forEach(([k, v]) => {
+      Object.entries(values as Record<string, unknown>).forEach(([k, v]) => {
         if (v === undefined || v === null) return;
         if (k === 'SPARKSAGE_TAGS_ZH') {
-          patch[k] = v === 'true' ? 'true' : 'false';
+          patch[k] = v ? 'true' : 'false';
           return;
         }
         if (SENSITIVE.has(k) && v === '****') return;

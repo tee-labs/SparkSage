@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from sparksage.documents.models import DocumentRecord
-from sparksage.documents.store import _validate_pagination
+from sparksage.documents.store import _normalize_tags, _validate_pagination
 from sparksage.schema.source import SourceRef
 
 _logger = logging.getLogger(__name__)
@@ -229,21 +229,24 @@ class SqliteDocumentStore:
         self,
         *,
         tag: str | None = None,
+        tags: list[str] | None = None,
         q: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[DocumentRecord]:
         _validate_pagination(limit, offset)
-        tag_norm = tag.strip() if tag else None
+        required = _normalize_tags(tag, tags)
         query_norm = q.strip().lower() if q else None
 
         where: list[str] = []
         params: list[Any] = []
-        if tag_norm is not None:
+        if required:
+            placeholders = ",".join(["?"] * len(required))
             where.append(
-                f'doc_id IN (SELECT doc_id FROM "{self._tags_table}" WHERE tag = ?)'
+                f'doc_id IN (SELECT doc_id FROM "{self._tags_table}" '
+                f"WHERE tag IN ({placeholders}))"
             )
-            params.append(tag_norm)
+            params.extend(sorted(required))
         if query_norm is not None:
             where.append("(LOWER(title) LIKE ? OR LOWER(body_markdown) LIKE ?)")
             like = f"%{query_norm}%"
@@ -280,19 +283,20 @@ class SqliteDocumentStore:
             self._conn.commit()
             return existed
 
-    def count(self, *, tag: str | None = None) -> int:
-        if tag is None:
+    def count(self, *, tag: str | None = None, tags: list[str] | None = None) -> int:
+        required = _normalize_tags(tag, tags)
+        if not required:
             with self._lock:
                 cur = self._conn.cursor()
                 cur.execute(f'SELECT COUNT(*) AS c FROM "{self._table}"')
                 return int(cur.fetchone()["c"])
-        tag_norm = tag.strip()
+        placeholders = ",".join(["?"] * len(required))
         with self._lock:
             cur = self._conn.cursor()
             cur.execute(
                 f'SELECT COUNT(DISTINCT t.doc_id) AS c '
-                f'FROM "{self._tags_table}" t WHERE t.tag = ?',
-                (tag_norm,),
+                f'FROM "{self._tags_table}" t WHERE t.tag IN ({placeholders})',
+                sorted(required),
             )
             return int(cur.fetchone()["c"])
 

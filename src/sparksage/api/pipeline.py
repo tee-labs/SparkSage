@@ -463,12 +463,15 @@ class SparkSageService:
         self,
         *,
         tag: str | None = None,
+        tags: list[str] | None = None,
         q: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[DocumentRecord]:
-        """List documents, optionally filtered by tag and/or a title/body query."""
-        return self.document_store.list(tag=tag, q=q, limit=limit, offset=offset)
+        """List documents, optionally filtered by tag(s) and/or a title/body query."""
+        return self.document_store.list(
+            tag=tag, tags=tags, q=q, limit=limit, offset=offset
+        )
 
     def get_document(self, doc_id: str) -> DocumentRecord | None:
         """Return the document for ``doc_id`` (or ``None`` if absent)."""
@@ -478,9 +481,11 @@ class SparkSageService:
         """Delete ``doc_id``. Return whether a record was removed."""
         return self.document_store.delete(doc_id)
 
-    def count_documents(self, *, tag: str | None = None) -> int:
-        """Number of stored documents, optionally restricted to a tag."""
-        return self.document_store.count(tag=tag)
+    def count_documents(
+        self, *, tag: str | None = None, tags: list[str] | None = None
+    ) -> int:
+        """Number of stored documents, optionally restricted to tag(s)."""
+        return self.document_store.count(tag=tag, tags=tags)
 
     def list_document_tags(self) -> list[str]:
         """Return the distinct tag vocabulary across all stored documents."""

@@ -50,37 +50,56 @@ export default function IngestPage() {
   };
 
   const run = async () => {
-    const target = files.find((f) => f.originFileObj);
-    if (!target?.originFileObj) {
+    const targets = files
+      .map((f) => f.originFileObj)
+      .filter((f): f is NonNullable<typeof f> => f != null);
+    if (!targets.length) {
       message.warning('请先上传文件');
       return;
     }
     const values = await form.validateFields();
-    const file = target.originFileObj as File;
+    const clean = Boolean(values.clean);
     setLoading(true);
     setLogs([]);
     try {
       if (mode === 'convert') {
-        pushLog('开始转换');
-        const res = await api.convert(file, Boolean(values.clean));
-        pushLog('转换完成');
-        setConvertResult(res);
+        const parts: string[] = [];
+        let last: ConvertResponse | null = null;
+        for (const file of targets) {
+          pushLog(`开始转换：${file.name}`);
+          const res = await api.convert(file, clean);
+          pushLog(`转换完成：${file.name}`);
+          parts.push(`### ${file.name}\n\n${res.markdown}`);
+          last = res;
+        }
+        setConvertResult({
+          ...(last as ConvertResponse),
+          markdown: parts.join('\n\n'),
+        });
+        pushLog('全部转换完成');
       } else {
-        pushLog('开始生成 IdeaBlock');
         const useKb = Boolean(values.kb_ingest);
         const opts = {
-          clean: Boolean(values.clean),
+          clean,
           max_blocks: values.max_blocks ?? null,
           language: values.language,
           tags: values.tags,
           auto_tag: Boolean(values.auto_tag),
           top_k: values.top_k,
         };
-        const res = useKb
-          ? await api.kbIngest(file, opts)
-          : await api.generate(file, opts);
-        pushLog(`生成完成：${res.blocks.length} 个 block`);
-        setGenerateResult(res);
+        const allBlocks: IdeaBlock[] = [];
+        let last: GenerateResponse | null = null;
+        for (const file of targets) {
+          pushLog(`开始生成 IdeaBlock：${file.name}`);
+          const res = useKb
+            ? await api.kbIngest(file, opts)
+            : await api.generate(file, opts);
+          pushLog(`生成完成：${file.name}（${res.blocks.length} 个 block）`);
+          allBlocks.push(...res.blocks);
+          last = res;
+        }
+        setGenerateResult({ ...(last as GenerateResponse), blocks: allBlocks });
+        pushLog(`全部生成完成：共 ${allBlocks.length} 个 block`);
       }
     } catch (e) {
       message.error(errText(e));

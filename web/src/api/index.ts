@@ -112,6 +112,7 @@ export const api = {
     limit?: number;
     offset?: number;
   } = {}) => client.get<BlockListResponse>('/knowledge_base/blocks', { params }).then((r) => r.data),
+  kbTags: () => client.get<TagsResponse>('/knowledge_base/tags').then((r) => r.data),
 
   // ---- QA ----
   ask: (body: {

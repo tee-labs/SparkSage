@@ -28,7 +28,6 @@ const STATUS_COLORS: Record<string, string> = {
   MERGED: 'warning',
   DRAFT: 'default',
   ARCHIVED: 'default',
-  GENERATED: 'processing',
 };
 
 const PAGE_SIZE = 20;
@@ -43,11 +42,12 @@ export default function KnowledgeBasePage() {
   const [status, setStatus] = useState<string>();
   const [loading, setLoading] = useState(false);
   const [active, setActive] = useState<BlockOut | null>(null);
+  const [tags, setTags] = useState<string[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [kb, blk] = await Promise.all([
+      const [kb, blk, tagsRes] = await Promise.all([
         api.kbInfo(),
         api.listBlocks({
           tag: tagFilter.length ? tagFilter.join(',') : undefined,
@@ -56,10 +56,12 @@ export default function KnowledgeBasePage() {
           limit: PAGE_SIZE,
           offset: (page - 1) * PAGE_SIZE,
         }),
+        api.kbTags(),
       ]);
       setInfo(kb);
       setBlocks(blk.items);
       setTotal(blk.total);
+      setTags(tagsRes.tags);
     } catch (e) {
       message.error(errText(e));
     } finally {
@@ -71,9 +73,7 @@ export default function KnowledgeBasePage() {
     load();
   }, [load]);
 
-  const tagOptions = Array.from(
-    new Set(blocks.flatMap((b) => b.tags ?? [])),
-  ).map((t) => ({ value: t, label: t }));
+  const tagOptions = tags.map((t) => ({ value: t, label: t }));
 
   const card = (b: BlockOut) => (
     <Card
@@ -163,7 +163,7 @@ export default function KnowledgeBasePage() {
               setStatus(v);
               setPage(1);
             }}
-            options={['ACTIVE', 'MERGED', 'DRAFT', 'ARCHIVED', 'GENERATED'].map((s) => ({
+            options={['ACTIVE', 'MERGED', 'DRAFT', 'ARCHIVED'].map((s) => ({
               value: s,
               label: s,
             }))}

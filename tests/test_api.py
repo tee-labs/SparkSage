@@ -512,6 +512,18 @@ class TestServiceDocuments:
         q = svc.list_documents(q="report")
         assert {r.doc_id for r in q} == {a.doc_id, b.doc_id}
 
+    def test_list_multi_tag_any_match(self):
+        svc = _doc_service()
+        a = svc.ingest_document(b"a", "a.md", tags=["alpha"])
+        b = svc.ingest_document(b"b", "b.md", tags=["beta"])
+        svc.ingest_document(b"c", "c.md", tags=["gamma"])
+        assert {r.doc_id for r in svc.list_documents(tags=["alpha", "beta"])} == {
+            a.doc_id,
+            b.doc_id,
+        }
+        assert svc.count_documents(tags=["alpha", "beta"]) == 2
+        assert svc.list_documents(tags=["missing"]) == []
+
     def test_get_missing_is_none(self):
         assert _doc_service().get_document("nope") is None
 
