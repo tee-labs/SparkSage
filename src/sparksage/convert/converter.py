@@ -187,8 +187,15 @@ class MarkdownConverter:
         return self._backend
 
     def convert(self, source: Any) -> ConversionResult:
-        """Convert a single file path / URI / stream to a :class:`ConversionResult`."""
+        """Convert a single file path / URI / stream to a :class:`ConversionResult."""
+        _logger.debug("converting %s", _source_descriptor(source))
         markdown, title = self._backend.convert(source)
+        _logger.debug(
+            "converted %s: markdown_len=%d title=%s",
+            _source_descriptor(source),
+            len(markdown),
+            title,
+        )
         return ConversionResult(
             markdown=markdown,
             source=_source_descriptor(source),

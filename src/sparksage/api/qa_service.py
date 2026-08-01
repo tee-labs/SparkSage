@@ -412,10 +412,21 @@ class QAService:
             )
 
         kb = self._resolve_kb(kb_id)
+        _logger.debug(
+            "ingest_and_index start: filename=%s kb=%s clean=%s max_blocks=%s lang=%s",
+            filename,
+            kb.kb_id,
+            clean,
+            max_blocks,
+            language,
+        )
         conv = self._service.convert(data, filename, clean=clean)
         text = conv.markdown
         source = conv.source
         resolved_title = title if title is not None else conv.title
+        _logger.debug(
+            "ingest convert done: markdown_len=%d title=%s", len(text), resolved_title
+        )
 
         gen = self._service.generator
         assert gen is not None
@@ -425,16 +436,19 @@ class QAService:
             max_blocks=max_blocks,
             language=language,
         )
+        _logger.debug("ingest generate done: %d blocks", len(blocks))
 
         final_tags = list(tags) if tags else []
         if not final_tags and auto_tag:
             final_tags = self._service.auto_tag(text, top_k=top_k)
+            _logger.debug("ingest auto-tag done: %d tags", len(final_tags))
 
         summary: str | None = None
         if summarize:
             summary = self._service.summarize_text(
                 text, max_sentences=max_summary_sentences
             )
+            _logger.debug("ingest summarize done: %d chars", len(summary or ""))
 
         record = new_record(
             title=resolved_title,
@@ -491,7 +505,15 @@ class QAService:
         """
         kb = self._resolve_kb(kb_id, filter=filter)
         engine = self._engine_for(kb.kb_id)
-        return engine.ask(
+        _logger.debug(
+            "ask: query=%r kb=%s k=%s lexical=%s rerank=%s",
+            query[:80],
+            kb.kb_id,
+            k,
+            use_lexical,
+            use_rerank,
+        )
+        result = engine.ask(
             query,
             context=context,
             filter=filter,
@@ -500,6 +522,15 @@ class QAService:
             use_rerank=use_rerank,
             use_cache=use_cache,
         )
+        n_chunks = len(result.retrieval.chunks) if result.retrieval else 0
+        _logger.info(
+            "answered %r: abstained=%s chunks=%d cached=%s",
+            query[:80],
+            result.abstained,
+            n_chunks,
+            result.cached,
+        )
+        return result
 
     # ------------------------------------------------------------------ #
     # knowledge-base stats
