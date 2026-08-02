@@ -44,6 +44,8 @@ __all__ = [
     "DEFAULT_LOG_LEVEL",
     "ENV_LOG_LEVEL",
     "LogLevelError",
+    "UVICORN_ACCESS_LOG_FORMAT",
+    "build_uvicorn_log_config",
     "configure_logging",
     "parse_level",
 ]
@@ -63,6 +65,15 @@ _LOGGER_NAME = "sparksage"
 
 #: Format used by the fallback handler installed in "no host logging" mode.
 DEFAULT_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+#: Uvicorn access-log format mirroring :data:`DEFAULT_LOG_FORMAT` so request
+#: logs line up with application logs (same timestamp / level / logger-name
+#: prefix). The ``%(client_addr)s`` / ``%(request_line)s`` / ``%(status_code)s``
+#: fields are injected by uvicorn's ``AccessFormatter`` at emit time.
+UVICORN_ACCESS_LOG_FORMAT = (
+    '%(asctime)s %(levelname)s %(name)s: '
+    '%(client_addr)s - "%(request_line)s" %(status_code)s'
+)
 
 #: The six canonical :mod:`logging` level names.
 _VALID_LEVEL_NAMES: Final[frozenset[str]] = frozenset(
@@ -150,3 +161,62 @@ def configure_logging(level: str | int | None = None) -> int:
         logger.addHandler(handler)
 
     return numeric
+
+
+def build_uvicorn_log_config(level: str | int | None = None) -> dict:
+    """Build a uvicorn ``log_config`` dict matching :data:`DEFAULT_LOG_FORMAT`.
+
+    Uvicorn ships its own logging config whose access logger prints a
+    ``INFO:  <addr> - "<request>" <status>`` line -- a *different* shape from
+    the application's ``%(asctime)s %(levelname)s %(name)s:`` format, so the two
+    never line up in the same log stream. This returns a
+    :func:`logging.config.dictConfig`-compatible dict that keeps uvicorn's
+    logger topology (``uvicorn`` / ``uvicorn.error`` / ``uvicorn.access``, each
+    non-propagating with its own handler) but swaps the formatters for the
+    application's, so every line on stderr / stdout looks identical::
+
+        2026-08-01 14:35:47,477 DEBUG sparksage.api.qa_service: ingest ...
+        2026-08-01 14:35:49,142 INFO uvicorn.access: 172.17.0.1:59442 - \
+"POST /api/v1/knowledge_base/ingest HTTP/1.1" 200 OK
+
+    The access formatter references ``uvicorn.logging.AccessFormatter`` *by
+    dotted string* (resolved lazily by ``dictConfig`` inside the uvicorn
+    process), so this module stays pure-stdlib -- no uvicorn import.
+
+    ``level`` optionally sets the uvicorn / uvicorn.access logger level
+    (defaults to ``INFO``, matching uvicorn's own default so request logs are
+    always emitted).
+    """
+    uv_level = logging.INFO if level is None else parse_level(level)
+    return {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "default": {"format": DEFAULT_LOG_FORMAT},
+            "access": {
+                "()": "uvicorn.logging.AccessFormatter",
+                "fmt": UVICORN_ACCESS_LOG_FORMAT,
+            },
+        },
+        "handlers": {
+            "default": {
+                "formatter": "default",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stderr",
+            },
+            "access": {
+                "formatter": "access",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stdout",
+            },
+        },
+        "loggers": {
+            "uvicorn": {"handlers": ["default"], "level": uv_level, "propagate": False},
+            "uvicorn.error": {"level": uv_level},
+            "uvicorn.access": {
+                "handlers": ["access"],
+                "level": uv_level,
+                "propagate": False,
+            },
+        },
+    }

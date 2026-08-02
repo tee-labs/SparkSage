@@ -16,7 +16,9 @@ from sparksage.logging_config import (
     DEFAULT_LOG_FORMAT,
     DEFAULT_LOG_LEVEL,
     ENV_LOG_LEVEL,
+    UVICORN_ACCESS_LOG_FORMAT,
     LogLevelError,
+    build_uvicorn_log_config,
     configure_logging,
     parse_level,
 )
@@ -222,3 +224,42 @@ def test_exported_from_top_level_package() -> None:
     assert sparksage.configure_logging is configure_logging
     assert sparksage.parse_level is parse_level
     assert issubclass(sparksage.LogLevelError, ValueError)
+
+
+# ---------------------------------------------------------------------------- #
+# build_uvicorn_log_config: unify uvicorn access / app log formats
+# ---------------------------------------------------------------------------- #
+def test_build_uvicorn_log_config_default_formatter_matches_app() -> None:
+    cfg = build_uvicorn_log_config()
+    assert cfg["disable_existing_loggers"] is False
+    assert cfg["formatters"]["default"]["format"] == DEFAULT_LOG_FORMAT
+
+
+def test_build_uvicorn_log_config_access_formatter_uses_app_shape() -> None:
+    cfg = build_uvicorn_log_config()
+    access = cfg["formatters"]["access"]
+    # Resolved lazily inside uvicorn (no uvicorn import here) -> pure stdlib.
+    assert access["()"] == "uvicorn.logging.AccessFormatter"
+    assert access["fmt"] == UVICORN_ACCESS_LOG_FORMAT
+    # Same timestamp / level / name prefix as the application format; the
+    # access fields take the place of ``%(message)s`` in the body.
+    assert UVICORN_ACCESS_LOG_FORMAT.startswith(DEFAULT_LOG_FORMAT.replace("%(message)s", ""))
+
+
+def test_build_uvicorn_log_config_keeps_uvicorn_logger_topology() -> None:
+    cfg = build_uvicorn_log_config()
+    loggers = cfg["loggers"]
+    # Non-propagating, each with its own handler -> no duplicate output.
+    assert loggers["uvicorn"]["propagate"] is False
+    assert loggers["uvicorn.access"]["propagate"] is False
+    assert loggers["uvicorn"]["handlers"] == ["default"]
+    assert loggers["uvicorn.access"]["handlers"] == ["access"]
+    # Default level matches uvicorn's own (request logs always emitted).
+    assert loggers["uvicorn"]["level"] == logging.INFO
+    assert loggers["uvicorn.access"]["level"] == logging.INFO
+
+
+def test_build_uvicorn_log_config_level_override() -> None:
+    cfg = build_uvicorn_log_config("DEBUG")
+    assert cfg["loggers"]["uvicorn"]["level"] == logging.DEBUG
+    assert cfg["loggers"]["uvicorn.access"]["level"] == logging.DEBUG
