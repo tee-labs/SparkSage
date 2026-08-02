@@ -609,8 +609,27 @@ default routing target and per-call `kb_id=` on `ingest_and_index` / `ask` /
 ingest route takes a `kb_id` form field, and `AskRequest.kb_id` routes the
 query to the right KB's lazily-built `QAEngine`; the React UI adds a
 `/knowledge-bases` management page and a shared `KbSelector` on ingest / QA /
-browse pages).
-Planned next: an OpenAI-compatible API and a `/api/v1/distill` route wrapping
-`JobManager`.
-Design schema additions so the Distill lifecycle fields (`status`, `parents`,
-`confidence`, `embedding`) remain usable.
+ browse pages).
+ Also implemented now: durable persistence so a Docker restart loses nothing
+ (`SPARKSAGE_DATA_DIR`, defaulting to `/app/data` in the image, is the one-knob
+ default). `KnowledgeBaseStore` / `FeedbackStore` each gained a stdlib-only
+ `Sqlite*` counterpart (`kb/backends/sqlite.py`, `feedback/backends/sqlite.py`)
+ mirroring the `SqliteDocumentStore` pattern (regex-validated table, `check_same_thread=False`
+ + `threading.RLock`, defensive copies, persists across instances). A new
+ `KbStateStore` Protocol (`kb/backends/state.py`) + `SqliteKbStateStore` persists
+ the live block registry + dense vectors (each block's `embedding` rides along
+ in its JSON, so restart never re-calls the embedding API) + document<->block
+ linkage; `KnowledgeBase.__init__` takes an optional `state_store=` and writes
+ through on every mutation (`add_blocks` / `remove_block` / `remove_document`),
+ then hydrates the registry + vectors + lexical index on construction.
+ `QAService` accepts `kb_store=` / `state_store=` / `feedback_store=` and
+ reloads every persisted KB on startup (`_reload_persisted_kbs`), so the active
+ KB id + indexed knowledge survive a restart. `build_qa_service` /
+ `build_default_service` wire all four durable backends from `SPARKSAGE_DATA_DIR`
+ (individual `SPARKSAGE_*_STORE` paths override); a Docker `VOLUME /app/data`
+ mount is all a user needs. The Dockerfile sets `SPARKSAGE_DATA_DIR=/app/data`
+ and declares the volume.
+ Planned next: an OpenAI-compatible API and a `/api/v1/distill` route wrapping
+ `JobManager`.
+ Design schema additions so the Distill lifecycle fields (`status`, `parents`,
+ `confidence`, `embedding`) remain usable.

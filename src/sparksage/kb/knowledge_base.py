@@ -38,6 +38,7 @@ from sparksage.documents.models import DocumentRecord, content_hash_of
 from sparksage.documents.store import DocumentStore
 from sparksage.embed.indexer import BlockEmbedder
 from sparksage.embed.store import InMemoryVectorStore, VectorStore
+from sparksage.kb.backends.state import KbStateStore
 from sparksage.kb.models import KnowledgeBaseInfo
 from sparksage.retrieve.lexical import BM25Retriever, LexicalRetriever, NullLexicalRetriever
 from sparksage.retrieve.models import RetrievalFilter, RetrievalResult
@@ -93,6 +94,7 @@ class KnowledgeBase:
         lexical: LexicalRetriever | None = None,
         document_store: DocumentStore | None = None,
         reranker: Reranker | None = None,
+        state_store: KbStateStore | None = None,
     ) -> None:
         self._info = info
         self._embedder = embedder
@@ -109,6 +111,7 @@ class KnowledgeBase:
         self._doc_blocks: dict[str, set[str]] = {}
         self._block_doc: dict[str, str] = {}
         self._doc_ids: set[str] = set()
+        self._state_store: KbStateStore | None = state_store
         self._retriever = Retriever(
             self._registry,
             self._store,
@@ -116,6 +119,8 @@ class KnowledgeBase:
             lexical=self._lexical,
             reranker=reranker,
         )
+        if self._state_store is not None:
+            self._restore_state()
 
     # ------------------------------------------------------------------ #
     # metadata
@@ -151,6 +156,11 @@ class KnowledgeBase:
     @property
     def document_store(self) -> DocumentStore:
         return self._document_store
+
+    @property
+    def state_store(self) -> KbStateStore | None:
+        """The durable state backend, or ``None`` when persistence is off."""
+        return self._state_store
 
     def block_count(self) -> int:
         """Number of blocks currently in the registry."""
@@ -221,6 +231,10 @@ class KnowledgeBase:
             if new_vectors:
                 self._store.add_many(new_vectors)
             self._rebuild_lexical()
+        if added and self._state_store is not None:
+            doc_id_str = str(doc_id) if doc_id is not None else None
+            for b in added:
+                self._state_store.upsert_block(self.kb_id, b, doc_id_str)
         return added
 
     def remove_block(self, block_id: str) -> bool:
@@ -239,6 +253,8 @@ class KnowledgeBase:
             if not self._doc_blocks[doc_id]:
                 del self._doc_blocks[doc_id]
         self._rebuild_lexical()
+        if self._state_store is not None:
+            self._state_store.delete_block(self.kb_id, bid)
         return True
 
     def add_document(
@@ -385,6 +401,41 @@ class KnowledgeBase:
         if isinstance(self._lexical, NullLexicalRetriever):
             return
         self._lexical.index(list(self._registry.values()))
+
+    def _restore_state(self) -> None:
+        """Hydrate the registry + vectors + doc-links from ``state_store``.
+
+        Called once on construction when a ``state_store`` is wired. Vectors are
+        read straight off each block's persisted ``embedding`` field, so a
+        restart never re-calls the embedding API. The lexical index is rebuilt
+        from the reloaded registry.
+        """
+        assert self._state_store is not None
+        snapshot = self._state_store.load(self.kb_id)
+        if not snapshot.blocks:
+            return
+        vectors: dict[str, list[float]] = {}
+        for block in snapshot.blocks:
+            bid = str(block.id)
+            if block.kb_id is None:
+                block.kb_id = self.kb_id
+            self._registry[bid] = block
+            if block.embedding is not None:
+                vectors[bid] = list(block.embedding)
+        for doc_id, block_ids in snapshot.doc_links.items():
+            self._doc_ids.add(doc_id)
+            for bid in block_ids:
+                if bid in self._registry:
+                    self._link_block(bid, doc_id)
+        if vectors:
+            self._store.add_many(vectors)
+        self._rebuild_lexical()
+        _logger.info(
+            "restored kb=%s: %d blocks, %d documents from state store",
+            self.kb_id,
+            len(self._registry),
+            len(self._doc_ids),
+        )
 
 
 __all__ = ["KnowledgeBase"]
