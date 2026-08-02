@@ -299,6 +299,26 @@ class TestAgentMode:
         assistant = [t for t in turns if t.role.value == "assistant"][0]
         assert assistant.result is not None  # serialized AskResponse payload
 
+    def test_agent_trajectory_serialized_in_response_and_history(self):
+        from sparksage.api.schemas import _to_ask_response
+
+        svc = _make_qa_service(agent_controller=self._controller())
+        svc.ingest_and_index(b"data", "guide.md")
+        result = svc.ask("How to install?", use_lexical=False, mode="agent")
+        payload = _to_ask_response(result).model_dump(mode="json")
+        # the agent trajectory must not be discarded by the serializer
+        assert payload["mode"] == "agent"
+        assert payload["iterations"] == result.iterations
+        assert payload["aborted"] == result.aborted
+        assert len(payload["steps"]) == len(result.steps)
+        assert payload["steps"][0]["query"]  # seed sub-query
+        assert payload["steps"][0]["retrieved_count"] >= 0
+        # the persisted history shares the same serializer, so it benefits too
+        turns, _ = svc.list_history()
+        assistant = [t for t in turns if t.role.value == "assistant"][0]
+        assert assistant.result["mode"] == "agent"
+        assert len(assistant.result["steps"]) == len(result.steps)
+
     def test_agent_mode_without_controller_raises(self):
         svc = _make_qa_service()  # no agent_controller wired
         svc.ingest_and_index(b"data", "guide.md")
@@ -318,6 +338,19 @@ class TestAgentMode:
         from sparksage.qa import QAResult
 
         assert isinstance(result, QAResult)  # not an AgentResult
+
+    def test_default_mode_trajectory_fields_absent(self):
+        # single-shot mode must not surface an agent trajectory
+        from sparksage.api.schemas import _to_ask_response
+
+        svc = _make_qa_service(agent_controller=self._controller())
+        svc.ingest_and_index(b"data", "guide.md")
+        result = svc.ask("How to install?", use_lexical=False)  # default mode
+        payload = _to_ask_response(result).model_dump(mode="json")
+        assert payload["mode"] == "default"
+        assert payload["iterations"] is None
+        assert payload["aborted"] is None
+        assert payload["steps"] == []
 
 
 # ---------------------------------------------------------------------------- #

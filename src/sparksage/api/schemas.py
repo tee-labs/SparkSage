@@ -394,6 +394,29 @@ class RetrievedChunkOut(BaseModel):
     rank: int = Field(default=0, description="0-indexed position in the ranked list.")
 
 
+class AgentStepOut(BaseModel):
+    """One executed retrieval step in the agent reasoning trajectory.
+
+    Surfaced only for ``mode="agent"`` answers so a UI can render the ReAct
+    plan-act-observe trace (the seed retrieval + each controller-decided
+    sub-query). Mirrors :class:`~sparksage.agent.models.AgentStep`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    thought: str = Field(default="", description="The controller's reasoning (ReAct Thought).")
+    query: str = Field(description="The sub-query that was actually retrieved.")
+    retrieved_count: int = Field(
+        description="How many chunks this single retrieval returned."
+    )
+    observation: str = Field(
+        default="", description="Compact summary of what was found (fed back to the controller)."
+    )
+    created_at: datetime | None = Field(
+        default=None, description="When the step ran (UTC, ISO 8601), for timeline rendering."
+    )
+
+
 class AskResponse(BaseModel):
     """Response body for ``POST /api/v1/query`` -- a grounded answer or abstention."""
 
@@ -423,6 +446,34 @@ class AskResponse(BaseModel):
     )
     intent: str | None = Field(
         default=None, description="Classified query intent (when a processor is wired)."
+    )
+    mode: str = Field(
+        default="default",
+        description=(
+            'QA strategy that produced this answer: "default" (single-shot) '
+            'or "agent" (multi-hop plan-act-observe-synthesize loop).'
+        ),
+    )
+    iterations: int | None = Field(
+        default=None,
+        description=(
+            "Extra retrievals the agent controller requested beyond the seed "
+            "(agent mode only; ``None`` for single-shot)."
+        ),
+    )
+    aborted: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the agent loop hit ``max_iterations`` without synthesizing "
+            "(agent mode only; ``None`` for single-shot)."
+        ),
+    )
+    steps: list[AgentStepOut] = Field(
+        default_factory=list,
+        description=(
+            "The agent reasoning trajectory (seed + each controller-decided "
+            "retrieval). Empty for single-shot mode."
+        ),
     )
 
 
@@ -763,7 +814,16 @@ def _merge(flt: RetrievalFilter, **kw: Any) -> RetrievalFilter:
 
 
 def _to_ask_response(result: QAResultLike) -> AskResponse:
-    """Build an :class:`AskResponse` from a :class:`~sparksage.qa.QAResult`."""
+    """Build an :class:`AskResponse` from a :class:`~sparksage.qa.QAResult`.
+
+    When ``result`` is an :class:`~sparksage.agent.AgentResult`, the agent
+    trajectory (``mode`` / ``iterations`` / ``aborted`` / ``steps``) is folded
+    in alongside the shared surface -- so a single-shot and an agentic answer
+    stay interchangeable, but the agentic trace is no longer discarded (it
+    flows through to the HTTP client, the persisted history, and the UI).
+    The agent fields default to ``None`` / ``[]`` / ``"default"`` so a plain
+    :class:`~sparksage.qa.QAResult` is serialized byte-for-byte as before.
+    """
     citations = [
         CitationOut(
             block_id=str(getattr(c, "block_id", "")),
@@ -797,6 +857,41 @@ def _to_ask_response(result: QAResultLike) -> AskResponse:
             else str(result.query_result.intent.intent)
         )
 
+    # AgentResult-only trajectory. Detected by isinstance (local import keeps
+    # the module import-cycle-free) so the single-shot path is untouched.
+    from sparksage.agent.models import AgentResult
+
+    if isinstance(result, AgentResult):
+        steps = [
+            AgentStepOut(
+                thought=s.thought,
+                query=s.query,
+                retrieved_count=s.retrieved_count,
+                observation=s.observation,
+                created_at=s.created_at,
+            )
+            for s in result.steps
+        ]
+        return AskResponse(
+            query=result.query,
+            answer=result.text,
+            abstained=result.abstained,
+            abstention_reason=(
+                result.answer.abstention_reason
+                if result.answer is not None
+                else None
+            ),
+            citations=citations,
+            retrieved=retrieved,
+            cached=result.cached,
+            confidence=result.answer.confidence if result.answer is not None else 0.0,
+            intent=intent,
+            mode="agent",
+            iterations=result.iterations,
+            aborted=result.aborted,
+            steps=steps,
+        )
+
     return AskResponse(
         query=result.query,
         answer=result.text,
@@ -811,6 +906,7 @@ def _to_ask_response(result: QAResultLike) -> AskResponse:
         cached=result.cached,
         confidence=result.answer.confidence if result.answer is not None else 0.0,
         intent=intent,
+        mode="default",
     )
 
 
