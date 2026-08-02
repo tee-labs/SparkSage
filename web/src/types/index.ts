@@ -208,4 +208,21 @@ export interface FeedbackListResponse {
   offset: number;
 }
 
+export interface QueryHistoryItem {
+  turn_id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  kb_id?: string | null;
+  result?: AskResponse | null;
+  created_at: string;
+}
+
+export interface QueryHistoryResponse {
+  items: QueryHistoryItem[];
+  count: number;
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export type FeedbackRating = 'positive' | 'negative' | 'corrected';

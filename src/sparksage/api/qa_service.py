@@ -62,6 +62,12 @@ from sparksage.kb.knowledge_base import KnowledgeBase
 from sparksage.kb.models import KnowledgeBaseInfo
 from sparksage.kb.store import InMemoryKnowledgeBaseStore, KnowledgeBaseStore
 from sparksage.qa.engine import QAEngine, QAResult
+from sparksage.qa.history import (
+    InMemoryQASessionStore,
+    QASessionStore,
+    QATurn,
+    TurnRole,
+)
 from sparksage.query.context import ConversationContext
 from sparksage.query.processor import QueryProcessor
 from sparksage.reader.orchestrator import Reader
@@ -131,6 +137,10 @@ class QAService:
         through to it, and on construction the service reloads every persisted
         KB so a restart does not lose indexed knowledge or require re-embedding.
         Defaults to ``None`` (ephemeral in-memory indexes).
+    history_store:
+        Optional :class:`QASessionStore` for the persisted QA conversation log
+        (the query/answer history the Q&A page restores on reload). Defaults to
+        an :class:`InMemoryQASessionStore`.
 
     Examples
     --------
@@ -161,6 +171,7 @@ class QAService:
         kb_store: KnowledgeBaseStore | None = None,
         feedback_store: FeedbackStore | None = None,
         state_store: KbStateStore | None = None,
+        history_store: QASessionStore | None = None,
     ) -> None:
         self._service = service
         self._embedder = embedder
@@ -199,6 +210,9 @@ class QAService:
 
         self._feedback_store: FeedbackStore = (
             feedback_store if feedback_store is not None else InMemoryFeedbackStore()
+        )
+        self._history_store: QASessionStore = (
+            history_store if history_store is not None else InMemoryQASessionStore()
         )
 
     # ------------------------------------------------------------------ #
@@ -247,6 +261,10 @@ class QAService:
     @property
     def feedback_store(self) -> FeedbackStore:
         return self._feedback_store
+
+    @property
+    def history_store(self) -> QASessionStore:
+        return self._history_store
 
     @property
     def has_generator(self) -> bool:
@@ -323,7 +341,7 @@ class QAService:
         name: str,
         *,
         description: str | None = None,
-        language: str = "en",
+        language: str = "zh",
         tags: list[str] | None = None,
         kb_id: str | None = None,
         set_active: bool = False,
@@ -651,7 +669,34 @@ class QAService:
             f"{top_score:.3f}" if top_score is not None else None,
             elapsed,
         )
+        self._record_history(query, result, kb.kb_id)
         return result
+
+    def _record_history(self, query: str, result: QAResult, kb_id: str) -> None:
+        """Append the user question + assistant answer to the conversation log.
+
+        The answer payload is the canonical HTTP ``AskResponse`` shape (via
+        :func:`~sparksage.api.schemas._to_ask_response`) so the Q&A page can
+        re-render citations / retrieved chunks / confidence on reload without
+        re-running the pipeline.
+        """
+        from sparksage.api.schemas import _to_ask_response
+
+        payload = _to_ask_response(result).model_dump(mode="json")
+        try:
+            self._history_store.add_turn(
+                QATurn(role=TurnRole.USER, content=query, kb_id=kb_id)
+            )
+            self._history_store.add_turn(
+                QATurn(
+                    role=TurnRole.ASSISTANT,
+                    content=result.text or "",
+                    kb_id=kb_id,
+                    result=payload,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.warning("history recording failed: %s", exc)
 
     # ------------------------------------------------------------------ #
     # knowledge-base stats
@@ -809,6 +854,43 @@ class QAService:
             kb_id=target_kb_id, limit=limit, offset=offset
         )
         return page, total
+
+    # ------------------------------------------------------------------ #
+    # conversation history: the persisted query log the Q&A page restores
+    # ------------------------------------------------------------------ #
+    def list_history(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        kb_id: str | None = None,
+    ) -> tuple[list[QATurn], int]:
+        """Return a newest-first paginated slice of the conversation log.
+
+        Scoped to the target knowledge base (the active KB by default), exactly
+        like :meth:`list_feedback`. Returns ``(page, total)``.
+        """
+        target_kb_id = self._resolve_kb(kb_id).kb_id
+        total = self._history_store.count(kb_id=target_kb_id)
+        if limit < 1:
+            limit = 1
+        if offset < 0:
+            offset = 0
+        page = self._history_store.list(
+            kb_id=target_kb_id, limit=limit, offset=offset
+        )
+        return page, total
+
+    def clear_history(self, kb_id: str | None = None) -> int:
+        """Clear the conversation log (optionally scoped to a KB).
+
+        Returns the number of turns removed. With no ``kb_id`` the whole log is
+        wiped (mirrors the single-session demo UI).
+        """
+        target_kb_id = self._resolve_kb(kb_id).kb_id if kb_id is not None else None
+        removed = self._history_store.count(kb_id=target_kb_id)
+        self._history_store.clear(kb_id=target_kb_id)
+        return removed
 
 
 __all__ = [

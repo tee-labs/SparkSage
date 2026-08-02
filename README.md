@@ -1254,9 +1254,9 @@ the library and serves the WEB API over uvicorn. The image is built as a
 non-root, multi-stage image with the **full extras set** pre-installed
 (``api``, ``convert``, ``llm``, ``embed``, ``rerank``, ``distill``, ``tags-zh``),
 so convert / generate / documents *and* the end-to-end QA pipeline
-(`/knowledge_base/ingest`, `/query`, `/feedback`) all work out of the box —
-only secrets need to be provided at run time. The QA routes are mounted
-automatically because `SPARKSAGE_ENABLE_QA=1` is the default.
+(`/knowledge_base/ingest`, `/query`, `/query/history`, `/feedback`) all work out
+of the box — only secrets need to be provided at run time. The QA routes are
+mounted automatically because `SPARKSAGE_ENABLE_QA=1` is the default.
 
 ### Build & run
 
@@ -1336,8 +1336,9 @@ docker compose logs -f sparksage
   with `--build-arg SPARKSAGE_EXTRAS=api,convert,llm` (or extend it with
   `chroma` / `pgvector` for production vector stores).
 - **Full QA pipeline by default** — `SPARKSAGE_ENABLE_QA=1` is baked in, so the
-  `/api/v1/knowledge_base/ingest`, `/api/v1/query` and `/api/v1/feedback` routes
-  are mounted automatically; set `SPARKSAGE_ENABLE_QA=0` for the slim API.
+  `/api/v1/knowledge_base/ingest`, `/api/v1/query`, `/api/v1/query/history` and
+  `/api/v1/feedback` routes are mounted automatically; set `SPARKSAGE_ENABLE_QA=0`
+  for the slim API.
 - **Built-in health check** — `HEALTHCHECK` polls `/api/v1/health` every 30s,
   so orchestrators (Docker Compose, Swarm, Kubernetes) get liveness for free.
 - **Secrets never baked in** — [`.dockerignore`](.dockerignore) excludes

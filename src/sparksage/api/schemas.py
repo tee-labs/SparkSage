@@ -426,7 +426,7 @@ class KnowledgeBaseResponse(BaseModel):
     name: str = Field(description="Human-readable KB name.")
     block_count: int = Field(description="Number of indexed IdeaBlocks.")
     document_count: int = Field(description="Number of stored documents.")
-    language: str = Field(default="en", description="Default block language.")
+    language: str = Field(default="zh", description="Default block language.")
     description: str | None = Field(default=None, description="Free-text description.")
     tags: list[str] = Field(default_factory=list, description="KB-level labels.")
     active: bool = Field(
@@ -443,7 +443,7 @@ class KnowledgeBaseSummary(BaseModel):
     kb_id: str = Field(description="Stable unique id.")
     name: str = Field(description="Human-readable KB name.")
     description: str | None = Field(default=None, description="Free-text description.")
-    language: str = Field(default="en", description="Default block language.")
+    language: str = Field(default="zh", description="Default block language.")
     tags: list[str] = Field(default_factory=list, description="KB-level labels.")
     block_count: int = Field(default=0, description="Number of indexed IdeaBlocks.")
     document_count: int = Field(default=0, description="Number of stored documents.")
@@ -475,7 +475,7 @@ class CreateKnowledgeBaseRequest(BaseModel):
     name: str = Field(..., min_length=1, description="Human-readable KB name.")
     description: str | None = Field(default=None, description="Free-text description.")
     language: str = Field(
-        default="en", min_length=2, max_length=16, description="Default block language."
+        default="zh", min_length=2, max_length=16, description="Default block language."
     )
     tags: list[str] | None = Field(
         default=None, description="Free-form KB-level labels."
@@ -619,6 +619,34 @@ class FeedbackListResponse(BaseModel):
     items: list[FeedbackRecordOut] = Field(description="Feedback records, newest-first.")
     count: int = Field(description="Number of items in this page.")
     total: int = Field(description="Total feedback records.")
+    limit: int = Field(description="Page size used.")
+    offset: int = Field(description="Offset used.")
+
+
+class QueryHistoryItem(BaseModel):
+    """One persisted QA turn for the conversation-history listing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str = Field(description="Stable turn id.")
+    role: str = Field(description="user | assistant.")
+    content: str = Field(description="The user query or the surfaced answer text.")
+    kb_id: str | None = Field(default=None, description="Source knowledge base.")
+    result: AskResponse | None = Field(
+        default=None,
+        description="Full answer payload for assistant turns (re-renderable).",
+    )
+    created_at: datetime = Field(description="UTC timestamp.")
+
+
+class QueryHistoryResponse(BaseModel):
+    """Paginated QA conversation-history listing (newest-first)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[QueryHistoryItem] = Field(description="Turns, newest-first.")
+    count: int = Field(description="Number of items in this page.")
+    total: int = Field(description="Total turns.")
     limit: int = Field(description="Page size used.")
     offset: int = Field(description="Offset used.")
 

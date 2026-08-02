@@ -55,6 +55,7 @@ from sparksage.documents.summarizer import LLMSummarizer
 from sparksage.generator.client import OpenAICompatibleClient
 from sparksage.generator.generator import GenerationError, IdeaBlockGenerator
 from sparksage.logging_config import ENV_LOG_LEVEL, configure_logging
+from sparksage.tags.cohesion import DEFAULT_MIN_COHESION
 from sparksage.tags.extractor import make_extractor
 from sparksage.tags.tokenizer import AutoTokenizer
 
@@ -73,6 +74,9 @@ ENV_DOC_STORE = "SPARKSAGE_DOC_STORE"
 ENV_DOC_STORE_TABLE = "SPARKSAGE_DOC_STORE_TABLE"
 ENV_AUTO_TAG_EXTRACTOR = "SPARKSAGE_AUTO_TAG_EXTRACTOR"
 ENV_TAGS_ZH = "SPARKSAGE_TAGS_ZH"
+#: Cohesion floor for the CJK bigram auto-tag filter (float, ``0``-``1``; ``off``
+#: disables the filter so raw overlapping bigrams are emitted again).
+ENV_AUTO_TAG_MIN_COHESION = "SPARKSAGE_AUTO_TAG_MIN_COHESION"
 
 # End-to-end QA
 ENV_EMBEDDING_API_KEY = "SPARKSAGE_EMBEDDING_API_KEY"
@@ -129,6 +133,30 @@ def _env_bool(name: str, default: bool) -> bool:
     return default
 
 
+def _env_float(name: str, default: float | None) -> float | None:
+    """Parse an environment variable as a float.
+
+    ``off`` / ``none`` (case-insensitive) resolve to ``None`` so a float knob
+    can be explicitly disabled. Unset / unparsable values fall back to
+    ``default``.
+    """
+    raw = _env(name)
+    if raw is None:
+        return default
+    val = raw.strip().lower()
+    if val in ("off", "none", "disabled"):
+        return None
+    try:
+        return float(val)
+    except ValueError:
+        return default
+
+
+def _auto_tag_min_cohesion() -> float | None:
+    """Resolve the CJK bigram cohesion floor from configuration."""
+    return _env_float(ENV_AUTO_TAG_MIN_COHESION, DEFAULT_MIN_COHESION)
+
+
 def build_default_service() -> SparkSageService:
     """Wire a production :class:`SparkSageService` from configuration.
 
@@ -182,7 +210,7 @@ def build_default_service() -> SparkSageService:
     if api_key:
         base_url = _env(ENV_BASE_URL) or _env(ENV_OPENAI_BASE_URL)
         model = _env(ENV_MODEL) or DEFAULT_MODEL
-        language = _env("SPARKSAGE_LANGUAGE") or "en"
+        language = _env("SPARKSAGE_LANGUAGE") or "zh"
         stream = _env_bool(ENV_STREAM, DEFAULT_STREAM)
         client = OpenAICompatibleClient(
             base_url=base_url, api_key=api_key, model=model, stream=stream
@@ -204,7 +232,11 @@ def build_default_service() -> SparkSageService:
     extractor_name = _env(ENV_AUTO_TAG_EXTRACTOR) or DEFAULT_AUTO_TAG_EXTRACTOR
     use_jieba = _env_bool(ENV_TAGS_ZH, False)
     tokenizer = AutoTokenizer(use_jieba=use_jieba)
-    keyword_extractor = make_extractor(extractor_name, tokenizer=tokenizer)
+    keyword_extractor = make_extractor(
+        extractor_name,
+        tokenizer=tokenizer,
+        min_cohesion=_auto_tag_min_cohesion(),
+    )
 
     doc_store = _build_document_store()
 
@@ -369,6 +401,7 @@ def build_qa_service():
         keyword_extractor=make_extractor(
             _env(ENV_AUTO_TAG_EXTRACTOR) or DEFAULT_AUTO_TAG_EXTRACTOR,
             tokenizer=AutoTokenizer(use_jieba=_env_bool(ENV_TAGS_ZH, False)),
+            min_cohesion=_auto_tag_min_cohesion(),
         ),
     )
 
@@ -897,6 +930,8 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
         KnowledgeBaseListResponse,
         KnowledgeBaseResponse,
         KnowledgeBaseSummary,
+        QueryHistoryItem,
+        QueryHistoryResponse,
         TagsResponse,
         _build_filter_from_request,
         _to_ask_response,
@@ -1247,6 +1282,48 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
         return FeedbackListResponse(
             items=items, count=len(items), total=total, limit=limit, offset=offset
         )
+
+    @app.get(
+        "/api/v1/query/history",
+        response_model=QueryHistoryResponse,
+        summary="List the persisted QA conversation history (newest-first)",
+    )
+    async def query_history(
+        kb_id: Annotated[
+            str | None,
+            Query(description="Target KB (defaults to the active KB)."),
+        ] = None,
+        limit: Annotated[int, Query(ge=1, le=1000, description="Page size.")] = 100,
+        offset: Annotated[int, Query(ge=0, description="Page offset.")] = 0,
+    ) -> QueryHistoryResponse:
+        page, total = qa_svc.list_history(limit=limit, offset=offset, kb_id=kb_id)
+        items = [
+            QueryHistoryItem(
+                turn_id=t.turn_id,
+                role=t.role.value,
+                content=t.content,
+                kb_id=t.kb_id,
+                result=t.result,
+                created_at=t.created_at,
+            )
+            for t in page
+        ]
+        return QueryHistoryResponse(
+            items=items, count=len(items), total=total, limit=limit, offset=offset
+        )
+
+    @app.delete(
+        "/api/v1/query/history",
+        summary="Clear the persisted QA conversation history",
+    )
+    async def clear_history(
+        kb_id: Annotated[
+            str | None,
+            Query(description="Target KB (defaults to the active KB)."),
+        ] = None,
+    ) -> dict[str, int]:
+        removed = qa_svc.clear_history(kb_id=kb_id)
+        return {"removed": removed}
 
 
 def _detail(exc: BaseException) -> str:
