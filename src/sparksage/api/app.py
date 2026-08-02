@@ -55,6 +55,7 @@ from sparksage.documents.summarizer import LLMSummarizer
 from sparksage.generator.client import OpenAICompatibleClient
 from sparksage.generator.generator import GenerationError, IdeaBlockGenerator
 from sparksage.logging_config import ENV_LOG_LEVEL, configure_logging
+from sparksage.tags.cohesion import DEFAULT_MIN_COHESION
 from sparksage.tags.extractor import make_extractor
 from sparksage.tags.tokenizer import AutoTokenizer
 
@@ -73,6 +74,9 @@ ENV_DOC_STORE = "SPARKSAGE_DOC_STORE"
 ENV_DOC_STORE_TABLE = "SPARKSAGE_DOC_STORE_TABLE"
 ENV_AUTO_TAG_EXTRACTOR = "SPARKSAGE_AUTO_TAG_EXTRACTOR"
 ENV_TAGS_ZH = "SPARKSAGE_TAGS_ZH"
+#: Cohesion floor for the CJK bigram auto-tag filter (float, ``0``-``1``; ``off``
+#: disables the filter so raw overlapping bigrams are emitted again).
+ENV_AUTO_TAG_MIN_COHESION = "SPARKSAGE_AUTO_TAG_MIN_COHESION"
 
 # End-to-end QA
 ENV_EMBEDDING_API_KEY = "SPARKSAGE_EMBEDDING_API_KEY"
@@ -115,6 +119,30 @@ def _env_bool(name: str, default: bool) -> bool:
     if val in _FALSY:
         return False
     return default
+
+
+def _env_float(name: str, default: float | None) -> float | None:
+    """Parse an environment variable as a float.
+
+    ``off`` / ``none`` (case-insensitive) resolve to ``None`` so a float knob
+    can be explicitly disabled. Unset / unparsable values fall back to
+    ``default``.
+    """
+    raw = _env(name)
+    if raw is None:
+        return default
+    val = raw.strip().lower()
+    if val in ("off", "none", "disabled"):
+        return None
+    try:
+        return float(val)
+    except ValueError:
+        return default
+
+
+def _auto_tag_min_cohesion() -> float | None:
+    """Resolve the CJK bigram cohesion floor from configuration."""
+    return _env_float(ENV_AUTO_TAG_MIN_COHESION, DEFAULT_MIN_COHESION)
 
 
 def build_default_service() -> SparkSageService:
@@ -189,7 +217,11 @@ def build_default_service() -> SparkSageService:
     extractor_name = _env(ENV_AUTO_TAG_EXTRACTOR) or DEFAULT_AUTO_TAG_EXTRACTOR
     use_jieba = _env_bool(ENV_TAGS_ZH, False)
     tokenizer = AutoTokenizer(use_jieba=use_jieba)
-    keyword_extractor = make_extractor(extractor_name, tokenizer=tokenizer)
+    keyword_extractor = make_extractor(
+        extractor_name,
+        tokenizer=tokenizer,
+        min_cohesion=_auto_tag_min_cohesion(),
+    )
 
     doc_store = _build_document_store()
 
@@ -275,6 +307,7 @@ def build_qa_service():
         keyword_extractor=make_extractor(
             _env(ENV_AUTO_TAG_EXTRACTOR) or DEFAULT_AUTO_TAG_EXTRACTOR,
             tokenizer=AutoTokenizer(use_jieba=_env_bool(ENV_TAGS_ZH, False)),
+            min_cohesion=_auto_tag_min_cohesion(),
         ),
     )
 

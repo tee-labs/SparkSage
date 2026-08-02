@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from sparksage import (
+    DEFAULT_MIN_COHESION,
     DEFAULT_STOPWORDS,
     ENGLISH_STOPWORDS,
     EXTRACTOR_NAMES,
@@ -21,7 +22,10 @@ from sparksage import (
     TextRankKeywordExtractor,
     TfidfKeywordExtractor,
     WhitespaceTokenizer,
+    blessed_cjk_bigrams,
+    cjk_bigram_gate,
     default_extractor,
+    is_cjk_char,
     is_stopword,
     make_extractor,
 )
@@ -276,3 +280,136 @@ class TestMakeExtractor:
 
     def test_default_extractor_is_rake(self):
         assert isinstance(default_extractor(), RakeKeywordExtractor)
+
+
+# ---------------------------------------------------------------------------- #
+# is_cjk_char
+# ---------------------------------------------------------------------------- #
+class TestIsCjkChar:
+    def test_cjk_chars_are_cjk(self):
+        assert is_cjk_char("知")
+        assert is_cjk_char("あ")  # Hiragana
+        assert is_cjk_char("ア")  # Katakana
+        assert is_cjk_char("가")  # Hangul
+
+    def test_non_cjk_are_not_cjk(self):
+        assert not is_cjk_char("a")
+        assert not is_cjk_char("0")
+        assert not is_cjk_char(" ")
+        assert not is_cjk_char("，")
+
+    def test_rejects_multichar(self):
+        assert not is_cjk_char("知识")
+
+
+# ---------------------------------------------------------------------------- #
+# CJK bigram cohesion filter
+# ---------------------------------------------------------------------------- #
+# Reproduces the reported scatter: a doc whose tags came out as
+# "凌晨、晨一、一点、点执、执行" -- the cross-boundary bigrams (晨一 / 点执) are
+# pure noise from the dictionary-free CharBigramTokenizer.
+SCATTER_DOC = (
+    "凌晨一点执行数据库备份任务。该任务占用较多资源。"
+    "备份在凌晨一点开始，执行时间约两小时。为减少占用，建议调整执行时间。"
+)
+
+
+class TestCohesion:
+    def test_default_threshold_in_range(self):
+        assert 0.0 < DEFAULT_MIN_COHESION < 1.0
+
+    def test_empty_and_non_cjk_return_empty(self):
+        assert blessed_cjk_bigrams("") == frozenset()
+        assert blessed_cjk_bigrams("english only, no cjk here") == frozenset()
+
+    def test_drops_cross_boundary_keeps_real_words(self):
+        # "知识管理" repeated verbatim -> 知识 / 管理 blessed, 识管 (cross-boundary) dropped.
+        text = "知识管理很重要。知识管理提升效率。"
+        blessed = blessed_cjk_bigrams(text)
+        assert "知识" in blessed
+        assert "管理" in blessed
+        assert "识管" not in blessed
+
+    def test_reported_scatter_noise_eliminated(self):
+        blessed = blessed_cjk_bigrams(SCATTER_DOC)
+        # cross-boundary accidents never survive
+        assert "晨一" not in blessed
+        assert "点执" not in blessed
+        # the real words do
+        assert "凌晨" in blessed
+        assert "一点" in blessed
+        assert "执行" in blessed
+        assert "占用" in blessed
+
+    def test_gate_disabled_returns_none(self):
+        assert cjk_bigram_gate(SCATTER_DOC, min_cohesion=None) is None
+
+    def test_high_threshold_filters_more(self):
+        # a very high floor drops even repeated real words whose chars are promiscuous
+        text = "占用资源。使用资源。作用资源。"
+        loose = blessed_cjk_bigrams(text, min_cohesion=0.0)
+        strict = blessed_cjk_bigrams(text, min_cohesion=0.99)
+        assert loose  # something survives with no floor
+        assert len(strict) <= len(loose)
+
+
+class TestExtractorCohesionIntegration:
+    @pytest.mark.parametrize(
+        "extractor",
+        [RakeKeywordExtractor(), TfidfKeywordExtractor(), TextRankKeywordExtractor()],
+    )
+    def test_no_cross_boundary_bigram_tags(self, extractor):
+        out = [k.keyword for k in extractor.extract(SCATTER_DOC, top_k=12)]
+        assert out, "extractor should still produce tags"
+        joined = " ".join(out)
+        assert "晨一" not in joined
+        assert "点执" not in joined
+        # and the real words still surface somewhere in the keyword set
+        assert "执行" in joined
+
+    @pytest.mark.parametrize(
+        "extractor",
+        [RakeKeywordExtractor(), TfidfKeywordExtractor(), TextRankKeywordExtractor()],
+    )
+    def test_min_cohesion_none_disables_filter(self, extractor):
+        # With the filter off, cross-boundary bigrams CAN appear again (old behaviour).
+        disabled = extractor.__class__(min_cohesion=None)
+        # Re-derive a fresh instance with the filter on for contrast.
+        enabled = extractor.__class__()
+        on_out = " ".join(k.keyword for k in enabled.extract(SCATTER_DOC, top_k=12))
+        off_out = " ".join(k.keyword for k in disabled.extract(SCATTER_DOC, top_k=12))
+        assert "晨一" not in on_out
+        # The disabled run must be noisier: it surfaces at least one bigram
+        # that the filter removes. Find any blessed bigram's overlapping neighbour.
+        # (We assert the filter actually changed the token stream, not a fixed token,
+        #  to keep this robust against DP tie-breaks.)
+        from sparksage.tags.cohesion import blessed_cjk_bigrams
+
+        blessed = blessed_cjk_bigrams(SCATTER_DOC)
+        # collect every 2-char CJK token the disabled extractor emits that the
+        # filter would drop; there must be at least one (that is the whole bug).
+        def _cjk2(s):
+            return len(s) == 2 and is_cjk_char(s[0]) and is_cjk_char(s[1])
+
+        dropped = {
+            t
+            for kw in off_out.split()
+            for t in kw.split()
+            if _cjk2(t) and t not in blessed
+        }
+        assert dropped, "with min_cohesion=None the noisy bigrams must reappear"
+
+    @pytest.mark.parametrize(
+        "extractor",
+        [RakeKeywordExtractor(), TfidfKeywordExtractor(), TextRankKeywordExtractor()],
+    )
+    def test_english_unaffected_by_filter(self, extractor):
+        out = [k.keyword for k in extractor.extract(ENGLISH_TEXT, top_k=5)]
+        joined = " ".join(out)
+        assert "retrieval" in joined or "chunks" in joined or "sparksage" in joined
+
+    def test_make_extractor_forwards_min_cohesion(self):
+        ex = make_extractor("rake", min_cohesion=None)
+        assert ex._min_cohesion is None
+        ex2 = make_extractor("tfidf", min_cohesion=0.9)
+        assert ex2._min_cohesion == 0.9

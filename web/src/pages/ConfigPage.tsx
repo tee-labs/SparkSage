@@ -164,6 +164,13 @@ export default function ConfigPage() {
               allowClear
             />
           </Form.Item>
+          <Form.Item
+            label="SPARKSAGE_AUTO_TAG_MIN_COHESION"
+            name="SPARKSAGE_AUTO_TAG_MIN_COHESION"
+            extra="CJK bigram 凝聚度阈值 (0-1)；过小会保留跨词噪声 bigram，off 关闭过滤"
+          >
+            <Input placeholder="0.34" />
+          </Form.Item>
           <Form.Item label="SPARKSAGE_TAGS_ZH" name="SPARKSAGE_TAGS_ZH" valuePropName="checked">
             <Switch />
           </Form.Item>
