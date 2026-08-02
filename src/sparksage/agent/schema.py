@@ -18,11 +18,14 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from sparksage.agent.models import ActionType, AgentAction
+
+if TYPE_CHECKING:
+    from sparksage.retrieve.models import RetrievalFilter
 
 #: Action assumed when the controller emits an unknown / empty action label.
 DEFAULT_ACTION = ActionType.SYNTHESIZE
@@ -46,7 +49,9 @@ class RawAgentAction(BaseModel):
     thought: str = ""
     action: str = ""
     query: str | None = None
+    sub_queries: list[str] | None = None
     k: Any = None
+    filter: dict[str, Any] | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -88,6 +93,9 @@ def _map_action(raw: str, *, strict: bool) -> ActionType:
             "search": ActionType.RETRIEVE,
             "lookup": ActionType.RETRIEVE,
             "query": ActionType.RETRIEVE,
+            "plan": ActionType.PLAN,
+            "decompose": ActionType.PLAN,
+            "break_down": ActionType.PLAN,
             "synthesize": ActionType.SYNTHESIZE,
             "synthesise": ActionType.SYNTHESIZE,
             "answer": ActionType.SYNTHESIZE,
@@ -116,6 +124,24 @@ def _coerce_k(raw: Any) -> int | None:
     return value if value >= 1 else None
 
 
+def _coerce_sub_queries(raw: list[str] | None) -> list[str] | None:
+    """De-duplicate + strip a PLAN's sub-queries; ``None`` when nothing left."""
+    if not raw:
+        return None
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw:
+        text = (str(item) if item is not None else "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+    return out or None
+
+
 def coerce_action(raw: RawAgentAction, *, strict: bool) -> AgentAction:
     """Turn a lenient :class:`RawAgentAction` into a strict :class:`AgentAction`.
 
@@ -123,21 +149,64 @@ def coerce_action(raw: RawAgentAction, *, strict: bool) -> AgentAction:
       common aliases); unknown labels fall back to ``SYNTHESIZE`` unless strict.
     * a ``RETRIEVE`` with an empty query falls back to ``SYNTHESIZE`` (there is
       nothing to retrieve) unless strict, which raises.
+    * a ``PLAN`` with no usable ``sub_queries`` falls back to ``SYNTHESIZE``
+      (nothing to decompose) unless strict, which raises.
     * ``k`` is clamped to ``>= 1`` or dropped when unparseable.
     """
     if not isinstance(raw, RawAgentAction):
         raise CoercionError("expected a RawAgentAction")
     action = _map_action(raw.action, strict=strict)
     query = (raw.query or "").strip() or None
+    sub_queries = _coerce_sub_queries(raw.sub_queries)
     if action is ActionType.RETRIEVE and not query:
         if strict:
             raise CoercionError("retrieve action requires a non-empty query")
         action = ActionType.SYNTHESIZE
+    if action is ActionType.PLAN and not sub_queries:
+        if strict:
+            raise CoercionError("plan action requires a non-empty sub_queries list")
+        action = ActionType.SYNTHESIZE
+    flt = _coerce_filter(raw.filter)
     return AgentAction(
         action=action,
         thought=(raw.thought or "").strip(),
         query=query if action is ActionType.RETRIEVE else None,
+        sub_queries=sub_queries if action is ActionType.PLAN else None,
         k=_coerce_k(raw.k) if action is ActionType.RETRIEVE else None,
+        filter=flt,
+    )
+
+
+def _coerce_filter(raw: dict[str, Any] | None) -> RetrievalFilter | None:
+    """Best-effort coercion of a controller ``filter`` blob.
+
+    Accepts a dict with any of ``tags`` / ``entities`` / ``languages`` /
+    ``kb_id``. Unknown tag values are dropped (rather than failing) so a
+    controller that hallucinate a tag cannot abort a multi-step run. Returns
+    ``None`` when no usable field survives.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return None
+    from sparksage.retrieve.models import RetrievalFilter
+    from sparksage.schema.enums import Tag
+
+    tags: set[Tag] = set()
+    for raw_tag in raw.get("tags") or []:
+        try:
+            tags.add(Tag(str(raw_tag)))
+        except ValueError:
+            continue
+    entities = {str(e) for e in raw.get("entities") or []} or None
+    languages = {str(lang) for lang in raw.get("languages") or []} or None
+    kb_id = raw.get("kb_id")
+    kb_id = str(kb_id) if kb_id else None
+    if not tags and not entities and not languages and not kb_id:
+        return None
+    return RetrievalFilter(
+        tags=tags or None,
+        entities=entities,
+        languages=languages,
+        kb_id=kb_id,
     )
 
 

@@ -65,8 +65,11 @@ from sparksage.agent.controller import (
     LLMAgentController,
 )
 from sparksage.agent.engine import (
+    DEFAULT_EXPANDER_N_VARIANTS,
     DEFAULT_MAX_EVIDENCE,
     DEFAULT_MAX_ITERATIONS,
+    DEFAULT_STEP_MAX_REFINE,
+    DEFAULT_STEP_MIN_RELEVANCE,
     AgenticQAEngine,
 )
 from sparksage.agent.models import (
@@ -114,8 +117,11 @@ __all__ = [
     "DEFAULT_ACTION",
     "DEFAULT_EVIDENCE_ANSWER_CHARS",
     "DEFAULT_EVIDENCE_TOP_K",
+    "DEFAULT_EXPANDER_N_VARIANTS",
     "DEFAULT_MAX_EVIDENCE",
     "DEFAULT_MAX_ITERATIONS",
+    "DEFAULT_STEP_MAX_REFINE",
+    "DEFAULT_STEP_MIN_RELEVANCE",
     "IdentityController",
     "LLMAgentController",
     "PHASE_DONE",

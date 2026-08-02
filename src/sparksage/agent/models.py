@@ -29,17 +29,21 @@ if TYPE_CHECKING:
     from sparksage.query.context import ConversationContext
     from sparksage.query.processor import QueryResult
     from sparksage.reader.orchestrator import AnswerResult
+    from sparksage.retrieve.grader import RelevanceResult
 
 
 class ActionType(str, Enum):
     """The next move the agent controller has chosen.
 
     ``RETRIEVE`` runs another knowledge-base retrieval (a sub-question in a
-    multi-hop / comparative plan); ``SYNTHESIZE`` stops the loop and hands the
-    accumulated evidence to the :class:`~sparksage.reader.Reader`.
+    multi-hop / comparative plan); ``PLAN`` decomposes the question into a list
+    of sub-queries the engine then retrieves in sequence (Plan-and-Execute);
+    ``SYNTHESIZE`` stops the loop and hands the accumulated evidence to the
+    :class:`~sparksage.reader.Reader`.
     """
 
     RETRIEVE = "retrieve"
+    PLAN = "plan"
     SYNTHESIZE = "synthesize"
 
 
@@ -56,6 +60,10 @@ class AgentAction:
         transparency and fed back into the next iteration's prompt.
     query:
         The sub-query to retrieve, present only for ``RETRIEVE``.
+    sub_queries:
+        The decomposition produced by a ``PLAN`` action. The engine enqueues
+        these and retrieves each one through the same per-step path (graded /
+        refined / expanded like any retrieval). Ignored for non-PLAN actions.
     k:
         Optional override of how many chunks this retrieval should return.
     filter:
@@ -66,6 +74,7 @@ class AgentAction:
     action: ActionType
     thought: str = ""
     query: str | None = None
+    sub_queries: list[str] | None = None
     k: int | None = None
     filter: RetrievalFilter | None = None
 
@@ -79,13 +88,24 @@ class AgentStep:
     thought:
         The controller's reasoning that produced this retrieval.
     query:
-        The sub-query that was actually retrieved.
+        The sub-query that was actually retrieved (after any per-step
+        refinement -- see ``refined_query``).
     retrieved_count:
         How many chunks this single retrieval returned.
     observation:
         Compact summary of what was found (truncated ``critical_question ||
         trusted_answer`` of the top hits) -- fed back to the controller so it
         does not re-ask the same thing.
+    relevance:
+        Optional :class:`~sparksage.retrieve.grader.RelevanceResult` from the
+        step's retrieval grader. ``None`` when no grader is wired -- the
+        per-step relevance gate is what finally connects the existing
+        ``RetrievalGrader`` to the agent loop.
+    refined_query:
+        The refined query the step re-retrieved on a low relevance score
+        (``None`` when no per-step refinement happened). When set, ``query`` is
+        the original sub-query and ``refined_query`` is what actually improved
+        the recall.
     created_at:
         When the step ran, for timeline / progress rendering.
     """
@@ -94,6 +114,8 @@ class AgentStep:
     query: str
     retrieved_count: int
     observation: str
+    relevance: RelevanceResult | None = None
+    refined_query: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -161,6 +183,8 @@ class AgentProgress:
     thought: str = ""
     query: str | None = None
     evidence_count: int = 0
+    relevance: RelevanceResult | None = None
+    refined_query: str | None = None
 
     @property
     def percent(self) -> float:

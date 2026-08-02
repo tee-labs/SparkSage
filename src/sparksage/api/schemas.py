@@ -365,6 +365,16 @@ class AskRequest(BaseModel):
             '"agent" requires an agent controller to be configured server-side.'
         ),
     )
+    stream: bool = Field(
+        default=False,
+        description=(
+            "When ``True`` (and ``mode='agent'``) the response is an SSE stream "
+            "of ``progress`` events (one per agent phase -- thinking / "
+            "retrieving / synthesizing / done) terminated by a single "
+            "``result`` event carrying the full :class:`AskResponse`. Ignored "
+            "for ``mode='default'`` (single-shot is too fast to stream)."
+        ),
+    )
 
 
 class CitationOut(BaseModel):
@@ -411,6 +421,24 @@ class AgentStepOut(BaseModel):
     )
     observation: str = Field(
         default="", description="Compact summary of what was found (fed back to the controller)."
+    )
+    relevance_score: float | None = Field(
+        default=None,
+        description=(
+            "Per-step retrieval relevance score in [0, 1] (the ISREL gate). "
+            "``None`` when no retrieval grader is wired on the agent."
+        ),
+    )
+    relevance_reasoning: str | None = Field(
+        default=None,
+        description="The grader's brief explanation for ``relevance_score``.",
+    )
+    refined_query: str | None = Field(
+        default=None,
+        description=(
+            "The refined query the step re-retrieved on a low relevance score "
+            "(``None`` when no per-step refinement happened)."
+        ),
     )
     created_at: datetime | None = Field(
         default=None, description="When the step ran (UTC, ISO 8601), for timeline rendering."
@@ -868,6 +896,13 @@ def _to_ask_response(result: QAResultLike) -> AskResponse:
                 query=s.query,
                 retrieved_count=s.retrieved_count,
                 observation=s.observation,
+                relevance_score=(
+                    s.relevance.score if getattr(s, "relevance", None) is not None else None
+                ),
+                relevance_reasoning=(
+                    s.relevance.reasoning if getattr(s, "relevance", None) is not None else None
+                ),
+                refined_query=getattr(s, "refined_query", None),
                 created_at=s.created_at,
             )
             for s in result.steps
