@@ -12,6 +12,13 @@ export interface ConvertResponse {
   cleaned: boolean;
 }
 
+export interface HealthResponse {
+  status: string;
+  version: string;
+  generator_configured: boolean;
+  converter_configured: boolean;
+}
+
 export interface GenerationStats {
   raw_block_count: number;
   emitted: number;
@@ -44,6 +51,16 @@ export interface GenerateResponse {
   source: SourceInfo;
   cleaned: boolean;
   stats?: GenerationStats | null;
+}
+
+export interface IngestAndIndexResponse {
+  doc_id: string;
+  block_count: number;
+  blocks: IdeaBlock[];
+  title?: string | null;
+  source: SourceInfo;
+  tags: string[];
+  summary?: string | null;
 }
 
 export interface ConfigResponse {

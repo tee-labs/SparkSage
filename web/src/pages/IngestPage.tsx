@@ -19,7 +19,7 @@ import {
 import { InboxOutlined, DownloadOutlined } from '@ant-design/icons';
 import type { UploadFile } from 'antd';
 import { api } from '@/api';
-import type { ConvertResponse, GenerateResponse, IdeaBlock } from '@/types';
+import type { ConvertResponse, IdeaBlock } from '@/types';
 import Markdown from '@/components/Markdown';
 import KbSelector from '@/components/KbSelector';
 import { useKnowledgeBases } from '@/components/useKnowledgeBases';
@@ -40,7 +40,7 @@ export default function IngestPage() {
   const [loading, setLoading] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [convertResult, setConvertResult] = useState<ConvertResponse | null>(null);
-  const [generateResult, setGenerateResult] = useState<GenerateResponse | null>(null);
+  const [generateResult, setGenerateResult] = useState<{ blocks: IdeaBlock[] } | null>(null);
 
   const pushLog = (step: string) =>
     setLogs((prev) => [...prev, { step, time: new Date().toLocaleTimeString() }]);
@@ -92,7 +92,6 @@ export default function IngestPage() {
           kb_id: selectedKbId,
         };
         const allBlocks: IdeaBlock[] = [];
-        let last: GenerateResponse | null = null;
         for (const file of targets) {
           pushLog(`开始生成 IdeaBlock：${file.name}`);
           const res = useKb
@@ -100,9 +99,8 @@ export default function IngestPage() {
             : await api.generate(file, opts);
           pushLog(`生成完成：${file.name}（${res.blocks.length} 个 block）`);
           allBlocks.push(...res.blocks);
-          last = res;
         }
-        setGenerateResult({ ...(last as GenerateResponse), blocks: allBlocks });
+        setGenerateResult({ blocks: allBlocks });
         pushLog(`全部生成完成：共 ${allBlocks.length} 个 block`);
       }
     } catch (e) {

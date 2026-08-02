@@ -677,7 +677,7 @@ result = proc.process("那联通呢", context=ctx)
   [`IdentitySelfQueryParser`](src/sparksage/query/self_query.py) 是 no-op。把它接在
   `Retriever.search` 之前，并直接透传它的 `filter`。
 
-> **注意：** 这是框架无关的核心。未来的 `/api/v1/query` 路由会是一层薄包装，镜像
+> **注意：** 这是框架无关的核心。web 层是一层薄包装（`POST /api/v1/query`），镜像
 > [`SparkSageService`](src/sparksage/api/pipeline.py) 包装 ingest 管道的方式。
 
 离线演示（规则分类器 + 脚本化 FakeLLMClient 改写器；无需 API key）：
@@ -846,8 +846,8 @@ print(result.citations)                                  # 绑定到 source.loca
 [`InMemorySemanticCache`](src/sparksage/query/cache.py) 实现）对近似重复的重复查
 询短路掉整条管道。
 
-> **注意：** 尚未接入 web 层——未来的 `/api/v1/query` 路由会是 `QAEngine.ask` 的
-> 一层薄包装，正如
+> **注意：** 已接入 web 层——通过 `POST /api/v1/query`（`QAEngine.ask` 的
+> 一层薄包装），正如
 > [`SparkSageService`](src/sparksage/api/pipeline.py) 包装 ingest。
 
 ---
@@ -1030,6 +1030,24 @@ SparkSage 通过一个小型 HTTP API 暴露其能力：
 * `GET /api/v1/tags` —— 已存储文档的去重标签词表。
 * `GET /api/v1/health` —— 存活探针；上报版本号以及是否已配置生成。供 Docker
   `HEALTHCHECK` 使用。
+
+当启用端到端 QA 管道时（`SPARKSAGE_ENABLE_QA=1`，或传入 `QAService`），以下路由会
+自动挂载：
+
+* `POST /api/v1/knowledge_base/ingest` —— 上传 → 解析 → 切块 → 向量化 → 索引。
+* `POST /api/v1/query` —— 针对知识库提问，返回有依据、带引用的答案
+  （`mode="default"` 单轮，或 `mode="agent"` 多跳推理）。
+* `GET /api/v1/knowledge_base` —— 当前知识库快照（block / 文档计数）。
+* `GET /api/v1/knowledge_base/blocks` —— 分页 IdeaBlock 列表（按 tag / 语言 /
+  status 过滤）。
+* `GET /api/v1/knowledge_base/tags` —— 已索引 block 的去重标签词表。
+* `DELETE /api/v1/knowledge_base/documents/{doc_id}` —— 删除文档并级联移除其索引
+  block。
+* `POST / GET / DELETE /api/v1/knowledge_bases[/{kb_id}]` —— 多知识库管理
+  （`POST .../{kb_id}/activate` 设置当前路由目标）。
+* `POST / GET /api/v1/feedback`[`/records`] —— 记录 / 汇总用户反馈。
+* `GET / DELETE /api/v1/query/history` —— 持久化的问答对话历史。
+* `GET / POST /api/v1/config` —— 读取 / 增量修改生效的 `.env` 配置（密钥脱敏）。
 
 API 层是框架无关的
 [`SparkSageService`](src/sparksage/api/pipeline.py) 之上的一层薄壳，后者把
@@ -1403,10 +1421,11 @@ ruff check src tests                          # lint
 本 README 所述一切**均已实现并测试**（详见上方各章节及
 [`AGENTS.md`](AGENTS.md) 的完整子系统图）。接下来要做的：
 
-- [ ] **`/api/v1/query` 路由** 包装 `QAEngine`——一个一次调用的 HTTP 端点，返回有
-  依据、带引用的答案，镜像 `SparkSageService` 包装 ingest 的方式。
 - [ ] **`/api/v1/distill` 路由** 包装 `JobManager`——提交 / 轮询 / 取消长时间运行的
   去重任务（异步作业层已存在，只缺这层薄 web 包装）。
+- [ ] **`/api/v1/query/agent` 路由** 包装一个可轮询的 agent 作业（在
+  `AgenticQAEngine` 的 `on_progress` / `is_cancelled` 钩子上复用 `DistillJob`
+  状态机，让长 agent 运行可取消 / 可观测）。
 - [ ] **OpenAI 兼容的 ingest / distill / query API**——一个可替换的外部接口，让现
   有 OpenAI SDK 调用方无需改代码即可采用 SparkSage。
 
