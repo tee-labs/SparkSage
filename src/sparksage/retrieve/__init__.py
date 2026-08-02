@@ -85,6 +85,7 @@ from sparksage.retrieve.models import (
     RetrievalResult,
     RetrievedChunk,
 )
+from sparksage.retrieve.multi_query import multi_query_retrieve
 from sparksage.retrieve.orchestrator import (
     DEFAULT_DEDUP_THRESHOLD,
     DEFAULT_DENSE_WEIGHT,
@@ -139,6 +140,7 @@ __all__ = [
     "grade_messages",
     "grade_system_prompt",
     "grade_user_prompt",
+    "multi_query_retrieve",
     "parse_raw_relevance",
     "parse_relevance_response",
     "reciprocal_rank_fusion",

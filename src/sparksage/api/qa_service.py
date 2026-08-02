@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
@@ -74,13 +75,20 @@ from sparksage.qa.history import (
     TurnRole,
 )
 from sparksage.query.context import ConversationContext
+from sparksage.query.expander import QueryExpander
 from sparksage.query.processor import QueryProcessor
+from sparksage.query.refiner import QueryRefiner
 from sparksage.reader.orchestrator import Reader
+from sparksage.retrieve.grader import RetrievalGrader
 from sparksage.retrieve.models import RetrievalFilter
 from sparksage.schema.ideablock import IdeaBlock
 from sparksage.schema.source import SourceRef
 
 _logger = logging.getLogger(__name__)
+
+#: Type alias for the agent progress callback (kept here to avoid importing the
+#: agent package's private name at the module top).
+AgentProgressCallback = Callable[..., None]
 
 
 @dataclass
@@ -179,6 +187,12 @@ class QAService:
         history_store: QASessionStore | None = None,
         agent_controller: AgentController | None = None,
         agent_max_iterations: int = DEFAULT_MAX_AGENT_ITERATIONS,
+        agent_retrieval_grader: RetrievalGrader | None = None,
+        agent_query_refiner: QueryRefiner | None = None,
+        agent_query_expander: QueryExpander | None = None,
+        agent_step_min_relevance: float | None = None,
+        agent_step_max_refine: int | None = None,
+        agent_expander_n_variants: int | None = None,
     ) -> None:
         self._service = service
         self._embedder = embedder
@@ -196,6 +210,16 @@ class QAService:
         self._agent_engines: dict[str, AgenticQAEngine] = {}
         self._agent_controller = agent_controller
         self._agent_max_iterations = agent_max_iterations
+        # Per-KB agent engines inherit these optional reflection components
+        # (the missing middle gate of the three-stage policy finally connected
+        # to the agent loop): the grader + refiner drive the per-step refine +
+        # re-retrieve cycle, the expander drives per-step multi-query RRF.
+        self._agent_retrieval_grader = agent_retrieval_grader
+        self._agent_query_refiner = agent_query_refiner
+        self._agent_query_expander = agent_query_expander
+        self._agent_step_min_relevance = agent_step_min_relevance
+        self._agent_step_max_refine = agent_step_max_refine
+        self._agent_expander_n_variants = agent_expander_n_variants
 
         if kb is not None:
             default_kb = kb
@@ -346,7 +370,8 @@ class QAService:
         Reuses the per-KB :class:`Retriever`, the shared :class:`Reader` and the
         shared :class:`QueryProcessor` (so the agent inherits the out-of-domain
         interception gate + rewrite-seeded first retrieval), and the wired
-        :class:`AgentController`.
+        :class:`AgentController`. Also wires the optional per-step reflection
+        components (grader / refiner / expander) when supplied on this service.
         """
         if self._agent_controller is None:
             raise RuntimeError(
@@ -354,12 +379,27 @@ class QAService:
                 "QAService(..., agent_controller=...) to enable mode='agent'"
             )
         if kb_id not in self._agent_engines:
+            kwargs: dict[str, Any] = {
+                "max_iterations": self._agent_max_iterations,
+            }
+            if self._agent_retrieval_grader is not None:
+                kwargs["retrieval_grader"] = self._agent_retrieval_grader
+            if self._agent_query_refiner is not None:
+                kwargs["query_refiner"] = self._agent_query_refiner
+            if self._agent_query_expander is not None:
+                kwargs["query_expander"] = self._agent_query_expander
+            if self._agent_step_min_relevance is not None:
+                kwargs["step_min_relevance"] = self._agent_step_min_relevance
+            if self._agent_step_max_refine is not None:
+                kwargs["step_max_refine"] = self._agent_step_max_refine
+            if self._agent_expander_n_variants is not None:
+                kwargs["expander_n_variants"] = self._agent_expander_n_variants
             self._agent_engines[kb_id] = AgenticQAEngine(
                 controller=self._agent_controller,
                 retriever=self._kbs[kb_id].retriever,
                 reader=self._reader,
                 query_processor=self._query_processor,
-                max_iterations=self._agent_max_iterations,
+                **kwargs,
             )
         return self._agent_engines[kb_id]
 
@@ -661,6 +701,8 @@ class QAService:
         use_cache: bool = True,
         kb_id: str | None = None,
         mode: str = "default",
+        on_progress: Callable[[Any], None] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> QAResult | AgentResult:
         """Answer ``query`` end-to-end.
 
@@ -678,6 +720,10 @@ class QAService:
         as: explicit ``kb_id`` -> ``filter.kb_id`` -> the active KB. Pass a
         :class:`RetrievalFilter` for tag / entity / language scoping; pass a
         :class:`ConversationContext` for multi-turn anaphora resolution.
+
+        ``on_progress`` and ``is_cancelled`` only affect ``mode="agent"`` (the
+        single-shot mode is synchronous); the SSE streaming route forwards them
+        so a long agent run emits per-phase progress the client can render.
         """
         kb = self._resolve_kb(kb_id, filter=filter)
         if mode == "agent":
@@ -689,6 +735,8 @@ class QAService:
                 k=k,
                 use_lexical=use_lexical,
                 use_rerank=use_rerank,
+                on_progress=on_progress,
+                is_cancelled=is_cancelled,
             )
         return self._ask_default(
             kb.kb_id,
@@ -768,6 +816,8 @@ class QAService:
         k,
         use_lexical,
         use_rerank,
+        on_progress=None,
+        is_cancelled=None,
     ) -> AgentResult:
         engine = self._agent_engine_for(kb_id)
         _logger.debug(
@@ -786,6 +836,8 @@ class QAService:
             k=k,
             use_lexical=use_lexical,
             use_rerank=use_rerank,
+            on_progress=on_progress,
+            is_cancelled=is_cancelled,
         )
         elapsed = time.perf_counter() - t0
         _logger.info(

@@ -161,6 +161,67 @@ class TestActionCoercion:
         assert act.query is None
         assert act.k is None
 
+    def test_plan_alias_and_sub_queries(self):
+        act = coerce_action(
+            RawAgentAction(
+                thought="decompose",
+                action="plan",
+                sub_queries=["A revenue", "B revenue", "A revenue"],
+            ),
+            strict=False,
+        )
+        assert act.action is ActionType.PLAN
+        # de-duplicated + stripped
+        assert act.sub_queries == ["A revenue", "B revenue"]
+        # PLAN drops query / k
+        assert act.query is None
+        assert act.k is None
+
+    @pytest.mark.parametrize("alias", ["plan", "decompose", "break_down"])
+    def test_plan_aliases(self, alias):
+        act = coerce_action(
+            RawAgentAction(action=alias, sub_queries=["q1"]), strict=False
+        )
+        assert act.action is ActionType.PLAN
+
+    def test_plan_without_sub_queries_falls_back_to_synthesize(self):
+        act = coerce_action(RawAgentAction(action="plan"), strict=False)
+        assert act.action is ActionType.SYNTHESIZE
+        assert act.sub_queries is None
+
+    def test_plan_without_sub_queries_strict_raises(self):
+        with pytest.raises(CoercionError):
+            coerce_action(RawAgentAction(action="plan"), strict=True)
+
+    def test_plan_with_empty_sub_queries_falls_back(self):
+        act = coerce_action(
+            RawAgentAction(action="plan", sub_queries=["", "  "]), strict=False
+        )
+        assert act.action is ActionType.SYNTHESIZE
+
+    def test_plan_with_filter_is_coerced(self):
+        act = coerce_action(
+            RawAgentAction(
+                action="retrieve",
+                query="q",
+                filter={"tags": ["important"], "kb_id": "kb-fin"},
+            ),
+            strict=False,
+        )
+        assert act.action is ActionType.RETRIEVE
+        assert act.filter is not None
+        assert act.filter.kb_id == "kb-fin"
+
+    def test_filter_drops_unknown_tags(self):
+        act = coerce_action(
+            RawAgentAction(
+                action="retrieve", query="q", filter={"tags": ["nonsense_tag"]}
+            ),
+            strict=False,
+        )
+        # no usable field survives -> filter is None
+        assert act.filter is None
+
     def test_k_clamped_and_dropped(self):
         assert coerce_action(
             RawAgentAction(action="retrieve", query="q", k=0), strict=False

@@ -634,64 +634,19 @@ class QAEngine:
         :class:`~sparksage.query.rewriter.RewriteResult.sub_queries` the
         rewriter already emits -- finally consumed here.
         """
-        from sparksage.retrieve.fusion import reciprocal_rank_fusion
+        from sparksage.retrieve.multi_query import multi_query_retrieve
 
         resolved_k = k or self._config.k
         lex = self._resolved(use_lexical, self._config.use_lexical)
         rr = self._resolved(use_rerank, self._config.use_rerank)
-
-        queries = [primary] + [q for q in sub_queries if q and q != primary]
-        if len(queries) == 1:
-            return self._retriever.search(
-                queries[0], k=resolved_k, filter=filter, use_lexical=lex, use_rerank=rr
-            )
-
-        fused_ids: dict[str, float] = {}
-        registry = self._retriever._registry  # noqa: SLF001 (shared registry)
-        dense_by: dict[str, float] = {}
-        lex_by: dict[str, float] = {}
-        rankings = []
-        for q in queries:
-            res = self._retriever.search(
-                q, k=max(resolved_k * 2, 5), filter=filter, use_lexical=lex, use_rerank=False
-            )
-            rankings.append(res.dense_hits)
-            for h in res.dense_hits:
-                dense_by.setdefault(h.block_id, h.score)
-            for h in res.lexical_hits:
-                lex_by.setdefault(h.block_id, h.score)
-
-        from sparksage.retrieve.models import RetrievedChunk
-
-        if any(rankings):
-            fused = reciprocal_rank_fusion(rankings, top_n=max(resolved_k * 2, 5))
-        else:
-            fused = []
-        for h in fused:
-            fused_ids[h.block_id] = h.score
-
-        chunks = [
-            RetrievedChunk(
-                block=registry[bid],
-                score=score,
-                dense_score=dense_by.get(bid),
-                lexical_score=lex_by.get(bid),
-                rank=i,
-            )
-            for i, (bid, score) in enumerate(
-                sorted(fused_ids.items(), key=lambda kv: (-kv[1], kv[0]))
-            )
-            if bid in registry
-        ][:resolved_k]
-
-        return RetrievalResult(
-            query=primary,
-            chunks=chunks,
-            dense_hits=[h for h in fused if h.block_id in dense_by] or fused,
-            lexical_hits=[],
-            fused=True,
-            reranked=False,
-            filtered_out=0,
+        return multi_query_retrieve(
+            self._retriever,
+            primary,
+            sub_queries,
+            k=resolved_k,
+            filter=filter,
+            use_lexical=lex,
+            use_rerank=rr,
         )
 
     @staticmethod

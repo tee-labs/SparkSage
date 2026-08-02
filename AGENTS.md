@@ -446,7 +446,7 @@ PYTHONPATH=src python3 examples/build_chunks.py
   `Retriever`, `Reader`, and `QueryProcessor` unchanged and adds exactly one new
   protocol, `AgentController` (`controller.py`: `next_action(state) → AgentAction`),
   which makes the loop *paradigm-pluggable* — `LLMAgentController` drives a
-  ReAct loop (thought → retrieve-another-sub-query | synthesize), and
+  ReAct loop (thought → retrieve-another-sub-query | plan | synthesize), and
   `IdentityController` is the no-op degenerate controller (always synthesize) so
   `AgenticQAEngine(IdentityController())` collapses to the single-shot `QAEngine`
   baseline (the "off as a uniform protocol object" convention). It depends only
@@ -457,24 +457,58 @@ PYTHONPATH=src python3 examples/build_chunks.py
   multi-step run (`strict=True` to raise). The loop always runs a seed retrieval
   first (so the controller is consulted with evidence in hand and an empty corpus
   abstains cleanly through the reader), then iterates up to `max_iterations`
-  *extra* retrievals, merging evidence de-duplicated by block id (best score kept,
-  capped at `max_evidence`), and finally synthesizes via the `Reader` (which still
-  enforces its faithfulness/confidence abstention gate — a starved agent says "I
-  don't know", never hallucinates). It reuses the canonical long-running-job shape
-  from `DistillPipeline` (`on_progress` callback firing thinking → retrieving →
-  synthesizing → done phases + a cooperative `is_cancelled=` predicate), so a
-  future `/api/v1/query/agent` route can wrap a run in a pollable job (mirroring
-  the planned `/api/v1/distill` route) with no new concurrency primitives.
-  `AgentResult` (`models.py`) exposes the same `query` / `text` / `citations` /
-  `abstained` / `answer` / `retrieval` surface as `QAResult` (plus the `steps` /
+  *extra* controller-decided steps (`PLAN` or `RETRIEVE`), merging evidence
+  de-duplicated by block id (best score kept, capped at `max_evidence`), and
+  finally synthesizes via the `Reader` (which still enforces its
+  faithfulness/confidence abstention gate — a starved agent says "I don't know",
+  never hallucinates). It reuses the canonical long-running-job shape from
+  `DistillPipeline` (`on_progress` callback firing thinking → retrieving →
+  synthesizing → done phases + a cooperative `is_cancelled=` predicate); the
+  `on_progress` hook is also plumbed through `QAService.ask` →
+  `POST /api/v1/query` (`AskRequest.stream=true`, `mode="agent"`) as an SSE
+  stream of `progress` events terminated by a single `result` event (so a
+  long agent run streams its ReAct phases to the UI instead of a blocking
+  spinner). The agent loop is no longer an "island" divorced from the
+  right-half reflection components: `AgenticQAEngine.__init__` accepts optional
+  `retrieval_grader` / `query_refiner` / `query_expander` (the existing
+  protocols, finally connected) — each per-step retrieval is **expanded**
+  (multi-query / HyDE → RRF via the shared `retrieve/multi_query.py` helper,
+  the same one `QAEngine._multi_retrieve` delegates to), then **graded**
+  (`ISREL` gate), then on a low score **refined + re-retrieved** (CRAG / Self-
+  RAG, keeping the best-graded result so refinement can never lower quality,
+  bounded by `step_max_refine`); the per-step `RelevanceResult` + refined
+  query ride on `AgentStep` and surface through `AgentStepOut` for trajectory
+  transparency. The `ActionType` enum gained a third member, `PLAN`
+  (Plan-and-Execute): a controller emits `sub_queries: [...]`, the engine
+  enqueues them and **drains the queue one per iteration without consulting
+  the controller between them** (a single PLAN commits to retrieving every
+  queued sub-query up to `max_iterations`), then re-consults the controller
+  — the missing decomposition layer for comparison / multi-hop questions; the
+  controller system prompt (`prompts.py`) documents both `plan` and the
+  optional per-step `filter` (tags / entities / languages / kb_id, coerced
+  leniently with unknown tags dropped rather than failing). `AgentResult`
+  (`models.py`) exposes the same `query` / `text` / `citations` / `abstained`
+  / `answer` / `retrieval` surface as `QAResult` (plus the `steps` /
   `evidence` / `iterations` trajectory), so the HTTP `AskResponse` serializer
   (`_to_ask_response`) works unchanged. Wired into `QAService.ask(mode=...)`
   (`"default"` | `"agent"`, the latter lazily builds a per-KB `AgenticQAEngine`
   sharing the per-KB `Retriever` + the shared `Reader` / `QueryProcessor` +
-  a service-level `agent_controller`), exposed as the `mode` field on
-  `POST /api/v1/query` (`AskRequest.mode`); `build_default_service` auto-wires an
-  `LLMAgentController` (reusing the LLM client) whenever an API key is set, so
-  `mode="agent"` works out of the box, bounded by `SPARKSAGE_AGENT_MAX_ITERATIONS`.
+  a service-level `agent_controller` + the optional service-level
+  `agent_retrieval_grader` / `agent_query_refiner` / `agent_query_expander`),
+  exposed as the `mode` field on `POST /api/v1/query` (`AskRequest.mode`);
+  `build_qa_service` auto-wires an `LLMAgentController` (reusing the LLM
+  client) whenever an API key is set, plus the three reflection components
+  (`LLMRetrievalGrader` / `LLMQueryRefiner` / `HyDEExpander`) — disable with
+  `SPARKSAGE_AGENT_REFLECTION=off`, tune with
+  `SPARKSAGE_AGENT_STEP_MIN_RELEVANCE` / `SPARKSAGE_AGENT_STEP_MAX_REFINE` —
+  so `mode="agent"` works out of the box, bounded by
+  `SPARKSAGE_AGENT_MAX_ITERATIONS`.
+- The multi-query retrieve helper (`retrieve/multi_query.py`) is the shared
+  recall-boost path finally extracted so both `QAEngine` (sub-query
+  decomposition / multi-query expansion) and the agent's per-step retrieval
+  share one implementation: retrieve each variant -> RRF-fuse the ranked
+  lists -> rebuild `RetrievedChunk`s carrying the fused + dense + lexical
+  scores. Pure stdlib beyond `Retriever` and `reciprocal_rank_fusion`.
 - The knowledge-base core (`kb/`) is the multi-tenant aggregate root — the
   organizational entity the flat `documents/DocumentStore` lacked. `KnowledgeBase`
   (`knowledge_base.py`) owns documents + their IdeaBlocks + a dense `VectorStore`
@@ -684,6 +718,39 @@ reader). `AgentResult` is shape-compatible with `QAResult`, so
 (`AskRequest.mode`) select it with no serializer change; `build_default_service`
 auto-wires an `LLMAgentController` whenever an API key is set, bounded by
 `SPARKSAGE_AGENT_MAX_ITERATIONS`.
+
+Also implemented now: the Phase-1/2 agentic-RAG enhancements that finally
+connect the agent loop to the existing right-half reflection components (the
+"agent was an island" gap from the analysis report). The `ActionType` enum
+gained `PLAN` (Plan-and-Execute): a controller emits `sub_queries: [...]`, the
+engine enqueues them and drains the queue one per iteration without
+re-consulting the controller between them, then re-plans / synthesizes — the
+missing decomposition layer for comparison / multi-hop questions. The
+controller system prompt (`agent/prompts.py`) now documents `plan` and the
+previously-dead `filter` field (tags / entities / languages / kb_id, coerced
+leniently in `agent/schema.py:_coerce_filter` with unknown tags dropped rather
+than failing). `AgenticQAEngine.__init__` accepts optional
+`retrieval_grader` / `query_refiner` / `query_expander` / `step_min_relevance`
+/ `step_max_refine` / `expander_n_variants`: each per-step retrieval is
+**expanded** (multi-query / HyDE → RRF via the new shared
+`retrieve/multi_query.py:multi_query_retrieve`, which `QAEngine._multi_retrieve`
+also delegates to), then **graded** (`ISREL` gate, `LLMRetrievalGrader`), then
+on a low score **refined + re-retrieved** (CRAG / Self-RAG via
+`LLMQueryRefiner`, keeping the best-graded result so refinement can never
+lower quality, bounded by `step_max_refine`); the per-step `RelevanceResult`
++ refined query ride on `AgentStep` and surface through `AgentStepOut`
+(`relevance_score` / `relevance_reasoning` / `refined_query`) for trajectory
+transparency. SSE streaming of the agent loop: `POST /api/v1/query` with
+`AskRequest.stream=true` + `mode="agent"` returns a `text/event-stream` of
+`progress` events (one per phase — thinking / retrieving / synthesizing /
+done, carrying iteration / phase / percent / evidence_count / relevance)
+terminated by a single `result` event carrying the full `AskResponse` and a
+`done` sentinel; the worker runs in a daemon thread (the blocking LLM /
+retrieval I/O stays off the event loop) and pushes events through a
+thread-safe queue. `build_qa_service` auto-wires `LLMRetrievalGrader` /
+`LLMQueryRefiner` / `HyDEExpander` (reusing the LLM client) whenever an API
+key is set — disable with `SPARKSAGE_AGENT_REFLECTION=off`, tune with
+`SPARKSAGE_AGENT_STEP_MIN_RELEVANCE` / `SPARKSAGE_AGENT_STEP_MAX_REFINE`.
  Planned next: an OpenAI-compatible API, an `/api/v1/distill` route wrapping
  `JobManager`, and an `/api/v1/query/agent` route wrapping a pollable agent job
  (reusing the `DistillJob` state machine over the `AgenticQAEngine`

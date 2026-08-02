@@ -85,6 +85,14 @@ ENV_EMBEDDING_BASE_URL = "SPARKSAGE_EMBEDDING_BASE_URL"
 ENV_EMBEDDING_MODEL = "SPARKSAGE_EMBEDDING_MODEL"
 ENV_ENABLE_QA = "SPARKSAGE_ENABLE_QA"
 ENV_AGENT_MAX_ITERATIONS = "SPARKSAGE_AGENT_MAX_ITERATIONS"
+#: Whether the agentic loop auto-wires its per-step reflection components
+#: (retrieval grader + query refiner + HyDE expander). ``off`` disables so the
+#: agent runs as a pure ReAct loop without the ISREL gate.
+ENV_AGENT_REFLECTION = "SPARKSAGE_AGENT_REFLECTION"
+#: Per-step relevance floor for the agent's self-reflective refine loop.
+ENV_AGENT_STEP_MIN_RELEVANCE = "SPARKSAGE_AGENT_STEP_MIN_RELEVANCE"
+#: Cap on per-step refine + re-retrieve rounds inside the agent loop.
+ENV_AGENT_STEP_MAX_REFINE = "SPARKSAGE_AGENT_STEP_MAX_REFINE"
 
 # Durable persistence (one directory for every SQLite file). When set, every
 # default service wires durable backends so a Docker restart loses nothing:
@@ -103,6 +111,12 @@ DEFAULT_AUTO_TAG_EXTRACTOR = "rake"
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 #: Default cap on agent retrievals (``mode="agent"``).
 DEFAULT_AGENT_MAX_ITERATIONS = 4
+#: Whether the agent loop auto-wires its per-step reflection components.
+DEFAULT_AGENT_REFLECTION = True
+#: Default per-step relevance floor for the agent's self-reflective refine loop.
+DEFAULT_AGENT_STEP_MIN_RELEVANCE = 0.5
+#: Default cap on per-step refine + re-retrieve rounds inside the agent loop.
+DEFAULT_AGENT_STEP_MAX_REFINE = 1
 #: Default file names for each durable store when only ``SPARKSAGE_DATA_DIR``
 #: is set (each is a SQLite database; the document store table is separate).
 DEFAULT_DOC_DB_NAME = "sparksage.docs.db"
@@ -433,6 +447,9 @@ def build_qa_service():
 
     reader: Reader
     agent_controller = None
+    agent_grader = None
+    agent_refiner = None
+    agent_expander = None
     if llm_client is not None:
         reader = Reader(
             generator=LLMAnswerGenerator(llm_client),
@@ -442,8 +459,20 @@ def build_qa_service():
         # ``mode="agent"`` on ``POST /api/v1/query`` decomposes multi-hop /
         # comparative questions into a bounded retrieval loop.
         from sparksage.agent import LLMAgentController
+        from sparksage.query import HyDEExpander, LLMQueryRefiner
+        from sparksage.retrieve import LLMRetrievalGrader
 
         agent_controller = LLMAgentController(llm_client, model=model)
+        # Per-step reflection components: the grader + refiner drive the
+        # CRAG / Self-RAG ``ISREL`` gate (low-relevance -> refine -> re-retrieve),
+        # the HyDE expander lands short queries in the trusted-answer semantic
+        # space. All three are auto-wired so the agent loop is not an "island"
+        # divorced from the right-half components -- the biggest quality lever
+        # after chunking strategy. Disable with SPARKSAGE_AGENT_REFLECTION=off.
+        if _env_bool(ENV_AGENT_REFLECTION, DEFAULT_AGENT_REFLECTION):
+            agent_grader = LLMRetrievalGrader(llm_client, model=model)
+            agent_refiner = LLMQueryRefiner(llm_client, model=model)
+            agent_expander = HyDEExpander(llm_client, model=model)
     else:
         reader = Reader(generator=_DummyAnswerGenerator())
 
@@ -456,6 +485,15 @@ def build_qa_service():
         agent_controller=agent_controller,
         agent_max_iterations=_env_int(
             ENV_AGENT_MAX_ITERATIONS, DEFAULT_AGENT_MAX_ITERATIONS
+        ),
+        agent_retrieval_grader=agent_grader,
+        agent_query_refiner=agent_refiner,
+        agent_query_expander=agent_expander,
+        agent_step_min_relevance=_env_float(
+            ENV_AGENT_STEP_MIN_RELEVANCE, DEFAULT_AGENT_STEP_MIN_RELEVANCE
+        ),
+        agent_step_max_refine=_env_int(
+            ENV_AGENT_STEP_MAX_REFINE, DEFAULT_AGENT_STEP_MAX_REFINE
         ),
         kb_store=kb_store,
         state_store=state_store,
@@ -503,6 +541,127 @@ class _DummyAnswerGenerator:
             abstained=True,
             abstention_reason="no LLM configured; set SPARKSAGE_API_KEY to enable answering",
         )
+
+
+# --------------------------------------------------------------------------- #
+# SSE streaming for agentic QA
+# --------------------------------------------------------------------------- #
+def _sse_event(event: str, data: dict[str, Any]) -> str:
+    """Format one Server-Sent-Events message (an ``event:`` + ``data:`` block)."""
+    import json as _json
+
+    payload = _json.dumps(data, ensure_ascii=False, default=str)
+    return f"event: {event}\ndata: {payload}\n\n"
+
+
+def _agent_progress_payload(progress: Any) -> dict[str, Any]:
+    """Serialize an :class:`~sparksage.agent.AgentProgress` for SSE."""
+    payload: dict[str, Any] = {
+        "iteration": progress.iteration,
+        "max_iterations": progress.max_iterations,
+        "phase": progress.phase,
+        "percent": round(float(progress.percent), 4),
+        "evidence_count": progress.evidence_count,
+    }
+    if progress.action is not None:
+        payload["action"] = progress.action.value
+    if progress.thought:
+        payload["thought"] = progress.thought
+    if progress.query:
+        payload["query"] = progress.query
+    rel = getattr(progress, "relevance", None)
+    if rel is not None:
+        payload["relevance_score"] = float(rel.score)
+        if rel.reasoning:
+            payload["relevance_reasoning"] = rel.reasoning
+    if getattr(progress, "refined_query", None):
+        payload["refined_query"] = progress.refined_query
+    return payload
+
+
+def _stream_agent_run(
+    qa_svc: Any,
+    *,
+    query: str,
+    context: Any,
+    filter: Any,
+    k: int | None,
+    use_lexical: bool | None,
+    use_rerank: bool | None,
+    kb_id: str | None,
+) -> Any:
+    """Return a :class:`StreamingResponse` that runs an agent QA in a thread.
+
+    Emits ``progress`` SSE events (one per agent phase -- thinking / retrieving
+    / synthesizing / done) and terminates with one ``result`` event carrying
+    the full :class:`AskResponse`, then a final ``done`` sentinel. Errors
+    surface as an ``error`` event with HTTP 200 (so an EventSource client still
+    receives it -- the alternative, raising, would let the in-flight SSE
+    payload get truncated mid-stream).
+    """
+    import asyncio
+    import queue as _queue
+    import threading
+
+    from fastapi.responses import StreamingResponse
+
+    from sparksage.api.schemas import _to_ask_response
+
+    def _run():
+        out_q: _queue.Queue[Any] = _queue.Queue()
+
+        def _on_progress(progress: Any) -> None:
+            out_q.put(("progress", _agent_progress_payload(progress)))
+
+        def _worker() -> None:
+            try:
+                result = qa_svc.ask(
+                    query,
+                    context=context,
+                    filter=filter,
+                    k=k,
+                    use_lexical=use_lexical,
+                    use_rerank=use_rerank,
+                    kb_id=kb_id,
+                    mode="agent",
+                    on_progress=_on_progress,
+                )
+                payload = _to_ask_response(result).model_dump(mode="json")
+                out_q.put(("result", payload))
+            except Exception as exc:  # noqa: BLE001 - surface to the client
+                out_q.put(("error", {"detail": _detail(exc)}))
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+
+        async def _gen():
+            while True:
+                try:
+                    kind, payload = await asyncio.to_thread(out_q.get, timeout=300)
+                except Exception:  # pragma: no cover - timeout / queue shutdown
+                    yield _sse_event("error", {"detail": "agent stream timed out"})
+                    return
+                if kind == "progress":
+                    yield _sse_event("progress", payload)
+                elif kind == "result":
+                    yield _sse_event("result", payload)
+                    yield _sse_event("done", {})
+                    return
+                elif kind == "error":
+                    yield _sse_event("error", payload)
+                    return
+
+        return StreamingResponse(
+            _gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    return _run()
 
 
 def create_app(
@@ -1052,8 +1211,19 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
     )
     async def ask(
         body: Annotated[AskRequest, Body(description="The question + options.")],
-    ) -> AskResponse:
+    ):
         flt, context = _build_filter_from_request(body)
+        if body.stream and body.mode == "agent":
+            return _stream_agent_run(
+                qa_svc,
+                query=body.query,
+                context=context,
+                filter=flt,
+                k=body.k,
+                use_lexical=body.use_lexical,
+                use_rerank=body.use_rerank,
+                kb_id=body.kb_id,
+            )
         try:
             result = await asyncio.to_thread(
                 qa_svc.ask,

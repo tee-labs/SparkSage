@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from collections.abc import Callable
 
 from sparksage.agent.controller import AgentController
@@ -59,9 +60,12 @@ from sparksage.agent.models import (
     AgentStep,
 )
 from sparksage.query.context import ConversationContext
+from sparksage.query.expander import IdentityExpander, QueryExpander
 from sparksage.query.processor import QueryProcessor, QueryResult
+from sparksage.query.refiner import IdentityRefiner, QueryRefiner
 from sparksage.reader.orchestrator import Reader
-from sparksage.retrieve.models import RetrievalFilter, RetrievedChunk
+from sparksage.retrieve.grader import RetrievalGrader
+from sparksage.retrieve.models import RetrievalFilter, RetrievalResult, RetrievedChunk
 from sparksage.retrieve.orchestrator import RetrievalConfig, Retriever
 
 _logger = logging.getLogger(__name__)
@@ -77,6 +81,18 @@ DEFAULT_OBSERVATION_TOP_K = 5
 
 #: Truncate each observation chunk's ``trusted_answer``.
 DEFAULT_OBSERVATION_ANSWER_CHARS = 160
+
+#: Default per-step relevance floor below which the agent refines + re-retrieves
+#: (the missing middle gate of the three-stage policy -- mirrors
+#: :data:`sparksage.qa.DEFAULT_MIN_RELEVANCE`).
+DEFAULT_STEP_MIN_RELEVANCE = 0.5
+
+#: Default cap on per-step refine + re-retrieve rounds (caps latency / cost).
+DEFAULT_STEP_MAX_REFINE = 1
+
+#: Default number of variants an optional :class:`QueryExpander` produces for
+#: each per-step sub-query (RRF-fused recall boost).
+DEFAULT_EXPANDER_N_VARIANTS = 3
 
 ProgressCallback = Callable[[AgentProgress], None]
 CancelledPredicate = Callable[[], bool]
@@ -145,9 +161,38 @@ class AgenticQAEngine:
         is classified first (out-of-domain interception) and the rewrite seeds
         the first retrieval -- the symmetric query-side gate to the reader's
         answer-side abstention.
+    retrieval_grader:
+        Optional :class:`~sparksage.retrieve.RetrievalGrader`. When wired, each
+        retrieval step is graded for relevance; a low score triggers the
+        per-step refine + re-retrieve loop (the missing middle gate of the
+        three-stage policy -- finally connecting the existing grader to the
+        agent loop).
+    query_refiner:
+        Optional :class:`~sparksage.query.QueryRefiner`. When wired alongside a
+        grader, a low step relevance produces a refined query and the step
+        re-retrieves (up to ``step_max_refine`` rounds), keeping the best-graded
+        result so refinement can never lower quality.
+    query_expander:
+        Optional :class:`~sparksage.query.QueryExpander`. When wired, each
+        retrieval step expands its sub-query into ``expander_n_variants``
+        paraphrases and RRF-fuses the per-variant ranked lists -- the multi-query
+        recall boost (HyDE is especially effective here, since IdeaBlock is
+        embedded from ``trusted_answer`` and a hypothetical answer lands in the
+        answer semantic space).
+    step_min_relevance:
+        Per-step relevance floor below which the grader-triggered refine loop
+        fires (default :data:`DEFAULT_STEP_MIN_RELEVANCE`).
+    step_max_refine:
+        Cap on per-step refine + re-retrieve rounds (default
+        :data:`DEFAULT_STEP_MAX_REFINE`). ``0`` disables refinement even when a
+        grader is wired (steps are graded but never re-retrieved).
+    expander_n_variants:
+        How many variants the per-step expansion produces (default
+        :data:`DEFAULT_EXPANDER_N_VARIANTS`).
     max_iterations:
-        Maximum number of *extra* retrievals beyond the seed (default ``4``).
-        ``0`` collapses to a single-shot run regardless of the controller.
+        Maximum number of *extra* controller-decided steps (``PLAN`` or
+        ``RETRIEVE``) beyond the seed (default ``4``). ``0`` collapses to a
+        single-shot run regardless of the controller.
     max_evidence:
         Ceiling on accumulated evidence chunks (best-scored kept). Bounds the
         synthesis prompt cost for long agent runs.
@@ -177,6 +222,12 @@ class AgenticQAEngine:
         reader: Reader,
         *,
         query_processor: QueryProcessor | None = None,
+        retrieval_grader: RetrievalGrader | None = None,
+        query_refiner: QueryRefiner | None = None,
+        query_expander: QueryExpander | None = None,
+        step_min_relevance: float = DEFAULT_STEP_MIN_RELEVANCE,
+        step_max_refine: int = DEFAULT_STEP_MAX_REFINE,
+        expander_n_variants: int = DEFAULT_EXPANDER_N_VARIANTS,
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
         max_evidence: int = DEFAULT_MAX_EVIDENCE,
         config: RetrievalConfig | None = None,
@@ -195,10 +246,36 @@ class AgenticQAEngine:
             raise TypeError("max_evidence must be an int")
         if max_evidence < 1:
             raise ValueError("max_evidence must be >= 1")
+        if retrieval_grader is not None and not isinstance(
+            retrieval_grader, RetrievalGrader
+        ):
+            raise TypeError(
+                "retrieval_grader must implement the RetrievalGrader protocol"
+            )
+        if query_refiner is not None and not isinstance(query_refiner, QueryRefiner):
+            raise TypeError("query_refiner must implement the QueryRefiner protocol")
+        if query_expander is not None and not isinstance(query_expander, QueryExpander):
+            raise TypeError("query_expander must implement the QueryExpander protocol")
+        if not 0.0 <= float(step_min_relevance) <= 1.0:
+            raise ValueError("step_min_relevance must be in [0.0, 1.0]")
+        if not isinstance(step_max_refine, int) or isinstance(step_max_refine, bool):
+            raise TypeError("step_max_refine must be an int")
+        if step_max_refine < 0:
+            raise ValueError("step_max_refine must be >= 0")
+        if not isinstance(expander_n_variants, int) or isinstance(expander_n_variants, bool):
+            raise TypeError("expander_n_variants must be an int")
+        if expander_n_variants < 1:
+            raise ValueError("expander_n_variants must be >= 1")
         self._controller = controller
         self._retriever = retriever
         self._reader = reader
         self._query_processor = query_processor
+        self._retrieval_grader = retrieval_grader
+        self._query_refiner = query_refiner
+        self._query_expander = query_expander
+        self._step_min_relevance = float(step_min_relevance)
+        self._step_max_refine = step_max_refine
+        self._expander_n_variants = expander_n_variants
         self._max_iterations = max_iterations
         self._max_evidence = max_evidence
         self._config = config if config is not None else RetrievalConfig()
@@ -216,6 +293,22 @@ class AgenticQAEngine:
     @property
     def reader(self) -> Reader:
         return self._reader
+
+    @property
+    def retrieval_grader(self) -> RetrievalGrader | None:
+        return self._retrieval_grader
+
+    @property
+    def query_refiner(self) -> QueryRefiner | None:
+        return self._query_refiner
+
+    @property
+    def query_expander(self) -> QueryExpander | None:
+        return self._query_expander
+
+    @property
+    def step_min_relevance(self) -> float:
+        return self._step_min_relevance
 
     @property
     def max_iterations(self) -> int:
@@ -276,6 +369,14 @@ class AgenticQAEngine:
 
         iterations = 0
         aborted = False
+        # Sub-queries enqueued by a PLAN action -- drained one per iteration
+        # through the same retrieve path (graded / refined / expanded like any
+        # step) WITHOUT consulting the controller between them, so a single
+        # PLAN commits the engine to retrieving every queued sub-query (up to
+        # ``max_iterations``). Once the queue empties the controller is
+        # consulted again and may re-plan, retrieve more, or synthesize. This
+        # is the Plan-and-Execute pattern: plan once -> execute -> re-plan.
+        pending: deque[str] = deque()
         while iterations < self._max_iterations:
             if is_cancelled is not None and is_cancelled():
                 _logger.info("agent run cancelled at iteration %d", iterations)
@@ -289,6 +390,24 @@ class AgenticQAEngine:
                     evidence_count=len(state.evidence),
                 ),
             )
+            if pending:
+                # Drain the next planned sub-query without consulting the
+                # controller -- the plan already committed to it.
+                sub = pending.popleft()
+                iterations += 1
+                self._retrieve_step(
+                    state,
+                    sub,
+                    thought="planned sub-query",
+                    flt=flt,
+                    k=k,
+                    use_lexical=use_lexical,
+                    use_rerank=use_rerank,
+                    on_progress=on_progress,
+                    progress_iteration=iterations,
+                    progress_action=None,
+                )
+                continue
             action = self._controller.next_action(state)
             if action.action is ActionType.SYNTHESIZE:
                 self._emit(
@@ -304,6 +423,32 @@ class AgenticQAEngine:
                 )
                 break
             iterations += 1
+            if action.action is ActionType.PLAN:
+                # Enqueue the decomposition; do not retrieve this iteration.
+                # ``sub_queries`` is always populated here (the coercion rule
+                # demotes a plan-without-sub_queries to synthesize).
+                new_subs = [q for q in (action.sub_queries or []) if q]
+                before = len(pending)
+                pending.extend(new_subs)
+                _logger.info(
+                    "agent plan: enqueued %d sub-queries (queue %d->%d)",
+                    len(new_subs),
+                    before,
+                    len(pending),
+                )
+                self._emit(
+                    on_progress,
+                    AgentProgress(
+                        iteration=iterations,
+                        max_iterations=self._max_iterations,
+                        phase=PHASE_THINKING,
+                        action=action.action,
+                        thought=action.thought or "decomposed question into sub-queries",
+                        evidence_count=len(state.evidence),
+                    ),
+                )
+                continue
+            # RETRIEVE (controller-decided, not plan-driven).
             self._retrieve_step(
                 state,
                 action.query or seed_query,
@@ -401,9 +546,27 @@ class AgenticQAEngine:
         progress_iteration: int = 0,
         progress_action: AgentAction | None = None,
     ) -> None:
+        """One retrieval step: expand -> retrieve -> grade -> refine -> merge.
+
+        Mirrors the per-step recipe of the single-shot QA engine's
+        self-reflective loop, inlined so the agent loop finally consumes the
+        existing reflection components:
+
+        * **expand** (optional): when a :class:`QueryExpander` is wired, expand
+          the sub-query into ``n`` variants and RRF-fuse them (the multi-query
+          recall boost).
+        * **retrieve**: one plain :meth:`Retriever.search`, or a fused
+          multi-query retrieval when expansion produced variants.
+        * **grade + refine** (optional): when a :class:`RetrievalGrader` is
+          wired, score the retrieval; below ``step_min_relevance`` use a wired
+          :class:`QueryRefiner` to rewrite and re-retrieve (up to
+          ``step_max_refine`` rounds, keeping the best-graded result so
+          refinement can never lower quality). The best result's relevance is
+          recorded on the :class:`AgentStep` for trajectory transparency.
+        """
         if not str(sub_query).strip():
             return
-        effective_k = self._resolved(k, self._config.k)
+        effective_k = self._resolved_int(k, self._config.k)
         effective_lexical = self._resolved(use_lexical, self._config.use_lexical)
         effective_rerank = self._resolved(use_rerank, self._config.use_rerank)
         self._emit(
@@ -418,13 +581,57 @@ class AgenticQAEngine:
                 evidence_count=len(state.evidence),
             ),
         )
-        retrieval = self._retriever.search(
-            sub_query,
+        current_query = sub_query
+        retrieval = self._retrieve_with_expand(
+            current_query,
             k=effective_k,
-            filter=flt,
+            flt=flt,
             use_lexical=effective_lexical,
             use_rerank=effective_rerank,
         )
+        relevance = self._maybe_grade(current_query, retrieval, None)
+
+        # Per-step self-reflective refine + re-retrieve loop (CRAG / Self-RAG
+        # ``ISREL`` gate, finally connected to the agent loop). Keeps the
+        # best-graded retrieval so refinement can never lower quality.
+        refined_query: str | None = None
+        can_refine = (
+            self._retrieval_grader is not None
+            and self._query_refiner is not None
+            and not isinstance(self._query_refiner, IdentityRefiner)
+            and self._step_max_refine > 0
+        )
+        if can_refine and relevance is not None:
+            rounds = 0
+            best_retrieval, best_relevance = retrieval, relevance
+            while (
+                best_relevance.score < self._step_min_relevance
+                and rounds < self._step_max_refine
+            ):
+                refined = self._query_refiner.refine(
+                    current_query, best_relevance.score, best_relevance.reasoning
+                )
+                refined = (refined or "").strip()
+                rounds += 1
+                if not refined or refined.lower() == current_query.strip().lower():
+                    break
+                refined_query = refined
+                cand_retrieval = self._retrieve_with_expand(
+                    refined,
+                    k=effective_k,
+                    flt=flt,
+                    use_lexical=effective_lexical,
+                    use_rerank=effective_rerank,
+                )
+                cand_relevance = self._maybe_grade(refined, cand_retrieval, None)
+                if cand_relevance is not None and cand_relevance.score > best_relevance.score:
+                    best_retrieval, best_relevance = cand_retrieval, cand_relevance
+                    current_query = refined
+                    retrieval = best_retrieval
+                    relevance = best_relevance
+                if best_relevance.score >= self._step_min_relevance:
+                    break
+
         new_chunks = retrieval.chunks
         before = len(state.evidence)
         state.evidence = _merge_evidence(
@@ -441,19 +648,96 @@ class AgenticQAEngine:
                 query=sub_query,
                 retrieved_count=len(new_chunks),
                 observation=observation,
+                relevance=relevance,
+                refined_query=refined_query,
             )
         )
+        if relevance is not None or refined_query is not None:
+            self._emit(
+                on_progress,
+                AgentProgress(
+                    iteration=max(progress_iteration, 1),
+                    max_iterations=self._max_iterations,
+                    phase=PHASE_RETRIEVING,
+                    action=progress_action.action if progress_action else None,
+                    thought=thought,
+                    query=sub_query,
+                    evidence_count=len(state.evidence),
+                    relevance=relevance,
+                    refined_query=refined_query,
+                ),
+            )
         _logger.debug(
-            "agent step: query=%r hits=%d evidence=%d->%d",
+            "agent step: query=%r hits=%d evidence=%d->%d relevance=%s refined=%r",
             sub_query[:80],
             len(new_chunks),
             before,
             len(state.evidence),
+            f"{relevance.score:.2f}" if relevance is not None else None,
+            refined_query,
         )
+
+    def _retrieve_with_expand(
+        self,
+        query: str,
+        *,
+        k: int,
+        flt: RetrievalFilter,
+        use_lexical: bool,
+        use_rerank: bool,
+    ) -> RetrievalResult:
+        """Run one retrieval, optionally multi-query expanded + RRF-fused."""
+        if self._query_expander is not None and not isinstance(
+            self._query_expander, IdentityExpander
+        ):
+            from sparksage.retrieve.multi_query import multi_query_retrieve
+
+            variants = self._query_expander.expand(query, n=self._expander_n_variants)
+            if len(variants) > 1:
+                extra = [v for v in variants[1:] if v and v != variants[0]]
+                return multi_query_retrieve(
+                    self._retriever,
+                    variants[0],
+                    extra,
+                    k=k,
+                    filter=flt,
+                    use_lexical=use_lexical,
+                    use_rerank=use_rerank,
+                )
+        return self._retriever.search(
+            query,
+            k=k,
+            filter=flt,
+            use_lexical=use_lexical,
+            use_rerank=use_rerank,
+        )
+
+    def _maybe_grade(
+        self,
+        query: str,
+        retrieval: RetrievalResult,
+        existing: object,
+    ) -> object:
+        """Grade the retrieval when a grader is wired (no-op otherwise)."""
+        if self._retrieval_grader is None:
+            return existing
+        try:
+            return self._retrieval_grader.grade(query, retrieval.chunks)
+        except Exception as exc:  # pragma: no cover - defensive
+            _logger.warning("RetrievalGrader raised %s; skipping grade", exc)
+            return existing
 
     @staticmethod
     def _resolved(call_value: object, config_value: object) -> object:
         return call_value if call_value is not None else config_value
+
+    @staticmethod
+    def _resolved_int(call_value: int | None, config_value: int) -> int:
+        if call_value is None:
+            return config_value
+        if not isinstance(call_value, int) or isinstance(call_value, bool):
+            return config_value
+        return call_value if call_value >= 1 else config_value
 
     @staticmethod
     def _emit(
@@ -469,10 +753,13 @@ class AgenticQAEngine:
 
 
 __all__ = [
+    "DEFAULT_EXPANDER_N_VARIANTS",
     "DEFAULT_MAX_EVIDENCE",
     "DEFAULT_MAX_ITERATIONS",
     "DEFAULT_OBSERVATION_ANSWER_CHARS",
     "DEFAULT_OBSERVATION_TOP_K",
+    "DEFAULT_STEP_MAX_REFINE",
+    "DEFAULT_STEP_MIN_RELEVANCE",
     "AgenticQAEngine",
     "CancelledPredicate",
     "ProgressCallback",
