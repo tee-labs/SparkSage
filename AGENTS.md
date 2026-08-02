@@ -269,7 +269,18 @@ PYTHONPATH=src python3 examples/build_chunks.py
   **free-form** (`KeywordScore.keyword` → `list[str]` on the document) —
   intentionally *not* the closed `Tag` enum, which keeps its coarse-grained
   semantic-filtering role. `make_extractor("rake"|"tfidf"|"textrank")` is the
-  config-driven factory (unknown names fail fast).
+  config-driven factory (unknown names fail fast). Bigrams are a *scoring*
+  feature, not a word: the cohesion filter (`cohesion.py`, pure stdlib) stops
+  cross-boundary CJK bigrams (`凌晨一点执行` → `晨一` / `点执`) from surfacing as
+  tags. `blessed_cjk_bigrams` combines a bidirectional-conditional-probability
+  cohesion floor (`f(ab)/max(f(a),f(b))`) with a per-CJK-run maximum-weight
+  non-overlap selection (DP, weighted by cohesion) so the densest real-word
+  segmentation wins; the extractors drop non-blessed bigrams at the token level
+  (cleaning both tag output *and* TF-IDF / TextRank scoring). `min_cohesion=`
+  on every extractor / `make_extractor` (default `DEFAULT_MIN_COHESION = 0.34`,
+  `None` disables); `SPARKSAGE_AUTO_TAG_MIN_COHESION` is the env knob (`off` →
+  disabled). Word-perfect Mandarin still needs `jieba`; this is the no-dependency
+  fallback that removes the scatter.
 - The document-management core (`documents/`) is the document-level counterpart
   of `schema/` — there was no *document* object, only chunk-level
   `IdeaBlock`s. `DocumentRecord` (`models.py`, Pydantic v2, `extra="forbid"`)

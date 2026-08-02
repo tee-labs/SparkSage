@@ -311,3 +311,53 @@ def test_env_bool_unrecognized_returns_default(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setenv("SPARKSAGE_TEST_BOOL", "maybe")
     assert _env_bool("SPARKSAGE_TEST_BOOL", default=True) is True
+
+
+# ---------------------------------------------------------------------------- #
+# _env_float / _auto_tag_min_cohesion (float env-var parsing)
+# ---------------------------------------------------------------------------- #
+@pytest.mark.parametrize("raw,expected", [("0.5", 0.5), ("0.34", 0.34), ("1", 1.0)])
+def test_env_float_parses(
+    raw: str, expected: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sparksage.api.app import _env_float
+
+    monkeypatch.setenv("SPARKSAGE_TEST_FLOAT", raw)
+    assert _env_float("SPARKSAGE_TEST_FLOAT", default=0.9) == expected
+
+
+@pytest.mark.parametrize("raw", ["off", "OFF", "none", "None", "disabled"])
+def test_env_float_disabled_is_none(raw: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from sparksage.api.app import _env_float
+
+    monkeypatch.setenv("SPARKSAGE_TEST_FLOAT", raw)
+    assert _env_float("SPARKSAGE_TEST_FLOAT", default=0.34) is None
+
+
+def test_env_float_unset_returns_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sparksage.api.app import _env_float
+
+    monkeypatch.delenv("SPARKSAGE_TEST_FLOAT", raising=False)
+    assert _env_float("SPARKSAGE_TEST_FLOAT", default=0.5) == 0.5
+    assert _env_float("SPARKSAGE_TEST_FLOAT", default=None) is None
+
+
+def test_env_float_garbage_returns_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sparksage.api.app import _env_float
+
+    monkeypatch.setenv("SPARKSAGE_TEST_FLOAT", "not-a-number")
+    assert _env_float("SPARKSAGE_TEST_FLOAT", default=0.34) == 0.34
+
+
+def test_auto_tag_min_cohesion_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sparksage.api import app as app_module
+
+    monkeypatch.setenv(app_module.ENV_AUTO_TAG_MIN_COHESION, "0.9")
+    assert app_module._auto_tag_min_cohesion() == 0.9
+
+
+def test_auto_tag_min_cohesion_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sparksage.api import app as app_module
+
+    monkeypatch.setenv(app_module.ENV_AUTO_TAG_MIN_COHESION, "off")
+    assert app_module._auto_tag_min_cohesion() is None
