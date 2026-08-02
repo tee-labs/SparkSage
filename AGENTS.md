@@ -426,6 +426,44 @@ PYTHONPATH=src python3 examples/build_chunks.py
   `iterations` for transparency. Not yet wired to the web layer — a future
   `/api/v1/query` route will be a thin wrapper around `QAEngine.ask`, exactly as
   `SparkSageService` wraps ingest.
+- The agentic QA core (`agent/`) is a *different orchestrator* over the *same*
+  building blocks as `qa/` — it turns SparkSage from a one-shot RAG (a static
+  question→answer mapping) into an **Agentic RAG** with an LLM-driven
+  plan-act-observe-synthesize loop, the mode that handles the three problem
+  classes one-shot RAG cannot: multi-hop reasoning, conditional filtering, and
+  comparative analysis. `AgenticQAEngine` (`engine.py`) reuses the existing
+  `Retriever`, `Reader`, and `QueryProcessor` unchanged and adds exactly one new
+  protocol, `AgentController` (`controller.py`: `next_action(state) → AgentAction`),
+  which makes the loop *paradigm-pluggable* — `LLMAgentController` drives a
+  ReAct loop (thought → retrieve-another-sub-query | synthesize), and
+  `IdentityController` is the no-op degenerate controller (always synthesize) so
+  `AgenticQAEngine(IdentityController())` collapses to the single-shot `QAEngine`
+  baseline (the "off as a uniform protocol object" convention). It depends only
+  on the existing `LLMClient` (never a concrete SDK) and reuses the lenient→strict
+  pattern (`RawAgentAction` → `coerce_action` over a closed `ActionType` enum,
+  `agent/schema.py`) so the enum stays the single source of truth; on a bad
+  controller response it degrades to a synthesize action rather than aborting a
+  multi-step run (`strict=True` to raise). The loop always runs a seed retrieval
+  first (so the controller is consulted with evidence in hand and an empty corpus
+  abstains cleanly through the reader), then iterates up to `max_iterations`
+  *extra* retrievals, merging evidence de-duplicated by block id (best score kept,
+  capped at `max_evidence`), and finally synthesizes via the `Reader` (which still
+  enforces its faithfulness/confidence abstention gate — a starved agent says "I
+  don't know", never hallucinates). It reuses the canonical long-running-job shape
+  from `DistillPipeline` (`on_progress` callback firing thinking → retrieving →
+  synthesizing → done phases + a cooperative `is_cancelled=` predicate), so a
+  future `/api/v1/query/agent` route can wrap a run in a pollable job (mirroring
+  the planned `/api/v1/distill` route) with no new concurrency primitives.
+  `AgentResult` (`models.py`) exposes the same `query` / `text` / `citations` /
+  `abstained` / `answer` / `retrieval` surface as `QAResult` (plus the `steps` /
+  `evidence` / `iterations` trajectory), so the HTTP `AskResponse` serializer
+  (`_to_ask_response`) works unchanged. Wired into `QAService.ask(mode=...)`
+  (`"default"` | `"agent"`, the latter lazily builds a per-KB `AgenticQAEngine`
+  sharing the per-KB `Retriever` + the shared `Reader` / `QueryProcessor` +
+  a service-level `agent_controller`), exposed as the `mode` field on
+  `POST /api/v1/query` (`AskRequest.mode`); `build_default_service` auto-wires an
+  `LLMAgentController` (reusing the LLM client) whenever an API key is set, so
+  `mode="agent"` works out of the box, bounded by `SPARKSAGE_AGENT_MAX_ITERATIONS`.
 - The knowledge-base core (`kb/`) is the multi-tenant aggregate root — the
   organizational entity the flat `documents/DocumentStore` lacked. `KnowledgeBase`
   (`knowledge_base.py`) owns documents + their IdeaBlocks + a dense `VectorStore`
@@ -599,7 +637,27 @@ ingest route takes a `kb_id` form field, and `AskRequest.kb_id` routes the
 query to the right KB's lazily-built `QAEngine`; the React UI adds a
 `/knowledge-bases` management page and a shared `KbSelector` on ingest / QA /
 browse pages).
-Planned next: an OpenAI-compatible API and a `/api/v1/distill` route wrapping
-`JobManager`.
+Planned next: an OpenAI-compatible API, an `/api/v1/distill` route wrapping
+`JobManager`, and an `/api/v1/query/agent` route wrapping a pollable agent job
+(reusing the `DistillJob` state machine over the `AgenticQAEngine`
+`on_progress` / `is_cancelled` hooks so long agent runs are cancellable /
+observable exactly like a Distill run).
 Design schema additions so the Distill lifecycle fields (`status`, `parents`,
 `confidence`, `embedding`) remain usable.
+
+Also implemented now: agentic QA — a *second* QA mode that turns SparkSage from
+a one-shot RAG into an Agentic RAG. The new `agent/` package is a different
+orchestrator over the same `Retriever` / `Reader` / `QueryProcessor` building
+blocks, adding exactly one protocol (`AgentController`: `LLMAgentController`
+ReAct loop + `IdentityController` single-shot fallback) on top of the existing
+`LLMClient`, with lenient→strict action coercion over a closed `ActionType`
+enum (`agent/schema.py`). `AgenticQAEngine` runs a bounded plan-act-observe-
+synthesize loop (seed retrieval → up to `max_iterations` controller-decided
+retrievals → `Reader` synthesis), merging evidence de-duplicated by block id,
+reusing the `DistillPipeline` long-run shape (`on_progress` +
+`is_cancelled=`), and never hallucinating (a starved agent abstains through the
+reader). `AgentResult` is shape-compatible with `QAResult`, so
+`QAService.ask(mode="agent")` + the `mode` field on `POST /api/v1/query`
+(`AskRequest.mode`) select it with no serializer change; `build_default_service`
+auto-wires an `LLMAgentController` whenever an API key is set, bounded by
+`SPARKSAGE_AGENT_MAX_ITERATIONS`.

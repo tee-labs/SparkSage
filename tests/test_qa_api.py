@@ -87,6 +87,8 @@ def _make_qa_service(
     answer_text: str = "Use pip install sparksage.",
     with_generator: bool = True,
     faith_score: float = 0.9,
+    agent_controller=None,
+    agent_max_iterations: int = 4,
 ) -> QAService:
     converter = MarkdownConverter(
         backend=FakeConverterBackend(markdown=markdown, title="Guide")
@@ -114,6 +116,8 @@ def _make_qa_service(
         service=spark_service,
         embedder=embedder,
         reader=reader,
+        agent_controller=agent_controller,
+        agent_max_iterations=agent_max_iterations,
     )
 
 
@@ -252,6 +256,68 @@ class TestAsk:
         svc2.ingest_and_index(b"data", "guide.md")
         result = svc2.ask("How to install?", use_lexical=False)
         assert not result.abstained
+
+
+# ---------------------------------------------------------------------------- #
+# QAService.ask(mode="agent") -- the agentic QA loop
+# ---------------------------------------------------------------------------- #
+class TestAgentMode:
+    def _controller(self, *, retrieve_query="How to deploy?", extra_retrieve=False):
+        from sparksage.agent import LLMAgentController
+
+        responses = [
+            json.dumps(
+                {"thought": "need deploy", "action": "retrieve", "query": retrieve_query}
+            ),
+        ]
+        if extra_retrieve:
+            responses.append(
+                json.dumps(
+                    {"thought": "more", "action": "retrieve", "query": "uvicorn deploy"}
+                )
+            )
+        responses.append(json.dumps({"thought": "enough", "action": "synthesize"}))
+        return LLMAgentController(FakeLLMClient(responses=responses))
+
+    def test_agent_mode_returns_agent_result(self):
+        svc = _make_qa_service(agent_controller=self._controller())
+        svc.ingest_and_index(b"data", "guide.md")
+        result = svc.ask("How to install?", use_lexical=False, mode="agent")
+        from sparksage.agent import AgentResult
+
+        assert isinstance(result, AgentResult)
+        assert result.iterations == 1  # one extra retrieval beyond the seed
+        assert len(result.steps) == 2  # seed + 1 controller retrieval
+        assert result.abstained is False
+
+    def test_agent_mode_records_history(self):
+        svc = _make_qa_service(agent_controller=self._controller())
+        svc.ingest_and_index(b"data", "guide.md")
+        svc.ask("How to install?", use_lexical=False, mode="agent")
+        turns, total = svc.list_history()
+        assert total == 2  # user + assistant
+        assistant = [t for t in turns if t.role.value == "assistant"][0]
+        assert assistant.result is not None  # serialized AskResponse payload
+
+    def test_agent_mode_without_controller_raises(self):
+        svc = _make_qa_service()  # no agent_controller wired
+        svc.ingest_and_index(b"data", "guide.md")
+        with pytest.raises(RuntimeError):
+            svc.ask("How to install?", use_lexical=False, mode="agent")
+
+    def test_agent_enabled_flag(self):
+        svc = _make_qa_service()
+        assert svc.agent_enabled is False
+        svc2 = _make_qa_service(agent_controller=self._controller())
+        assert svc2.agent_enabled is True
+
+    def test_default_mode_unchanged(self):
+        svc = _make_qa_service(agent_controller=self._controller())
+        svc.ingest_and_index(b"data", "guide.md")
+        result = svc.ask("How to install?", use_lexical=False)  # default mode
+        from sparksage.qa import QAResult
+
+        assert isinstance(result, QAResult)  # not an AgentResult
 
 
 # ---------------------------------------------------------------------------- #
@@ -488,6 +554,49 @@ class TestQueryRoute:
             },
         )
         assert resp.status_code == 200
+
+
+class TestAgentQueryRoute:
+    def test_agent_mode_returns_answer(self):
+        from sparksage.agent import LLMAgentController
+
+        ctrl = LLMAgentController(
+            FakeLLMClient(
+                responses=[
+                    json.dumps(
+                        {
+                            "thought": "need deploy",
+                            "action": "retrieve",
+                            "query": "How to deploy?",
+                        }
+                    ),
+                    json.dumps({"thought": "enough", "action": "synthesize"}),
+                ]
+            )
+        )
+        svc = _make_qa_service(agent_controller=ctrl)
+        client = TestClient(create_app(qa_service=svc))
+        _ingest(client)
+        resp = client.post(
+            "/api/v1/query",
+            json={"query": "How to install?", "use_lexical": False, "mode": "agent"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["query"] == "How to install?"
+        assert body["abstained"] is False
+        assert "pip" in body["answer"]
+        assert body["retrieved"]  # accumulated evidence surfaced
+
+    def test_agent_mode_without_controller_is_502(self):
+        svc = _make_qa_service()  # no agent_controller
+        client = TestClient(create_app(qa_service=svc))
+        _ingest(client)
+        resp = client.post(
+            "/api/v1/query",
+            json={"query": "How to install?", "use_lexical": False, "mode": "agent"},
+        )
+        assert resp.status_code == 502
 
 
 class TestKnowledgeBaseRoute:

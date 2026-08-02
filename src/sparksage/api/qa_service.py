@@ -49,6 +49,10 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from sparksage.agent.controller import AgentController
+from sparksage.agent.engine import DEFAULT_MAX_ITERATIONS as DEFAULT_MAX_AGENT_ITERATIONS
+from sparksage.agent.engine import AgenticQAEngine
+from sparksage.agent.models import AgentResult
 from sparksage.api.pipeline import (
     GenerationNotConfiguredError,
     SparkSageService,
@@ -158,6 +162,8 @@ class QAService:
         kb_store: KnowledgeBaseStore | None = None,
         feedback_store: FeedbackStore | None = None,
         history_store: QASessionStore | None = None,
+        agent_controller: AgentController | None = None,
+        agent_max_iterations: int = DEFAULT_MAX_AGENT_ITERATIONS,
     ) -> None:
         self._service = service
         self._embedder = embedder
@@ -170,6 +176,10 @@ class QAService:
         self._kbs: dict[str, KnowledgeBase] = {}
         # Lazily built QAEngine per KB (shares reader + query_processor).
         self._engines: dict[str, QAEngine] = {}
+        # Lazily built AgenticQAEngine per KB (only when an agent controller is wired).
+        self._agent_engines: dict[str, AgenticQAEngine] = {}
+        self._agent_controller = agent_controller
+        self._agent_max_iterations = agent_max_iterations
 
         default_kb = (
             kb
@@ -249,6 +259,7 @@ class QAService:
         self._kbs[kb.kb_id] = kb
         self._kb_store.save(kb.info)
         self._engines.pop(kb.kb_id, None)
+        self._agent_engines.pop(kb.kb_id, None)
         return kb
 
     def _engine_for(self, kb_id: str) -> QAEngine:
@@ -260,6 +271,34 @@ class QAService:
                 query_processor=self._query_processor,
             )
         return self._engines[kb_id]
+
+    @property
+    def agent_enabled(self) -> bool:
+        """Whether an agentic QA controller is wired (``ask(mode="agent")``)."""
+        return self._agent_controller is not None
+
+    def _agent_engine_for(self, kb_id: str) -> AgenticQAEngine:
+        """Return (building lazily) the AgenticQAEngine bound to ``kb_id``.
+
+        Reuses the per-KB :class:`Retriever`, the shared :class:`Reader` and the
+        shared :class:`QueryProcessor` (so the agent inherits the out-of-domain
+        interception gate + rewrite-seeded first retrieval), and the wired
+        :class:`AgentController`.
+        """
+        if self._agent_controller is None:
+            raise RuntimeError(
+                "no agent_controller is wired on this QAService; pass one to "
+                "QAService(..., agent_controller=...) to enable mode='agent'"
+            )
+        if kb_id not in self._agent_engines:
+            self._agent_engines[kb_id] = AgenticQAEngine(
+                controller=self._agent_controller,
+                retriever=self._kbs[kb_id].retriever,
+                reader=self._reader,
+                query_processor=self._query_processor,
+                max_iterations=self._agent_max_iterations,
+            )
+        return self._agent_engines[kb_id]
 
     def _resolve_kb(
         self, kb_id: str | None, *, filter: RetrievalFilter | None = None
@@ -553,8 +592,19 @@ class QAService:
         use_rerank: bool | None = None,
         use_cache: bool = True,
         kb_id: str | None = None,
-    ) -> QAResult:
-        """Answer ``query`` end-to-end (delegates to :class:`QAEngine`).
+        mode: str = "default",
+    ) -> QAResult | AgentResult:
+        """Answer ``query`` end-to-end.
+
+        ``mode`` selects the QA strategy:
+
+        * ``"default"`` (default): the single-shot :class:`QAEngine`
+          (query -> retrieval -> answer). Fast, one retrieval.
+        * ``"agent"``: the agentic :class:`AgenticQAEngine` -- an LLM-driven
+          plan-act-observe-synthesize loop that decomposes multi-hop /
+          comparative questions into a bounded sequence of focused retrievals
+          (slower, but handles the problem classes one-shot RAG cannot). Requires
+          an ``agent_controller`` to be wired on this service.
 
         Retrieval is scoped to the target knowledge base. The target resolves
         as: explicit ``kb_id`` -> ``filter.kb_id`` -> the active KB. Pass a
@@ -562,11 +612,44 @@ class QAService:
         :class:`ConversationContext` for multi-turn anaphora resolution.
         """
         kb = self._resolve_kb(kb_id, filter=filter)
-        engine = self._engine_for(kb.kb_id)
-        _logger.debug(
-            "ask: query=%r kb=%s k=%s lexical=%s rerank=%s",
-            query[:80],
+        if mode == "agent":
+            return self._ask_agent(
+                kb.kb_id,
+                query,
+                context=context,
+                filter=filter,
+                k=k,
+                use_lexical=use_lexical,
+                use_rerank=use_rerank,
+            )
+        return self._ask_default(
             kb.kb_id,
+            query,
+            context=context,
+            filter=filter,
+            k=k,
+            use_lexical=use_lexical,
+            use_rerank=use_rerank,
+            use_cache=use_cache,
+        )
+
+    def _ask_default(
+        self,
+        kb_id: str,
+        query: str,
+        *,
+        context,
+        filter,
+        k,
+        use_lexical,
+        use_rerank,
+        use_cache,
+    ) -> QAResult:
+        engine = self._engine_for(kb_id)
+        _logger.debug(
+            "ask[default]: query=%r kb=%s k=%s lexical=%s rerank=%s",
+            query[:80],
+            kb_id,
             k,
             use_lexical,
             use_rerank,
@@ -604,10 +687,56 @@ class QAService:
             f"{top_score:.3f}" if top_score is not None else None,
             elapsed,
         )
-        self._record_history(query, result, kb.kb_id)
+        self._record_history(query, result, kb_id)
         return result
 
-    def _record_history(self, query: str, result: QAResult, kb_id: str) -> None:
+    def _ask_agent(
+        self,
+        kb_id: str,
+        query: str,
+        *,
+        context,
+        filter,
+        k,
+        use_lexical,
+        use_rerank,
+    ) -> AgentResult:
+        engine = self._agent_engine_for(kb_id)
+        _logger.debug(
+            "ask[agent]: query=%r kb=%s k=%s lexical=%s rerank=%s",
+            query[:80],
+            kb_id,
+            k,
+            use_lexical,
+            use_rerank,
+        )
+        t0 = time.perf_counter()
+        result = engine.ask(
+            query,
+            context=context,
+            filter=filter,
+            k=k,
+            use_lexical=use_lexical,
+            use_rerank=use_rerank,
+        )
+        elapsed = time.perf_counter() - t0
+        _logger.info(
+            "answered[agent] %r: abstained=%s iterations=%d steps=%d evidence=%d "
+            "aborted=%s elapsed=%.2fs",
+            query[:80],
+            result.abstained,
+            result.iterations,
+            len(result.steps),
+            len(result.evidence),
+            result.aborted,
+            elapsed,
+        )
+        self._record_history(query, result, kb_id)
+        return result
+
+    def _record_history(
+        self, query: str, result: QAResult | AgentResult, kb_id: str
+    ) -> None:
         """Append the user question + assistant answer to the conversation log.
 
         The answer payload is the canonical HTTP ``AskResponse`` shape (via

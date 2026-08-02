@@ -79,6 +79,7 @@ ENV_EMBEDDING_API_KEY = "SPARKSAGE_EMBEDDING_API_KEY"
 ENV_EMBEDDING_BASE_URL = "SPARKSAGE_EMBEDDING_BASE_URL"
 ENV_EMBEDDING_MODEL = "SPARKSAGE_EMBEDDING_MODEL"
 ENV_ENABLE_QA = "SPARKSAGE_ENABLE_QA"
+ENV_AGENT_MAX_ITERATIONS = "SPARKSAGE_AGENT_MAX_ITERATIONS"
 
 DEFAULT_MODEL = "gpt-4o-mini"
 #: Streaming is on by default -- it is more robust for long generations.
@@ -89,6 +90,8 @@ DEFAULT_DOC_STORE_TABLE = "documents"
 DEFAULT_AUTO_TAG_EXTRACTOR = "rake"
 #: Default embedding model for the QA knowledge base.
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+#: Default cap on agent retrievals (``mode="agent"``).
+DEFAULT_AGENT_MAX_ITERATIONS = 4
 
 _TRUTHY = {"1", "true", "yes", "on"}
 _FALSY = {"0", "false", "no", "off"}
@@ -115,6 +118,18 @@ def _env_bool(name: str, default: bool) -> bool:
     if val in _FALSY:
         return False
     return default
+
+
+def _env_int(name: str, default: int) -> int:
+    """Parse an environment variable as a positive int (``default`` on miss)."""
+    raw = _env(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw.strip())
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
 
 
 def build_default_service() -> SparkSageService:
@@ -232,10 +247,13 @@ def build_qa_service():
     ``SPARKSAGE_EMBEDDING_API_KEY``  Embedding API key (falls back to the LLM key)
     ``SPARKSAGE_EMBEDDING_BASE_URL`` Embedding base URL (falls back to LLM base URL)
     ``SPARKSAGE_EMBEDDING_MODEL``    Embedding model (default ``text-embedding-3-small``)
+    ``SPARKSAGE_AGENT_MAX_ITERATIONS``  Cap on agent-mode retrievals (default ``4``)
     ============================  =============================================
 
     When no LLM key is set the QA routes return ``503`` with a clear message
-    (the full pipeline needs an LLM for both generation and answering).
+    (the full pipeline needs an LLM for both generation and answering); the
+    agentic ``mode="agent"`` is enabled automatically whenever an LLM is
+    configured (it reuses the same client).
     """
     from sparksage.api.qa_service import QAService
     from sparksage.embed.indexer import BlockEmbedder
@@ -286,11 +304,18 @@ def build_qa_service():
     )
 
     reader: Reader
+    agent_controller = None
     if llm_client is not None:
         reader = Reader(
             generator=LLMAnswerGenerator(llm_client),
             faithfulness_judge=LLMFaithfulnessJudge(llm_client),
         )
+        # The agentic QA controller reuses the same LLM client; enabling
+        # ``mode="agent"`` on ``POST /api/v1/query`` decomposes multi-hop /
+        # comparative questions into a bounded retrieval loop.
+        from sparksage.agent import LLMAgentController
+
+        agent_controller = LLMAgentController(llm_client, model=model)
     else:
         reader = Reader(generator=_DummyAnswerGenerator())
 
@@ -298,6 +323,10 @@ def build_qa_service():
         service=spark_service,
         embedder=embedder,
         reader=reader,
+        agent_controller=agent_controller,
+        agent_max_iterations=_env_int(
+            ENV_AGENT_MAX_ITERATIONS, DEFAULT_AGENT_MAX_ITERATIONS
+        ),
     )
 
 
@@ -893,6 +922,7 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
                 use_lexical=body.use_lexical,
                 use_rerank=body.use_rerank,
                 kb_id=body.kb_id,
+                mode=body.mode,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=_detail(exc)) from exc

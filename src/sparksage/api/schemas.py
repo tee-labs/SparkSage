@@ -356,6 +356,15 @@ class AskRequest(BaseModel):
             'Each item is {"role": "user"|"assistant", "content": "..."}.'
         ),
     )
+    mode: str = Field(
+        default="default",
+        description=(
+            'QA strategy: "default" (single-shot QAEngine, one retrieval, fast) '
+            'or "agent" (AgenticQAEngine -- an LLM-driven plan-act-observe-'
+            "synthesize loop for multi-hop / comparative questions; slower). "
+            '"agent" requires an agent controller to be configured server-side.'
+        ),
+    )
 
 
 class CitationOut(BaseModel):
