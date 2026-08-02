@@ -12,6 +12,8 @@ import type {
   FeedbackRating,
   FeedbackStats,
   GenerateResponse,
+  HealthResponse,
+  IngestAndIndexResponse,
   KnowledgeBaseInfo,
   KnowledgeBaseListResponse,
   KnowledgeBaseSummary,
@@ -37,7 +39,7 @@ export interface FeedbackPayload {
 }
 
 export const api = {
-  health: () => client.get<{ status: string; generator_configured: boolean }>('/health'),
+  health: () => client.get<HealthResponse>('/health'),
 
   // ---- config ----
   getConfig: () => client.get<ConfigResponse>('/config').then((r) => r.data),
@@ -88,7 +90,7 @@ export const api = {
     if (opts.top_k) form.append('top_k', String(opts.top_k));
     if (opts.kb_id) form.append('kb_id', opts.kb_id);
     return client
-      .post<GenerateResponse>('/knowledge_base/ingest', form)
+      .post<IngestAndIndexResponse>('/knowledge_base/ingest', form)
       .then((r) => r.data);
   },
 
@@ -160,7 +162,10 @@ export const api = {
   // ---- QA conversation history ----
   queryHistory: (params: { limit?: number; offset?: number; kb_id?: string | null } = {}) =>
     client.get<QueryHistoryResponse>('/query/history', { params }).then((r) => r.data),
-  clearHistory: () => client.delete('/query/history').then((r) => r.data),
+  clearHistory: (kbId?: string | null) =>
+    client
+      .delete('/query/history', { params: kbId ? { kb_id: kbId } : undefined })
+      .then((r) => r.data),
 };
 
 export { client as axiosClient };

@@ -16,8 +16,8 @@ with deterministic fakes. Interception policy (which intents to reject, the
 confidence floor, the canned reply) is configuration, not behaviour hidden in a
 client.
 
-Design note: this is the framework-agnostic core. A future ``/api/v1/query``
-route will be a thin FastAPI wrapper around it, exactly as
+Design note: this is the framework-agnostic core. The web layer is a thin
+FastAPI wrapper around it (``POST /api/v1/query``), exactly as
 :class:`~sparksage.api.SparkSageService` wraps the ingest pipeline.
 """
 

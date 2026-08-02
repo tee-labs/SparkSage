@@ -716,8 +716,8 @@ end-to-end [`QAEngine`](#ask-end-to-end-questions):
   no-op. Wire it in front of `Retriever.search` and pass its `filter` straight
   through.
 
-> **Note:** this is the framework-agnostic core. A future `/api/v1/query` route
-> will be a thin wrapper, mirroring how
+> **Note:** this is the framework-agnostic core. The web layer is a thin
+> wrapper (``POST /api/v1/query``), mirroring how
 > [`SparkSageService`](src/sparksage/api/pipeline.py) wraps the ingest pipeline.
 
 Offline demo (rule classifier + scripted FakeLLMClient rewriter; no API key):
@@ -899,8 +899,8 @@ lists before the reader generates one answer. An optional
 [`InMemorySemanticCache`](src/sparksage/query/cache.py) implements)
 short-circuits the whole pipeline for near-duplicate repeat queries.
 
-> **Note:** not yet wired to the web layer — a future `/api/v1/query` route will
-> be a thin wrapper around `QAEngine.ask`, exactly as
+> **Note:** wired to the web layer via `POST /api/v1/query` (a thin wrapper
+> around `QAEngine.ask`), exactly as
 > [`SparkSageService`](src/sparksage/api/pipeline.py) wraps ingest.
 
 ---
@@ -1095,6 +1095,27 @@ SparkSage exposes its capabilities over a small HTTP API:
 * `GET /api/v1/tags` — distinct tag vocabulary across stored documents.
 * `GET /api/v1/health` — liveness probe; reports the version and whether
   generation is configured. Used by the Docker `HEALTHCHECK`.
+
+When the end-to-end QA pipeline is enabled (`SPARKSAGE_ENABLE_QA=1`, or by
+passing a `QAService`), these additional routes are mounted automatically:
+
+* `POST /api/v1/knowledge_base/ingest` — upload → parse → chunk → embed → index.
+* `POST /api/v1/query` — ask a grounded, cited question against a knowledge
+  base (`mode="default"` single-shot, or `mode="agent"` multi-hop).
+* `GET /api/v1/knowledge_base` — active knowledge-base snapshot (block / document
+  counts).
+* `GET /api/v1/knowledge_base/blocks` — paginated IdeaBlock listing (filter by
+  tag / language / status).
+* `GET /api/v1/knowledge_base/tags` — distinct tag vocabulary across indexed
+  blocks.
+* `DELETE /api/v1/knowledge_base/documents/{doc_id}` — remove a document and
+  cascade-remove its indexed blocks.
+* `POST / GET / DELETE /api/v1/knowledge_bases[/{kb_id}]` — multi-KB management
+  (`POST .../{kb_id}/activate` sets the active routing target).
+* `POST / GET /api/v1/feedback`[`/records`] — record / aggregate user verdicts.
+* `GET / DELETE /api/v1/query/history` — persisted QA conversation log.
+* `GET / POST /api/v1/config` — read / patch the effective `.env`
+  configuration (secrets masked).
 
 The API layer is a thin shell over a framework-agnostic
 [`SparkSageService`](src/sparksage/api/pipeline.py) that wires convert → clean →
@@ -1513,11 +1534,12 @@ Everything described in this README is **implemented and tested** today (see the
 sections above and [`AGENTS.md`](AGENTS.md) for the full subsystem map). What
 comes next:
 
-- [ ] **`/api/v1/query` route** wrapping `QAEngine` — a one-call HTTP endpoint for
-  grounded, cited answers, mirroring how `SparkSageService` wraps ingest.
 - [ ] **`/api/v1/distill` route** wrapping `JobManager` — submit / poll / cancel
   long-running de-dup runs (the async job layer already exists; only the thin
   web wrapper is missing).
+- [ ] **`/api/v1/query/agent` route** wrapping a pollable agent job (reusing
+  the `DistillJob` state machine over the `AgenticQAEngine` `on_progress` /
+  `is_cancelled` hooks so long agent runs are cancellable / observable).
 - [ ] **OpenAI-compatible ingest / distill / query API** — drop-in replacement
   surface so existing OpenAI SDK callers can adopt SparkSage without code changes.
 

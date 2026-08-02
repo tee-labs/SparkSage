@@ -25,10 +25,9 @@ retrieval-side ``min_relevance`` floor (self-reflective loop), and the
 answer-side ``min_faithfulness`` floor (:class:`~sparksage.reader.Reader`) --
 each says "I don't know / try again" rather than degrade silently.
 
-The engine is deliberately *not* wired to the web layer -- a future
-``/api/v1/query`` route will be a thin FastAPI wrapper around
-:meth:`QAEngine.ask`, exactly as :class:`~sparksage.api.SparkSageService` wraps
-the ingest pipeline.
+The engine is deliberately framework-agnostic -- the web layer is a thin
+FastAPI wrapper around :meth:`QAEngine.ask` (``POST /api/v1/query``), exactly
+as :class:`~sparksage.api.SparkSageService` wraps the ingest pipeline.
 """
 
 from __future__ import annotations

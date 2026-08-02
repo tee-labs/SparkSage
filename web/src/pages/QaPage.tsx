@@ -109,7 +109,7 @@ export default function QaPage() {
 
   const clearHistory = async () => {
     try {
-      await api.clearHistory();
+      await api.clearHistory(selectedKbId ?? undefined);
       setHistory([]);
       setFeedback({});
       setCorrections({});

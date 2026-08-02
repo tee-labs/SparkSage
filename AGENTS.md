@@ -250,10 +250,10 @@ PYTHONPATH=src python3 examples/build_chunks.py
   + a `RetrievalFilter` of tags / entities / languages; tag values are read
   live from the `Tag` enum into the prompt, lenient→strict coercion reusing
   `query.schema.CoercionError`, identity fallback on a bad response) and an
-  `IdentitySelfQueryParser` no-op — wire it in front of `Retriever.search` and
-  pass its `filter` straight through. This is **not** wired to the web layer yet
-  — a future `/api/v1/query` route will be a thin wrapper, mirroring how
-  `SparkSageService` wraps the ingest pipeline.
+   `IdentitySelfQueryParser` no-op — wire it in front of `Retriever.search` and
+   pass its `filter` straight through. This is wired to the web layer via
+   `POST /api/v1/query`, mirroring how `SparkSageService` wraps the ingest
+   pipeline.
 - The keyword-extraction core (`tags/`) is the dependency-free auto-tagging
   engine: when a document arrives without tags, a `KeywordExtractor` derives
   them from the content using classic algorithms — `RakeKeywordExtractor`,
@@ -341,10 +341,10 @@ PYTHONPATH=src python3 examples/build_chunks.py
   (registered *last*, so every `/api/...` route wins first) serves the SPA
   `index.html` for non-API GET paths. Any method on an unknown `/api/` path
   returns a real `404` (not a `405`) so API consumers get a clean "not found".
-  The `web/` app (Vite + React 18 + TS + antd 5) covers 6 demo pages:
-  `/config`, `/ingest`, `/documents`, `/knowledge-base`, `/qa`, `/feedback`
-  (left-side collapsible antd `Menu`); the Docker image builds it in a
-  `node:20` stage and copies `web/dist` into `/app/web/dist`.
+  The `web/` app (Vite + React 18 + TS + antd 5) covers 7 demo pages:
+  `/config`, `/knowledge-bases`, `/ingest`, `/documents`, `/knowledge-base`,
+  `/qa`, `/feedback` (left-side collapsible antd `Menu`); the Docker image
+  builds it in a `node:20` stage and copies `web/dist` into `/app/web/dist`.
 - The retrieval core (`retrieve/`) is the query-side counterpart of the ingest
   pipeline and the layer that finally *consumes* the three "designed but
   unconsumed" IdeaBlock fields. It depends only on the existing `VectorStore`
@@ -434,9 +434,9 @@ PYTHONPATH=src python3 examples/build_chunks.py
   quality). This is the middle gate of the symmetric three-stage policy:
   query-side `min_confidence` → retrieval-side `min_relevance` → answer-side
   `min_faithfulness`. `QAResult` now carries `relevance` / `refined_query` /
-  `iterations` for transparency. Not yet wired to the web layer — a future
-  `/api/v1/query` route will be a thin wrapper around `QAEngine.ask`, exactly as
-  `SparkSageService` wraps ingest.
+  `iterations` for transparency. Wired to the web layer via `POST /api/v1/query`
+  (a thin wrapper around `QAEngine.ask`), exactly as `SparkSageService` wraps
+  ingest.
 - The agentic QA core (`agent/`) is a *different orchestrator* over the *same*
   building blocks as `qa/` — it turns SparkSage from a one-shot RAG (a static
   question→answer mapping) into an **Agentic RAG** with an LLM-driven
@@ -568,8 +568,8 @@ configuration (`config.py`: zero-dependency loader, env vars override the
 file), and query-time intent recognition + rewriting (`query/`: pluggable
 `IntentClassifier` / `QueryRewriter` protocols reusing `LLMClient`, LLM +
 rule-based implementations, lenient→strict `QueryIntent` coercion,
-`QueryProcessor` orchestration with interception policy — not yet wired to
-the web layer), the end-to-end Distill de-dup pipeline (`distill/`:
+  `QueryProcessor` orchestration with interception policy — now wired to the
+  web layer via `POST /api/v1/query`), the end-to-end Distill de-dup pipeline (`distill/`:
 `DistillPipeline` with iterative threshold refinement + hierarchical LLM
 merge + lifecycle write-back via `status`/`parents`/`confidence`, pure stdlib
 `ClusteringBackend` (union-find) + lazy `LouvainClusteringBackend` under
