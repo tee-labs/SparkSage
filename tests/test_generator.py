@@ -20,7 +20,11 @@ from sparksage.generator import (
     ResponseParseError,
     coerce_block,
 )
-from sparksage.generator.generator import _extract_json
+from sparksage.generator.generator import (
+    DEFAULT_MAX_INPUT_CHARS,
+    _extract_json,
+    _split_text_segments,
+)
 from sparksage.generator.prompts import build_messages, system_prompt
 from sparksage.generator.schema import RawEntity, RawIdeaBlock
 from sparksage.schema import IdeaBlock, Tag
@@ -375,3 +379,108 @@ class TestInputValidation:
         first = gen.generate(SAMPLE_TEXT)
         second = gen.generate(SAMPLE_TEXT)
         assert len(first) == len(second) == 2
+
+
+class TestSegmentation:
+    """Large inputs are split into bounded segments so the LLM's JSON output is
+    never truncated mid-stream (the cause of the ingest ``Unprocessable Entity``
+    failures on big uploads)."""
+
+    def _big_text(self, parts: int = 6, per_part: int = 80) -> str:
+        return ("\n\n".join(["heading."] + ["a topic about routing. "] * per_part)) * parts
+
+    def test_split_helper_respects_size_bound(self):
+        text = self._big_text()
+        assert len(text) > 1000
+        segments = _split_text_segments(text, 1000)
+        assert segments
+        assert all(len(s) <= 1000 for s in segments)
+        # The concatenation of segments still represents the whole text.
+        joined = "\n\n".join(segments)
+        for word in ("heading.", "routing."):
+            assert word in joined
+
+    def test_split_helper_small_text_is_single_segment(self):
+        assert _split_text_segments("small text", 1000) == ["small text"]
+
+    def test_split_helper_empty_yields_nothing(self):
+        assert _split_text_segments("   ", 1000) == []
+
+    def test_split_helper_zero_budget_returns_whole_text(self):
+        # ``0`` disables segmentation (legacy one-shot behaviour).
+        assert _split_text_segments("anything", 0) == ["anything"]
+
+    def test_default_max_input_chars_is_positive(self):
+        assert DEFAULT_MAX_INPUT_CHARS > 0
+
+    def test_large_input_segmented_into_multiple_calls(self):
+        big = self._big_text()
+        good = json.dumps(
+            {"blocks": [{"name": "n", "critical_question": "q?", "trusted_answer": "a."}]}
+        )
+        fake = FakeLLMClient(responses=[good])
+        gen = IdeaBlockGenerator(fake, max_input_chars=1000)
+        blocks, stats = gen.generate_with_stats(big)
+        # More than one segment was issued (the segmentation kicked in) and the
+        # fake's per-segment block was replayed across all of them.
+        assert fake.calls and len(fake.calls) > 1
+        assert len(blocks) == len(fake.calls)
+        assert stats.emitted == len(blocks)
+        assert stats.raw_block_count == len(blocks)
+
+    def test_single_segment_keeps_max_blocks_in_prompt(self):
+        # For a single segment the ``max_blocks`` hint is forwarded to the
+        # prompt verbatim (preserves the pre-segmentation contract).
+        good = json.dumps(
+            {"blocks": [{"name": "n", "critical_question": "q?", "trusted_answer": "a."}]}
+        )
+        fake = FakeLLMClient(responses=[good])
+        gen = IdeaBlockGenerator(fake)
+        gen.generate(SAMPLE_TEXT, max_blocks=3)
+        assert "AT MOST 3" in fake.last_messages[1]["content"]
+
+    def test_multisegment_resilient_to_one_bad_segment(self):
+        # A truncated/invalid response on one segment must not waste the whole
+        # large-doc batch in non-strict mode: good segments still get indexed.
+        big = self._big_text()
+        good = json.dumps(
+            {"blocks": [{"name": "n", "critical_question": "q?", "trusted_answer": "a."}]}
+        )
+        bad = '{"blocks": [{"name": "x", "critical_question": "q?'  # truncated
+        fake = FakeLLMClient(responses=[bad, good, good])
+        gen = IdeaBlockGenerator(fake, max_input_chars=1000)
+        blocks, stats = gen.generate_with_stats(big)
+        assert len(blocks) >= 1
+        assert stats.errors  # the bad segment was recorded, not raised
+
+    def test_multisegment_strict_propagates_bad_segment(self):
+        big = self._big_text()
+        bad = '{"blocks": [{"name": "x", "critical_question": "q?'
+        good = json.dumps(
+            {"blocks": [{"name": "n", "critical_question": "q?", "trusted_answer": "a."}]}
+        )
+        gen = IdeaBlockGenerator(
+            FakeLLMClient(responses=[bad, good, good]), max_input_chars=1000, strict=True
+        )
+        with pytest.raises(GenerationError):
+            gen.generate_with_stats(big)
+
+    def test_single_segment_still_raises_on_bad_json(self):
+        # The segmentation fix must not swallow errors for ordinary small inputs.
+        gen = IdeaBlockGenerator(FakeLLMClient(responses=["not json {{{"]), max_input_chars=1000)
+        with pytest.raises(ResponseParseError):
+            gen.generate(SAMPLE_TEXT)
+
+    def test_global_max_blocks_caps_concatenated_segments(self):
+        big = self._big_text()
+        good = json.dumps(
+            {
+                "blocks": [
+                    {"name": "n", "critical_question": "q?", "trusted_answer": "a."},
+                    {"name": "m", "critical_question": "r?", "trusted_answer": "b."},
+                ]
+            }
+        )
+        gen = IdeaBlockGenerator(FakeLLMClient(responses=[good]), max_input_chars=1000)
+        blocks = gen.generate(big, max_blocks=3)
+        assert len(blocks) == 3
