@@ -4,15 +4,16 @@ The multi-tenant counterpart of
 :class:`~sparksage.documents.store.DocumentStore`: where that stores
 *documents*, this stores *knowledge bases* -- each identified by its
 ``kb_id``. The default :class:`InMemoryKnowledgeBaseStore` is a plain dict;
-a future durable backend (e.g. on top of
-:class:`~sparksage.documents.backends.sqlite.SqliteDocumentStore`) implements
-the same protocol.
+the durable :class:`~sparksage.kb.backends.sqlite.SqliteKnowledgeBaseStore`
+implements the same protocol over a single SQLite file so KB metadata
+survives a process restart.
 
 The store persists only the :class:`~sparksage.kb.models.KnowledgeBaseInfo`
 metadata -- the live vector index + block registry are runtime state owned by
-the :class:`~sparksage.kb.KnowledgeBase` aggregate, rebuilt on load from the
-underlying blocks (exactly how the document store persists records while the
-service holds runtime state).
+the :class:`~sparksage.kb.KnowledgeBase` aggregate, persisted separately via
+a :class:`~sparksage.kb.backends.state.KbStateStore` (blocks + vectors +
+doc-links) and rebuilt on load (exactly how the document store persists
+records while the service holds runtime state).
 """
 
 from __future__ import annotations

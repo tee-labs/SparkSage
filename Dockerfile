@@ -33,6 +33,11 @@
 #   # or mount a .env directly into the working dir (auto-loaded at startup):
 #   docker run --rm -p 8000:8000 -v "$PWD/.env:/app/.env:ro" sparksage:latest
 #
+# Persistence: SPARKSAGE_DATA_DIR defaults to /app/data -- mount a volume there
+# and EVERYTHING (documents, KB metadata, the live block + vector index,
+# feedback) survives a restart, no re-ingest / re-embedding needed:
+#   docker run --rm -p 8000:8000 -v "$PWD/data:/app/data" sparksage:latest
+#
 # Env vars (SPARKSAGE_* take priority over OPENAI_*):
 #   SPARKSAGE_ENABLE_QA       Mount the full QA pipeline (default "1")
 #   SPARKSAGE_API_KEY         API key (falls back to OPENAI_API_KEY)
@@ -43,7 +48,12 @@
 #   SPARKSAGE_EMBEDDING_API_KEY   Embedding key (falls back to the LLM key)
 #   SPARKSAGE_EMBEDDING_BASE_URL  Embedding base URL (falls back to LLM base URL)
 #   SPARKSAGE_EMBEDDING_MODEL     Embedding model (default text-embedding-3-small)
-#   SPARKSAGE_DOC_STORE       Path to a SQLite file for durable document storage
+#   SPARKSAGE_DATA_DIR        Unified data dir for durable SQLite stores
+#                             (default /app/data; mount a volume there)
+#   SPARKSAGE_DOC_STORE       SQLite file for documents (overrides data dir)
+#   SPARKSAGE_KB_STORE        SQLite file for KB metadata (overrides data dir)
+#   SPARKSAGE_KB_STATE_STORE  SQLite file for blocks + vectors (overrides data dir)
+#   SPARKSAGE_FEEDBACK_STORE  SQLite file for feedback (overrides data dir)
 #   SPARKSAGE_AUTO_TAG_EXTRACTOR  Auto-tag algorithm: rake|tfidf|textrank
 #   SPARKSAGE_TAGS_ZH         Use jieba for CJK segmentation when truthy
 
@@ -51,7 +61,6 @@ ARG PYTHON_VERSION=3.11
 # Full QA pipeline. Override with --build-arg SPARKSAGE_EXTRAS=... for a slim or
 # extended image (e.g. append chroma / pgvector for production vector stores).
 ARG SPARKSAGE_EXTRAS="api,convert,llm,embed,rerank,distill,tags-zh"
-
 # --------------------------------------------------------------------------- #
 # Frontend build stage: compile the React + Ant Design WEB UI to static assets.
 # The built `web/dist` is served by FastAPI behind a catch-all route, so the
@@ -106,7 +115,8 @@ ENV PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     SPARKSAGE_EXTRAS=${SPARKSAGE_EXTRAS} \
-    SPARKSAGE_ENABLE_QA=1
+    SPARKSAGE_ENABLE_QA=1 \
+    SPARKSAGE_DATA_DIR=/app/data
 
 # Non-root user for runtime safety.
 RUN groupadd --system --gid 1001 sparksage && \
@@ -133,6 +143,13 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Built WEB UI. FastAPI auto-serves it when web/dist is present next to the app
 # (served behind a catch-all route, so one container exposes API + UI on :8000).
 COPY --from=frontend --chown=sparksage:sparksage /web/dist /app/web/dist
+
+# Default durable data directory. Mount a volume here (-v "$PWD/data:/app/data")
+# so documents, KB metadata, the live block + vector index, and feedback all
+# survive a restart -- no re-ingest or re-embedding needed. Owned by the
+# non-root sparksage user so the process can write to it.
+RUN mkdir -p /app/data && chown -R sparksage:sparksage /app/data
+VOLUME ["/app/data"]
 
 USER sparksage
 

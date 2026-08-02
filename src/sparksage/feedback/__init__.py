@@ -30,6 +30,7 @@ Example
     report = extract_healing_signals(store)
 """
 
+from sparksage.feedback.backends.sqlite import SqliteFeedbackStore
 from sparksage.feedback.healing import (
     HealingReport,
     LowRecallSignal,
@@ -53,6 +54,7 @@ __all__ = [
     "HealingReport",
     "InMemoryFeedbackStore",
     "LowRecallSignal",
+    "SqliteFeedbackStore",
     "SplitCandidateSignal",
     "extract_healing_signals",
     "extract_low_recall",

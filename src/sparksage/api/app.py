@@ -80,6 +80,12 @@ ENV_EMBEDDING_BASE_URL = "SPARKSAGE_EMBEDDING_BASE_URL"
 ENV_EMBEDDING_MODEL = "SPARKSAGE_EMBEDDING_MODEL"
 ENV_ENABLE_QA = "SPARKSAGE_ENABLE_QA"
 
+# Durable persistence (one directory for every SQLite file). When set, every
+# default service wires durable backends so a Docker restart loses nothing:
+# documents, KB metadata, the live block + vector index, and feedback all
+# reload off disk. Individual stores still take a dedicated env var override.
+ENV_DATA_DIR = "SPARKSAGE_DATA_DIR"
+
 DEFAULT_MODEL = "gpt-4o-mini"
 #: Streaming is on by default -- it is more robust for long generations.
 DEFAULT_STREAM = True
@@ -89,6 +95,12 @@ DEFAULT_DOC_STORE_TABLE = "documents"
 DEFAULT_AUTO_TAG_EXTRACTOR = "rake"
 #: Default embedding model for the QA knowledge base.
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+#: Default file names for each durable store when only ``SPARKSAGE_DATA_DIR``
+#: is set (each is a SQLite database; the document store table is separate).
+DEFAULT_DOC_DB_NAME = "sparksage.docs.db"
+DEFAULT_KB_DB_NAME = "sparksage.kb.db"
+DEFAULT_KB_STATE_DB_NAME = "sparksage.kb_state.db"
+DEFAULT_FEEDBACK_DB_NAME = "sparksage.feedback.db"
 
 _TRUTHY = {"1", "true", "yes", "on"}
 _FALSY = {"0", "false", "no", "off"}
@@ -146,12 +158,15 @@ def build_default_service() -> SparkSageService:
     ``SPARKSAGE_STREAM``          Stream the LLM response (default ``true``)
     ``SPARKSAGE_LANGUAGE``        Output language written into each block
     ``SPARKSAGE_LOG_LEVEL``       ``sparksage`` logger verbosity (default ``WARNING``)
+    ``SPARKSAGE_DATA_DIR``        Unified data dir for durable SQLite stores
+                                   (documents + KB metadata + KB state + feedback).
+                                   Empty -> everything in-memory (lost on restart).
     ``SPARKSAGE_DOC_STORE``       Path to a SQLite file for the document store
-                                   (empty -> in-memory; the ``/documents`` routes work
-                                   but do not persist across restarts)
+                                   (overrides ``SPARKSAGE_DATA_DIR``; empty -> the
+                                   data dir default, or in-memory when neither is set)
     ``SPARKSAGE_DOC_STORE_TABLE`` SQLite table name (default ``documents``)
     ``SPARKSAGE_AUTO_TAG_EXTRACTOR``  Auto-tag algorithm: rake / tfidf / textrank
-                                      (default ``rake``)
+                                       (default ``rake``)
     ``SPARKSAGE_TAGS_ZH``         Use ``jieba`` for CJK segmentation when ``true``
                                    (requires ``pip install 'sparksage[tags-zh]'``)
     ============================  =========================================
@@ -203,20 +218,92 @@ def build_default_service() -> SparkSageService:
     )
 
 
-def _build_document_store():
-    """Resolve a :class:`DocumentStore` from the ``SPARKSAGE_DOC_STORE`` env var.
+def _resolve_data_dir() -> Path | None:
+    """Resolve the unified data directory (``SPARKSAGE_DATA_DIR``).
 
-    A real path wires a durable :class:`SqliteDocumentStore`; unset / empty /
-    ``":memory:"`` returns ``None`` so the service falls back to its lazy
-    in-memory store (ephemeral, but the routes work with zero configuration).
+    A single directory that holds every SQLite database so a Docker restart
+    loses nothing. Parent directories are created if missing. Returns ``None``
+    when unset (every store stays in-memory / ephemeral). The directory is
+    *not* created when the env var is unset, so ``None`` callers pay no cost.
+    """
+    raw = _env(ENV_DATA_DIR)
+    if not raw:
+        return None
+    p = Path(raw).expanduser()
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _build_document_store():
+    """Resolve a :class:`DocumentStore` from env vars.
+
+    Resolution order for the database path:
+
+    1. ``SPARKSAGE_DOC_STORE`` (explicit file path; ``":memory:"`` -> in-memory),
+    2. ``SPARKSAGE_DATA_DIR`` -> ``{dir}/sparksage.docs.db`` (durable by default
+       the moment a data dir is configured),
+    3. unset / empty -> ``None`` so the service falls back to its lazy in-memory
+       store (ephemeral, but the routes work with zero configuration).
     """
     path = _env(ENV_DOC_STORE)
-    if not path:
-        return None
     if path == ":memory:":
         return InMemoryDocumentStore()
+    if not path:
+        data_dir = _resolve_data_dir()
+        if data_dir is None:
+            return None
+        path = str(data_dir / DEFAULT_DOC_DB_NAME)
     table = _env(ENV_DOC_STORE_TABLE) or DEFAULT_DOC_STORE_TABLE
     return SqliteDocumentStore(path, table=table)
+
+
+def _build_kb_stores():
+    """Resolve durable KB metadata + state stores from env vars.
+
+    Returns ``(kb_store, state_store)`` -- both ``None`` when no data dir and no
+    explicit path is configured. ``SPARKSAGE_DATA_DIR`` is the one-knob default;
+    ``SPARKSAGE_KB_STORE`` / ``SPARKSAGE_KB_STATE_STORE`` override the file path.
+    """
+    data_dir = _resolve_data_dir()
+
+    kb_path = _env("SPARKSAGE_KB_STORE")
+    state_path = _env("SPARKSAGE_KB_STATE_STORE")
+    if kb_path is None and state_path is None and data_dir is None:
+        return None, None
+    if data_dir is not None:
+        if kb_path is None:
+            kb_path = str(data_dir / DEFAULT_KB_DB_NAME)
+        if state_path is None:
+            state_path = str(data_dir / DEFAULT_KB_STATE_DB_NAME)
+    from sparksage.kb.backends.sqlite import SqliteKnowledgeBaseStore
+    from sparksage.kb.backends.state import SqliteKbStateStore
+
+    kb_store = (
+        SqliteKnowledgeBaseStore(kb_path) if kb_path is not None else None
+    )
+    state_store = (
+        SqliteKbStateStore(state_path) if state_path is not None else None
+    )
+    return kb_store, state_store
+
+
+def _build_feedback_store():
+    """Resolve a durable :class:`FeedbackStore` from env vars.
+
+    ``SPARKSAGE_DATA_DIR`` -> ``{dir}/sparksage.feedback.db`` by default;
+    ``SPARKSAGE_FEEDBACK_STORE`` overrides the path. Returns ``None`` when no
+    data dir and no explicit path is set (the service falls back to its lazy
+    in-memory store).
+    """
+    path = _env("SPARKSAGE_FEEDBACK_STORE")
+    if path is None:
+        data_dir = _resolve_data_dir()
+        if data_dir is None:
+            return None
+        path = str(data_dir / DEFAULT_FEEDBACK_DB_NAME)
+    from sparksage.feedback.backends.sqlite import SqliteFeedbackStore
+
+    return SqliteFeedbackStore(path)
 
 
 def build_qa_service():
@@ -232,6 +319,13 @@ def build_qa_service():
     ``SPARKSAGE_EMBEDDING_API_KEY``  Embedding API key (falls back to the LLM key)
     ``SPARKSAGE_EMBEDDING_BASE_URL`` Embedding base URL (falls back to LLM base URL)
     ``SPARKSAGE_EMBEDDING_MODEL``    Embedding model (default ``text-embedding-3-small``)
+    ``SPARKSAGE_DATA_DIR``           Unified data dir for durable SQLite stores
+                                      (documents + KB metadata + KB state + feedback).
+                                      Set this once and a restart loses nothing.
+    ``SPARKSAGE_KB_STORE``           SQLite file for KB metadata (overrides data dir)
+    ``SPARKSAGE_KB_STATE_STORE``     SQLite file for blocks + vectors + doc-links
+                                      (overrides data dir)
+    ``SPARKSAGE_FEEDBACK_STORE``     SQLite file for feedback (overrides data dir)
     ============================  =============================================
 
     When no LLM key is set the QA routes return ``503`` with a clear message
@@ -294,10 +388,15 @@ def build_qa_service():
     else:
         reader = Reader(generator=_DummyAnswerGenerator())
 
+    kb_store, state_store = _build_kb_stores()
+    feedback_store = _build_feedback_store()
     return QAService(
         service=spark_service,
         embedder=embedder,
         reader=reader,
+        kb_store=kb_store,
+        state_store=state_store,
+        feedback_store=feedback_store,
     )
 
 
@@ -1199,10 +1298,20 @@ def run(  # pragma: no cover - thin launcher
 
 
 __all__ = [
+    "DEFAULT_AUTO_TAG_EXTRACTOR",
+    "DEFAULT_DOC_DB_NAME",
+    "DEFAULT_DOC_STORE_TABLE",
+    "DEFAULT_EMBEDDING_MODEL",
+    "DEFAULT_FEEDBACK_DB_NAME",
+    "DEFAULT_KB_DB_NAME",
+    "DEFAULT_KB_STATE_DB_NAME",
     "DEFAULT_MODEL",
     "DEFAULT_STREAM",
     "ENV_API_KEY",
     "ENV_BASE_URL",
+    "ENV_DATA_DIR",
+    "ENV_DOC_STORE",
+    "ENV_DOC_STORE_TABLE",
     "ENV_ENABLE_QA",
     "ENV_EMBEDDING_API_KEY",
     "ENV_EMBEDDING_BASE_URL",
