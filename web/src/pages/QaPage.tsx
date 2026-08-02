@@ -275,12 +275,60 @@ function AnswerView({ turn }: { turn: Turn }) {
           precision={2}
           valueStyle={{ fontSize: 14 }}
         />
+        {res.mode === 'agent' && (
+          <AntTag color="geekblue">
+            Agent 多跳推理（{res.iterations ?? 0} 次迭代{res.aborted ? ' · 已中断' : ''}）
+          </AntTag>
+        )}
         {res.cached && <AntTag color="purple">缓存命中</AntTag>}
         {res.intent && <AntTag color="cyan">意图：{res.intent}</AntTag>}
         {res.abstained && (
           <AntTag color="orange">放弃回答：{res.abstention_reason ?? ''}</AntTag>
         )}
       </Space>
+
+      {res.mode === 'agent' && (res.steps?.length ?? 0) > 0 && (
+        <Collapse
+          size="small"
+          items={[
+            {
+              key: 'agent',
+              label: `推理过程（${res.steps!.length} 步 · 证据 ${res.retrieved.length}）`,
+              children: (
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  {res.steps!.map((s, i) => (
+                    <Card key={i} size="small" type="inner">
+                      <Space>
+                        <AntTag color="gold">第 {i + 1} 步</AntTag>
+                        <AntTag color="blue">命中 {s.retrieved_count}</AntTag>
+                      </Space>
+                      {s.thought && (
+                        <Paragraph style={{ margin: '4px 0' }}>
+                          <Text type="secondary">思考：</Text>
+                          {s.thought}
+                        </Paragraph>
+                      )}
+                      <Paragraph style={{ margin: '4px 0' }}>
+                        <Text type="secondary">子查询：</Text>
+                        <Text strong>{s.query}</Text>
+                      </Paragraph>
+                      {s.observation && (
+                        <Paragraph
+                          ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}
+                          style={{ marginBottom: 0 }}
+                        >
+                          <Text type="secondary">观察：</Text>
+                          {s.observation}
+                        </Paragraph>
+                      )}
+                    </Card>
+                  ))}
+                </Space>
+              ),
+            },
+          ]}
+        />
+      )}
 
       {res.citations.length > 0 && (
         <Collapse

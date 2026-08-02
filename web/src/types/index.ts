@@ -120,6 +120,14 @@ export interface RetrievedChunk {
   rank: number;
 }
 
+export interface AgentStep {
+  thought: string;
+  query: string;
+  retrieved_count: number;
+  observation: string;
+  created_at?: string | null;
+}
+
 export interface AskResponse {
   query: string;
   answer: string;
@@ -130,6 +138,10 @@ export interface AskResponse {
   cached: boolean;
   confidence: number;
   intent?: string | null;
+  mode?: string | null;
+  iterations?: number | null;
+  aborted?: boolean | null;
+  steps?: AgentStep[];
 }
 
 export interface KnowledgeBaseInfo {
