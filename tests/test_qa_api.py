@@ -14,6 +14,7 @@ answer) -> feedback (record -> aggregate).
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -172,6 +173,62 @@ class TestIngestAndIndex:
         svc = _make_qa_service()
         result = svc.ingest_and_index(b"data", "docs/report.pdf")
         assert result.source.uri == "docs/report.pdf"
+
+
+class _SlowGen:
+    """Wraps an IdeaBlockGenerator, sleeping inside generate()."""
+
+    def __init__(self, inner, delay):
+        self._inner = inner
+        self._delay = delay
+
+    def generate(self, text, *, source=None, max_blocks=None, language=None):
+        time.sleep(self._delay)
+        return self._inner.generate(
+            text, source=source, max_blocks=max_blocks, language=language
+        )
+
+
+class _SlowSummarizer:
+    def __init__(self, delay):
+        self._delay = delay
+
+    def summarize(self, text, *, max_sentences=3):
+        time.sleep(self._delay)
+        return "slow summary"
+
+
+class TestIngestParallelism:
+    def test_generate_and_summarize_overlap(self):
+        # generate and summarize each sleep ~0.25s; if they ran serially the
+        # ingest would take ~0.5s. Parallelism (option E) brings it under ~0.4s.
+        delay = 0.25
+        converter = MarkdownConverter(
+            backend=FakeConverterBackend(markdown=SAMPLE_MD, title="Guide")
+        )
+        real_gen = IdeaBlockGenerator(FakeLLMClient(responses=[GEN_JSON]))
+        spark_service = SparkSageService(
+            converter=converter,
+            cleaner=TextCleaner(),
+            generator=_SlowGen(real_gen, delay),
+            summarizer=_SlowSummarizer(delay),
+        )
+        embedder = BlockEmbedder(FakeEmbeddingClient(dimension=64))
+        answer_client = FakeLLMClient(responses=[_answer_json(), _faith_json()])
+        reader = Reader(
+            generator=LLMAnswerGenerator(answer_client),
+            faithfulness_judge=LLMFaithfulnessJudge(answer_client),
+        )
+        svc = QAService(service=spark_service, embedder=embedder, reader=reader)
+
+        t0 = time.perf_counter()
+        result = svc.ingest_and_index(b"data", "guide.md")
+        elapsed = time.perf_counter() - t0
+
+        assert result.block_count == 2
+        assert elapsed < delay * 2 - 0.1, (
+            f"ingest not parallelized: elapsed={elapsed:.2f}s >= ~{(delay * 2):.2f}s"
+        )
 
 
 # ---------------------------------------------------------------------------- #
@@ -501,6 +558,64 @@ class TestKBIngestRoute:
         qa_client.delete(f"/api/v1/knowledge_base/documents/{doc_id}")
         resp = qa_client.get("/api/v1/documents")
         assert resp.json()["total"] == 0
+
+
+class TestIngestRouteDoesNotBlockEventLoop:
+    """The ingest route offloads blocking work via asyncio.to_thread.
+
+    Before that fix an ``async def`` route ran the blocking
+    ``ingest_and_index`` (multiple second-long LLM calls) *on* the event-loop
+    thread, so a single in-flight ingest froze the whole server -- even a
+    trivial ``GET /api/v1/health`` could not answer until it finished.
+    """
+
+    def test_health_answers_during_slow_ingest(self):
+        import asyncio
+
+        from httpx import ASGITransport, AsyncClient
+
+        delay = 0.5
+        converter = MarkdownConverter(
+            backend=FakeConverterBackend(markdown=SAMPLE_MD, title="Guide")
+        )
+        real_gen = IdeaBlockGenerator(FakeLLMClient(responses=[GEN_JSON]))
+        spark_service = SparkSageService(
+            converter=converter,
+            cleaner=TextCleaner(),
+            generator=_SlowGen(real_gen, delay),
+        )
+        embedder = BlockEmbedder(FakeEmbeddingClient(dimension=64))
+        answer_client = FakeLLMClient(responses=[_answer_json(), _faith_json()])
+        reader = Reader(
+            generator=LLMAnswerGenerator(answer_client),
+            faithfulness_judge=LLMFaithfulnessJudge(answer_client),
+        )
+        svc = QAService(service=spark_service, embedder=embedder, reader=reader)
+        app = create_app(qa_service=svc)
+
+        async def run():
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                ingest_task = asyncio.create_task(
+                    client.post(
+                        "/api/v1/knowledge_base/ingest",
+                        files={"file": ("g.md", b"data", "text/plain")},
+                    )
+                )
+                await asyncio.sleep(0.05)
+                t0 = time.perf_counter()
+                health_resp = await client.get("/api/v1/health")
+                health_elapsed = time.perf_counter() - t0
+                ingest_resp = await ingest_task
+                return health_resp, ingest_resp, health_elapsed
+
+        health_resp, ingest_resp, health_elapsed = asyncio.run(run())
+        assert ingest_resp.status_code == 200
+        assert health_resp.status_code == 200
+        assert health_elapsed < delay, (
+            f"event loop was blocked: /health took {health_elapsed:.2f}s during a "
+            f"{delay}s ingest (asyncio.to_thread should have offloaded it)"
+        )
 
 
 class TestQueryRoute:

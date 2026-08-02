@@ -162,6 +162,53 @@ class TestKnowledgeBase:
         assert n == 2
         assert len(kb.store) == 2
 
+    def test_incremental_lexical_matches_full_rebuild(self):
+        # add_blocks uses the incremental BM25Retriever.add path; the resulting
+        # lexical index must be byte-for-byte identical to a full rebuild.
+        kb = _make_kb()
+        blocks = [
+            _block("A", "deploy the service"),
+            _block("B", "scale the cluster"),
+            _block("C", "monitor metrics"),
+        ]
+        for b in blocks:
+            kb.add_blocks([b])
+
+        lex = kb.lexical
+        full_ids = list(lex._ids)
+        full_df = dict(lex._df)
+        full_avgdl = lex._avgdl
+
+        kb.lexical.index(kb.blocks())
+        assert list(kb.lexical._ids) == full_ids
+        assert kb.lexical._df == full_df
+        assert kb.lexical._avgdl == pytest.approx(full_avgdl)
+
+    def test_remove_block_uses_incremental_remove(self):
+        kb = _make_kb()
+        blocks = [_block("A", "deploy"), _block("B", "scale"), _block("C", "monitor")]
+        kb.add_blocks(blocks)
+        assert kb.block_count() == 3
+
+        removed_id = str(blocks[1].id)
+        assert kb.remove_block(removed_id)
+        assert kb.block_count() == 2
+        assert removed_id not in kb.lexical
+        result = kb.search("deploy", k=3)
+        ids = {str(c.block.id) for c in result.chunks}
+        assert removed_id not in ids
+        assert str(blocks[0].id) in ids
+
+    def test_repeated_add_does_not_quadratic_rebuild(self):
+        # sanity: adding K documents across an existing registry must not raise
+        # and must leave the lexical index consistent with the registry size.
+        kb = _make_kb()
+        n = 25
+        for i in range(n):
+            kb.add_blocks([_block(f"B{i}", f"content number {i} deploy")])
+        assert kb.block_count() == n
+        assert len(kb.lexical) == n
+
     def test_search_filter_by_kb(self):
         kb = _make_kb()
         kb.add_blocks([_block("A")])

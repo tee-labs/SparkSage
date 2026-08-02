@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -565,44 +566,46 @@ class QAService:
 
         gen = self._service.generator
         assert gen is not None
-        t0 = time.perf_counter()
-        blocks = gen.generate(
-            text,
-            source=source,
-            max_blocks=max_blocks,
-            language=language,
-        )
-        elapsed_gen = time.perf_counter() - t0
-        _logger.debug(
-            "ingest generate done: %d blocks elapsed=%.2fs",
-            len(blocks),
-            elapsed_gen,
-        )
 
         final_tags = list(tags) if tags else []
-        if not final_tags and auto_tag:
-            t0 = time.perf_counter()
-            final_tags = self._service.auto_tag(text, top_k=top_k)
-            elapsed_tag = time.perf_counter() - t0
-            _logger.debug(
-                "ingest auto-tag done: %d tags elapsed=%.2fs tags=%s",
-                len(final_tags),
-                elapsed_tag,
-                final_tags,
-            )
+        need_tags = not final_tags and auto_tag
 
-        summary: str | None = None
-        if summarize:
-            t0 = time.perf_counter()
-            summary = self._service.summarize_text(
-                text, max_sentences=max_summary_sentences
+        t_parallel = time.perf_counter()
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            fut_blocks = pool.submit(
+                gen.generate,
+                text,
+                source=source,
+                max_blocks=max_blocks,
+                language=language,
             )
-            elapsed_sum = time.perf_counter() - t0
-            _logger.debug(
-                "ingest summarize done: %d chars elapsed=%.2fs",
-                len(summary or ""),
-                elapsed_sum,
+            fut_tags = (
+                pool.submit(self._service.auto_tag, text, top_k=top_k)
+                if need_tags
+                else None
             )
+            fut_summary = (
+                pool.submit(
+                    self._service.summarize_text,
+                    text,
+                    max_sentences=max_summary_sentences,
+                )
+                if summarize
+                else None
+            )
+            blocks = fut_blocks.result()
+            if fut_tags is not None:
+                final_tags = fut_tags.result()
+            summary = fut_summary.result() if fut_summary is not None else None
+        elapsed_parallel = time.perf_counter() - t_parallel
+        _logger.debug(
+            "ingest generate/tag/summarize done: %d blocks, %d tags, "
+            "%d summary chars elapsed=%.2fs",
+            len(blocks),
+            len(final_tags),
+            len(summary or ""),
+            elapsed_parallel,
+        )
 
         record = new_record(
             title=resolved_title,
@@ -618,14 +621,14 @@ class QAService:
         elapsed_total = time.perf_counter() - t_total
         _logger.info(
             "ingested %s: %d blocks indexed (kb=%s, doc=%s) "
-            "elapsed=%.2fs (convert=%.2fs gen=%.2s index=%.2fs)",
+            "elapsed=%.2fs (convert=%.2fs parallel=%.2fs index=%.2fs)",
             filename or source.uri,
             len(blocks),
             kb.kb_id,
             stored.doc_id,
             elapsed_total,
             elapsed_conv,
-            elapsed_gen,
+            elapsed_parallel,
             elapsed_index,
         )
         return IngestResult(
