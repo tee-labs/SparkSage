@@ -43,6 +43,7 @@ export default function QaPage() {
   const [useLexical, setUseLexical] = useState(true);
   const [useRerank, setUseRerank] = useState(true);
   const [tagFilter, setTagFilter] = useState<string[]>([]);
+  const [mode, setMode] = useState<string>('default');
   const [history, setHistory] = useState<Turn[]>([]);
   const [loading, setLoading] = useState(false);
   const [feedback, setFeedback] = useState<Record<string, FeedbackRating>>({});
@@ -88,6 +89,7 @@ export default function QaPage() {
         use_lexical: useLexical,
         use_rerank: useRerank,
         tags: tagFilter.length ? tagFilter : undefined,
+        mode,
         history: history.map((t) => ({ role: t.role, content: t.content })),
       });
       const userTurn: Turn = { role: 'user', content: query };
@@ -175,6 +177,24 @@ export default function QaPage() {
           <Switch checked={useLexical} onChange={setUseLexical} />
           <span>use_rerank</span>
           <Switch checked={useRerank} onChange={setUseRerank} />
+          <Tooltip
+            title={
+              mode === 'agent'
+                ? 'Agent：LLM 驱动的多轮检索，适合多跳/比较类问题，较慢。'
+                : 'Default：单轮问答，速度快，适合简单事实查询。'
+            }
+          >
+            <span>模式：</span>
+          </Tooltip>
+          <Select
+            style={{ width: 140 }}
+            value={mode}
+            onChange={setMode}
+            options={[
+              { value: 'default', label: 'Default（单轮）' },
+              { value: 'agent', label: 'Agent（多跳推理）' },
+            ]}
+          />
           <Select
             mode="multiple"
             allowClear

@@ -32,13 +32,23 @@ Example
     result = kb.search("how to deploy", k=3)
 """
 
+from sparksage.kb.backends.sqlite import SqliteKnowledgeBaseStore
+from sparksage.kb.backends.state import (
+    KbStateSnapshot,
+    KbStateStore,
+    SqliteKbStateStore,
+)
 from sparksage.kb.knowledge_base import KnowledgeBase
 from sparksage.kb.models import KnowledgeBaseInfo
 from sparksage.kb.store import InMemoryKnowledgeBaseStore, KnowledgeBaseStore
 
 __all__ = [
     "InMemoryKnowledgeBaseStore",
+    "KbStateSnapshot",
+    "KbStateStore",
     "KnowledgeBase",
     "KnowledgeBaseInfo",
     "KnowledgeBaseStore",
+    "SqliteKbStateStore",
+    "SqliteKnowledgeBaseStore",
 ]

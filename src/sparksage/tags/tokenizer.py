@@ -62,6 +62,11 @@ def _contains_cjk(text: str) -> bool:
     return bool(_CJK_CHAR_RE.search(text))
 
 
+def is_cjk_char(ch: str) -> bool:
+    """Return ``True`` when ``ch`` is a single CJK / kana / Hangul character."""
+    return len(ch) == 1 and bool(_CJK_CHAR_RE.fullmatch(ch))
+
+
 @runtime_checkable
 class Tokenizer(Protocol):
     """Turn raw text into a flat list of lower-cased tokens."""
@@ -214,4 +219,5 @@ __all__ = [
     "Tokenizer",
     "WhitespaceTokenizer",
     "default_tokenizer",
+    "is_cjk_char",
 ]

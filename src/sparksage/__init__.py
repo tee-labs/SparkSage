@@ -286,6 +286,7 @@ from sparksage.schema.ideablock import IdeaBlock
 from sparksage.schema.technical import TechnicalBlock
 from sparksage.tags import (
     CJK_STOPWORDS,
+    DEFAULT_MIN_COHESION,
     DEFAULT_STOPWORDS,
     ENGLISH_STOPWORDS,
     EXTRACTOR_NAMES,
@@ -299,8 +300,11 @@ from sparksage.tags import (
     TfidfKeywordExtractor,
     Tokenizer,
     WhitespaceTokenizer,
+    blessed_cjk_bigrams,
+    cjk_bigram_gate,
     default_extractor,
     default_tokenizer,
+    is_cjk_char,
     is_stopword,
     make_extractor,
 )
@@ -356,6 +360,7 @@ __all__ = [
     "DEFAULT_MAX_ITERATIONS",
     "DEFAULT_MAX_THRESHOLD",
     "DEFAULT_MIN_CLUSTER_SIZE",
+    "DEFAULT_MIN_COHESION",
     "DEFAULT_NUM_HYPERPLANES",
     "DEFAULT_NUM_TABLES",
     "DEFAULT_SEED",
@@ -470,6 +475,9 @@ __all__ = [
     "default_tokenizer",
     "evaluate_retrieval",
     "find_similar_pairs",
+    "blessed_cjk_bigrams",
+    "cjk_bigram_gate",
+    "is_cjk_char",
     "is_stopword",
     "load_dotenv",
     "load_store",

@@ -269,7 +269,18 @@ PYTHONPATH=src python3 examples/build_chunks.py
   **free-form** (`KeywordScore.keyword` → `list[str]` on the document) —
   intentionally *not* the closed `Tag` enum, which keeps its coarse-grained
   semantic-filtering role. `make_extractor("rake"|"tfidf"|"textrank")` is the
-  config-driven factory (unknown names fail fast).
+  config-driven factory (unknown names fail fast). Bigrams are a *scoring*
+  feature, not a word: the cohesion filter (`cohesion.py`, pure stdlib) stops
+  cross-boundary CJK bigrams (`凌晨一点执行` → `晨一` / `点执`) from surfacing as
+  tags. `blessed_cjk_bigrams` combines a bidirectional-conditional-probability
+  cohesion floor (`f(ab)/max(f(a),f(b))`) with a per-CJK-run maximum-weight
+  non-overlap selection (DP, weighted by cohesion) so the densest real-word
+  segmentation wins; the extractors drop non-blessed bigrams at the token level
+  (cleaning both tag output *and* TF-IDF / TextRank scoring). `min_cohesion=`
+  on every extractor / `make_extractor` (default `DEFAULT_MIN_COHESION = 0.34`,
+  `None` disables); `SPARKSAGE_AUTO_TAG_MIN_COHESION` is the env knob (`off` →
+  disabled). Word-perfect Mandarin still needs `jieba`; this is the no-dependency
+  fallback that removes the scatter.
 - The document-management core (`documents/`) is the document-level counterpart
   of `schema/` — there was no *document* object, only chunk-level
   `IdeaBlock`s. `DocumentRecord` (`models.py`, Pydantic v2, `extra="forbid"`)
@@ -637,13 +648,25 @@ ingest route takes a `kb_id` form field, and `AskRequest.kb_id` routes the
 query to the right KB's lazily-built `QAEngine`; the React UI adds a
 `/knowledge-bases` management page and a shared `KbSelector` on ingest / QA /
 browse pages).
-Planned next: an OpenAI-compatible API, an `/api/v1/distill` route wrapping
-`JobManager`, and an `/api/v1/query/agent` route wrapping a pollable agent job
-(reusing the `DistillJob` state machine over the `AgenticQAEngine`
-`on_progress` / `is_cancelled` hooks so long agent runs are cancellable /
-observable exactly like a Distill run).
-Design schema additions so the Distill lifecycle fields (`status`, `parents`,
-`confidence`, `embedding`) remain usable.
+ Also implemented now: durable persistence so a Docker restart loses nothing
+ (`SPARKSAGE_DATA_DIR`, defaulting to `/app/data` in the image, is the one-knob
+ default). `KnowledgeBaseStore` / `FeedbackStore` each gained a stdlib-only
+ `Sqlite*` counterpart (`kb/backends/sqlite.py`, `feedback/backends/sqlite.py`)
+ mirroring the `SqliteDocumentStore` pattern (regex-validated table, `check_same_thread=False`
+ + `threading.RLock`, defensive copies, persists across instances). A new
+ `KbStateStore` Protocol (`kb/backends/state.py`) + `SqliteKbStateStore` persists
+ the live block registry + dense vectors (each block's `embedding` rides along
+ in its JSON, so restart never re-calls the embedding API) + document<->block
+ linkage; `KnowledgeBase.__init__` takes an optional `state_store=` and writes
+ through on every mutation (`add_blocks` / `remove_block` / `remove_document`),
+ then hydrates the registry + vectors + lexical index on construction.
+ `QAService` accepts `kb_store=` / `state_store=` / `feedback_store=` and
+ reloads every persisted KB on startup (`_reload_persisted_kbs`), so the active
+ KB id + indexed knowledge survive a restart. `build_qa_service` /
+ `build_default_service` wire all four durable backends from `SPARKSAGE_DATA_DIR`
+ (individual `SPARKSAGE_*_STORE` paths override); a Docker `VOLUME /app/data`
+ mount is all a user needs. The Dockerfile sets `SPARKSAGE_DATA_DIR=/app/data`
+ and declares the volume.
 
 Also implemented now: agentic QA — a *second* QA mode that turns SparkSage from
 a one-shot RAG into an Agentic RAG. The new `agent/` package is a different
@@ -661,3 +684,10 @@ reader). `AgentResult` is shape-compatible with `QAResult`, so
 (`AskRequest.mode`) select it with no serializer change; `build_default_service`
 auto-wires an `LLMAgentController` whenever an API key is set, bounded by
 `SPARKSAGE_AGENT_MAX_ITERATIONS`.
+ Planned next: an OpenAI-compatible API, an `/api/v1/distill` route wrapping
+ `JobManager`, and an `/api/v1/query/agent` route wrapping a pollable agent job
+ (reusing the `DistillJob` state machine over the `AgenticQAEngine`
+ `on_progress` / `is_cancelled` hooks so long agent runs are cancellable /
+ observable exactly like a Distill run).
+ Design schema additions so the Distill lifecycle fields (`status`, `parents`,
+ `confidence`, `embedding`) remain usable.

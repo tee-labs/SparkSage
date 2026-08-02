@@ -19,6 +19,11 @@ closed :class:`~sparksage.schema.enums.Tag` enum, which keeps its coarse-grained
 semantic-filtering role.
 """
 
+from sparksage.tags.cohesion import (
+    DEFAULT_MIN_COHESION,
+    blessed_cjk_bigrams,
+    cjk_bigram_gate,
+)
 from sparksage.tags.extractor import (
     EXTRACTOR_NAMES,
     KeywordExtractor,
@@ -42,11 +47,13 @@ from sparksage.tags.tokenizer import (
     Tokenizer,
     WhitespaceTokenizer,
     default_tokenizer,
+    is_cjk_char,
 )
 
 __all__ = [
     "CJK_STOPWORDS",
     "CharBigramTokenizer",
+    "DEFAULT_MIN_COHESION",
     "DEFAULT_STOPWORDS",
     "ENGLISH_STOPWORDS",
     "EXTRACTOR_NAMES",
@@ -59,8 +66,11 @@ __all__ = [
     "TfidfKeywordExtractor",
     "Tokenizer",
     "WhitespaceTokenizer",
+    "blessed_cjk_bigrams",
+    "cjk_bigram_gate",
     "default_extractor",
     "default_tokenizer",
+    "is_cjk_char",
     "is_stopword",
     "make_extractor",
 ]

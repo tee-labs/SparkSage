@@ -61,6 +61,7 @@ from sparksage.documents.models import new_record
 from sparksage.embed.indexer import BlockEmbedder
 from sparksage.feedback.models import FeedbackRating, FeedbackRecord
 from sparksage.feedback.store import FeedbackStats, FeedbackStore, InMemoryFeedbackStore
+from sparksage.kb.backends.state import KbStateStore
 from sparksage.kb.knowledge_base import KnowledgeBase
 from sparksage.kb.models import KnowledgeBaseInfo
 from sparksage.kb.store import InMemoryKnowledgeBaseStore, KnowledgeBaseStore
@@ -124,10 +125,22 @@ class QAService:
     kb_store:
         Optional :class:`KnowledgeBaseStore` registry for multi-tenant KB
         metadata. Defaults to an :class:`InMemoryKnowledgeBaseStore` so KB CRUD
-        works out of the box.
+        works out of the box. Pass a durable store (e.g.
+        :class:`~sparksage.kb.SqliteKnowledgeBaseStore`) so KB metadata
+        survives a restart.
     feedback_store:
         Optional :class:`FeedbackStore` for the quality flywheel. Defaults to an
-        :class:`InMemoryFeedbackStore` so feedback works out of the box.
+        :class:`InMemoryFeedbackStore` so feedback works out of the box. Pass a
+        durable store (e.g. :class:`~sparksage.feedback.SqliteFeedbackStore`)
+        so approval ratios survive a restart.
+    state_store:
+        Optional :class:`~sparksage.kb.KbStateStore` for the live block
+        registry + vector index + document<->block linkage. When set, every
+        :class:`KnowledgeBase` aggregate (including ones created later via
+        :meth:`create_knowledge_base`) writes its block/vector mutations
+        through to it, and on construction the service reloads every persisted
+        KB so a restart does not lose indexed knowledge or require re-embedding.
+        Defaults to ``None`` (ephemeral in-memory indexes).
     history_store:
         Optional :class:`QASessionStore` for the persisted QA conversation log
         (the query/answer history the Q&A page restores on reload). Defaults to
@@ -161,6 +174,7 @@ class QAService:
         kb: KnowledgeBase | None = None,
         kb_store: KnowledgeBaseStore | None = None,
         feedback_store: FeedbackStore | None = None,
+        state_store: KbStateStore | None = None,
         history_store: QASessionStore | None = None,
         agent_controller: AgentController | None = None,
         agent_max_iterations: int = DEFAULT_MAX_AGENT_ITERATIONS,
@@ -172,6 +186,7 @@ class QAService:
         self._kb_store: KnowledgeBaseStore = (
             kb_store if kb_store is not None else InMemoryKnowledgeBaseStore()
         )
+        self._state_store: KbStateStore | None = state_store
         # Live KnowledgeBase aggregates keyed by kb_id (runtime index state).
         self._kbs: dict[str, KnowledgeBase] = {}
         # Lazily built QAEngine per KB (shares reader + query_processor).
@@ -181,16 +196,26 @@ class QAService:
         self._agent_controller = agent_controller
         self._agent_max_iterations = agent_max_iterations
 
-        default_kb = (
-            kb
-            if kb is not None
-            else KnowledgeBase(
-                info=KnowledgeBaseInfo(name="default"),
-                embedder=embedder,
-                document_store=self._service.document_store,
-            )
-        )
-        self._register_kb(default_kb)
+        if kb is not None:
+            default_kb = kb
+            self._register_kb(default_kb)
+        else:
+            # Reload every persisted KB from the durable store (if any), then
+            # fall back to creating a fresh "default" KB when none exist. This
+            # is what makes a Docker restart not lose indexed knowledge: the
+            # block registry + vectors + doc-links come straight back off disk
+            # via the state store, with no re-embedding.
+            loaded = self._reload_persisted_kbs()
+            if loaded:
+                default_kb = self._kbs[loaded[0]]
+            else:
+                default_kb = KnowledgeBase(
+                    info=KnowledgeBaseInfo(name="default"),
+                    embedder=embedder,
+                    document_store=self._service.document_store,
+                    state_store=self._state_store,
+                )
+                self._register_kb(default_kb)
         self._active_kb_id: str = default_kb.kb_id
 
         self._feedback_store: FeedbackStore = (
@@ -234,6 +259,11 @@ class QAService:
         return self._kb_store
 
     @property
+    def state_store(self) -> KbStateStore | None:
+        """The durable KB-state backend, or ``None`` when persistence is off."""
+        return self._state_store
+
+    @property
     def engine(self) -> QAEngine:
         """The QAEngine bound to the active knowledge base."""
         return self._engine_for(self._active_kb_id)
@@ -254,6 +284,38 @@ class QAService:
     # ------------------------------------------------------------------ #
     # multi-knowledge-base management
     # ------------------------------------------------------------------ #
+    def _reload_persisted_kbs(self) -> list[str]:
+        """Reconstruct every persisted KB aggregate from the durable stores.
+
+        Reads the :class:`KnowledgeBaseInfo` metadata from ``kb_store`` and
+        rebuilds each :class:`KnowledgeBase` with the shared embedder + document
+        store + ``state_store`` (which hydrates the block registry + vectors +
+        doc-links). Returns the list of loaded ``kb_id``s, newest-first, so the
+        caller can pick the active target. A no-op when the store is empty (a
+        fresh start) or when no ``state_store`` is wired (the metadata is still
+        reloaded so KB CRUD state survives, but the indexes start empty).
+        """
+        if len(self._kb_store) == 0:
+            return []
+        infos = self._kb_store.list(limit=10**9)
+        loaded: list[str] = []
+        for info in infos:
+            kb = KnowledgeBase(
+                info=info,
+                embedder=self._embedder,
+                document_store=self._service.document_store,
+                state_store=self._state_store,
+            )
+            self._kbs[kb.kb_id] = kb
+            loaded.append(kb.kb_id)
+        if loaded:
+            _logger.info(
+                "reloaded %d persisted knowledge base(s) (state_store=%s)",
+                len(loaded),
+                self._state_store is not None,
+            )
+        return loaded
+
     def _register_kb(self, kb: KnowledgeBase) -> KnowledgeBase:
         """Register a live aggregate + persist its metadata to the store."""
         self._kbs[kb.kb_id] = kb
@@ -340,6 +402,7 @@ class QAService:
             info=info,
             embedder=self._embedder,
             document_store=self._service.document_store,
+            state_store=self._state_store,
         )
         self._register_kb(kb)
         if set_active or len(self._kbs) == 1:
@@ -412,6 +475,8 @@ class QAService:
         del self._kbs[kb_id]
         self._engines.pop(kb_id, None)
         deleted = self._kb_store.delete(kb_id)
+        if self._state_store is not None:
+            self._state_store.clear(kb_id)
         if self._active_kb_id == kb_id:
             self._active_kb_id = next(iter(self._kbs))
         return deleted

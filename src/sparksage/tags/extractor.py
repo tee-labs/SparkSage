@@ -35,10 +35,12 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from sparksage.tags.cohesion import DEFAULT_MIN_COHESION, cjk_bigram_gate
 from sparksage.tags.stoplist import DEFAULT_STOPWORDS
 from sparksage.tags.tokenizer import (
     AutoTokenizer,
     Tokenizer,
+    is_cjk_char,
 )
 
 #: Maximum iterations for the TextRank fixed-point iteration. The iteration
@@ -114,14 +116,27 @@ def _split_sentences(text: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
+def _is_cjk_bigram(token: str) -> bool:
+    """True when ``token`` is exactly two CJK / kana / Hangul characters."""
+    return len(token) == 2 and is_cjk_char(token[0]) and is_cjk_char(token[1])
+
+
 def _tokenize_filtered(
     text: str,
     tokenizer: Tokenizer,
     stopwords: frozenset[str],
     *,
     keep_case: bool = False,
+    cjk_allow: frozenset[str] | None = None,
 ) -> list[str]:
-    """Tokenize ``text`` and drop stop words / very short tokens."""
+    """Tokenize ``text`` and drop stop words / very short / noisy tokens.
+
+    ``cjk_allow`` is the blessed-bigram set from
+    :func:`~sparksage.tags.cohesion.cjk_bigram_gate`; when present, 2-char CJK
+    tokens that are *not* blessed (cross-boundary noise such as ``晨一``) are
+    dropped before they can enter a phrase, a TF-IDF bag, or a TextRank graph --
+    so the cohesion filter cleans scoring *and* tag output at once.
+    """
     raw = tokenizer.tokenize(text)
     out: list[str] = []
     for tok in raw:
@@ -134,6 +149,8 @@ def _tokenize_filtered(
             continue
         is_cjk = any(ord(c) >= 0x3000 for c in t)
         if not is_cjk and len(t) < _MIN_TOKEN_LEN:
+            continue
+        if cjk_allow is not None and _is_cjk_bigram(t) and t not in cjk_allow:
             continue
         out.append(t)
     return out
@@ -189,16 +206,19 @@ class RakeKeywordExtractor:
         stopwords: frozenset[str] | None = None,
         min_phrase_len: int = 1,
         max_phrase_len: int = 5,
+        min_cohesion: float | None = DEFAULT_MIN_COHESION,
     ) -> None:
         self._tokenizer: Tokenizer = tokenizer if tokenizer is not None else AutoTokenizer()
         self._stopwords = stopwords if stopwords is not None else DEFAULT_STOPWORDS
         self._min_phrase_len = max(1, int(min_phrase_len))
         self._max_phrase_len = max(self._min_phrase_len, int(max_phrase_len))
+        self._min_cohesion = min_cohesion
 
     def extract(self, text: str, top_k: int = 10) -> list[KeywordScore]:
         if top_k < 1:
             raise ValueError("top_k must be >= 1")
-        phrases = self._candidate_phrases(text)
+        cjk_allow = cjk_bigram_gate(text, min_cohesion=self._min_cohesion)
+        phrases = self._candidate_phrases(text, cjk_allow)
         if not phrases:
             return []
 
@@ -236,7 +256,9 @@ class RakeKeywordExtractor:
         )
         return ranked[:top_k]
 
-    def _candidate_phrases(self, text: str) -> list[list[str]]:
+    def _candidate_phrases(
+        self, text: str, cjk_allow: frozenset[str] | None = None
+    ) -> list[list[str]]:
         phrases: list[list[str]] = []
         for sentence in _split_sentences(text):
             current: list[str] = []
@@ -249,6 +271,18 @@ class RakeKeywordExtractor:
                     continue
                 is_cjk = any(ord(c) >= 0x3000 for c in t)
                 if not is_cjk and len(t) < _MIN_TOKEN_LEN:
+                    if current:
+                        self._append(current, phrases)
+                        current = []
+                    continue
+                # A cross-boundary CJK bigram (not blessed by the cohesion
+                # filter) is a word boundary, not a keyword -- flush the
+                # current phrase so the noise never lands inside a tag.
+                if (
+                    cjk_allow is not None
+                    and _is_cjk_bigram(t)
+                    and t not in cjk_allow
+                ):
                     if current:
                         self._append(current, phrases)
                         current = []
@@ -294,10 +328,12 @@ class TfidfKeywordExtractor:
         tokenizer: Tokenizer | None = None,
         stopwords: frozenset[str] | None = None,
         min_token_len: int = _MIN_TOKEN_LEN,
+        min_cohesion: float | None = DEFAULT_MIN_COHESION,
     ) -> None:
         self._tokenizer: Tokenizer = tokenizer if tokenizer is not None else AutoTokenizer()
         self._stopwords = stopwords if stopwords is not None else DEFAULT_STOPWORDS
         self._min_token_len = max(1, int(min_token_len))
+        self._min_cohesion = min_cohesion
 
     def extract(self, text: str, top_k: int = 10) -> list[KeywordScore]:
         if top_k < 1:
@@ -306,11 +342,12 @@ class TfidfKeywordExtractor:
         if not sentences:
             return []
 
+        cjk_allow = cjk_bigram_gate(text, min_cohesion=self._min_cohesion)
         doc_freq: Counter[str] = Counter()
         term_freq: Counter[str] = Counter()
         section_tokens: list[list[str]] = []
         for sentence in sentences:
-            toks = self._tokens(sentence)
+            toks = self._tokens(sentence, cjk_allow)
             section_tokens.append(toks)
             for t in set(toks):
                 doc_freq[t] += 1
@@ -328,7 +365,9 @@ class TfidfKeywordExtractor:
         ranked = sorted(scored, key=lambda k: (-k.score, k.keyword))
         return ranked[:top_k]
 
-    def _tokens(self, text: str) -> list[str]:
+    def _tokens(
+        self, text: str, cjk_allow: frozenset[str] | None = None
+    ) -> list[str]:
         out: list[str] = []
         for tok in self._tokenizer.tokenize(text):
             t = tok.lower()
@@ -338,6 +377,8 @@ class TfidfKeywordExtractor:
                 continue
             is_cjk = any(ord(c) >= 0x3000 for c in t)
             if not is_cjk and len(t) < self._min_token_len:
+                continue
+            if cjk_allow is not None and _is_cjk_bigram(t) and t not in cjk_allow:
                 continue
             out.append(t)
         return out
@@ -378,11 +419,13 @@ class TextRankKeywordExtractor:
         stopwords: frozenset[str] | None = None,
         window: int = _TEXTRANK_WINDOW,
         damping: float = _TEXTRANK_DAMPING,
+        min_cohesion: float | None = DEFAULT_MIN_COHESION,
     ) -> None:
         self._tokenizer: Tokenizer = tokenizer if tokenizer is not None else AutoTokenizer()
         self._stopwords = stopwords if stopwords is not None else DEFAULT_STOPWORDS
         self._window = max(1, int(window))
         self._damping = float(damping)
+        self._min_cohesion = min_cohesion
 
     def extract(self, text: str, top_k: int = 10) -> list[KeywordScore]:
         if top_k < 1:
@@ -391,10 +434,13 @@ class TextRankKeywordExtractor:
         if not sentences:
             return []
 
+        cjk_allow = cjk_bigram_gate(text, min_cohesion=self._min_cohesion)
         cooc: Counter[tuple[str, str]] = Counter()
         nodes: set[str] = set()
         for sentence in sentences:
-            toks = _tokenize_filtered(sentence, self._tokenizer, self._stopwords)
+            toks = _tokenize_filtered(
+                sentence, self._tokenizer, self._stopwords, cjk_allow=cjk_allow
+            )
             nodes.update(toks)
             w = self._window
             for i, a in enumerate(toks):
@@ -416,7 +462,7 @@ class TextRankKeywordExtractor:
             adj[b][a] = adj[b].get(a, 0.0) + weight
 
         scores = self._iterate(adj)
-        merged = self._merge_adjacent(text, scores, top_k)
+        merged = self._merge_adjacent(text, scores, top_k, cjk_allow)
         return merged
 
     def _iterate(
@@ -450,6 +496,7 @@ class TextRankKeywordExtractor:
         text: str,
         scores: dict[str, float],
         top_k: int,
+        cjk_allow: frozenset[str] | None = None,
     ) -> list[KeywordScore]:
         if not scores:
             return []
@@ -461,7 +508,9 @@ class TextRankKeywordExtractor:
         phrases: list[KeywordScore] = []
         seen_phrases: set[str] = set()
         for sentence in _split_sentences(text):
-            toks = _tokenize_filtered(sentence, self._tokenizer, self._stopwords)
+            toks = _tokenize_filtered(
+                sentence, self._tokenizer, self._stopwords, cjk_allow=cjk_allow
+            )
             current: list[str] = []
             current_score: list[float] = []
             for tok in toks:
@@ -522,20 +571,31 @@ def make_extractor(
     *,
     tokenizer: Tokenizer | None = None,
     stopwords: frozenset[str] | None = None,
+    min_cohesion: float | None = DEFAULT_MIN_COHESION,
 ) -> KeywordExtractor:
     """Build a :class:`KeywordExtractor` by short name.
 
     Recognized names (case-insensitive): ``"rake"`` (default), ``"tfidf"``,
     ``"textrank"``. Unknown names raise :class:`ValueError` so config typos fail
     fast -- matching the project's ``extra="forbid"`` stance.
+
+    ``min_cohesion`` controls the CJK bigram cohesion filter
+    (:data:`~sparksage.tags.cohesion.DEFAULT_MIN_COHESION` by default; ``None``
+    disables it).
     """
     key = (name or "").strip().lower()
     if key in ("rake",):
-        return RakeKeywordExtractor(tokenizer=tokenizer, stopwords=stopwords)
+        return RakeKeywordExtractor(
+            tokenizer=tokenizer, stopwords=stopwords, min_cohesion=min_cohesion
+        )
     if key in ("tfidf", "tf-idf"):
-        return TfidfKeywordExtractor(tokenizer=tokenizer, stopwords=stopwords)
+        return TfidfKeywordExtractor(
+            tokenizer=tokenizer, stopwords=stopwords, min_cohesion=min_cohesion
+        )
     if key in ("textrank", "text-rank"):
-        return TextRankKeywordExtractor(tokenizer=tokenizer, stopwords=stopwords)
+        return TextRankKeywordExtractor(
+            tokenizer=tokenizer, stopwords=stopwords, min_cohesion=min_cohesion
+        )
     raise ValueError(
         f"unknown extractor {name!r}; choose one of {EXTRACTOR_NAMES}"
     )
