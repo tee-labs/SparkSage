@@ -152,7 +152,7 @@ export default function IngestPage() {
       </Card>
 
       <Card title="参数" size="small">
-        <Form form={form} layout="inline" initialValues={{ clean: true, auto_tag: true, top_k: 8, kb_ingest: false }}>
+        <Form form={form} layout="inline" initialValues={{ clean: true, auto_tag: true, top_k: 8, kb_ingest: false, language: 'zh' }}>
           <Form.Item label="知识库">
             <KbSelector
               value={selectedKbId}

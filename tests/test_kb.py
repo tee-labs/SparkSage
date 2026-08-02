@@ -36,7 +36,7 @@ class TestKnowledgeBaseInfo:
     def test_defaults(self):
         info = KnowledgeBaseInfo(name="x")
         assert info.kb_id
-        assert info.language == "en"
+        assert info.language == "zh"
 
     def test_empty_name_rejected(self):
         with pytest.raises(ValueError):
