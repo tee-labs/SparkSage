@@ -147,6 +147,7 @@ export const api = {
     use_rerank?: boolean;
     tags?: string[];
     history?: { role: 'user' | 'assistant'; content: string }[];
+    mode?: string;
   }) => client.post<AskResponse>('/query', body).then((r) => r.data),
 
   // ---- feedback ----

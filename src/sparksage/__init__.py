@@ -1,5 +1,24 @@
 """SparkSage: structured, question-aligned knowledge chunks for RAG."""
 
+from sparksage.agent import (
+    DEFAULT_MAX_ITERATIONS as DEFAULT_MAX_AGENT_ITERATIONS,
+)
+from sparksage.agent import (
+    ActionEmptyResponseError,
+    ActionResponseParseError,
+    ActionType,
+    AgentAction,
+    AgentController,
+    AgentError,
+    AgenticQAEngine,
+    AgentProgress,
+    AgentResult,
+    IdentityController,
+    LLMAgentController,
+    agent_messages,
+    coerce_action,
+    parse_action_response,
+)
 from sparksage.api import (
     AskRequest,
     AskResponse,
@@ -295,6 +314,17 @@ __all__ = [
     "DEFAULT_LOG_LEVEL",
     "DEFAULT_RULES",
     "DEFAULT_STOPWORDS",
+    "ActionEmptyResponseError",
+    "ActionResponseParseError",
+    "ActionType",
+    "AgentAction",
+    "AgentController",
+    "AgentError",
+    "AgentProgress",
+    "AgentResult",
+    "AgenticQAEngine",
+    "IdentityController",
+    "LLMAgentController",
     "CJK_STOPWORDS",
     "ENGLISH_STOPWORDS",
     "EXTRACTOR_NAMES",
@@ -499,6 +529,10 @@ __all__ = [
     "Reader",
     "DEFAULT_MAX_REFINE_ITERATIONS",
     "DEFAULT_MIN_RELEVANCE",
+    "DEFAULT_MAX_AGENT_ITERATIONS",
+    "agent_messages",
+    "coerce_action",
+    "parse_action_response",
     "IntentKBRouter",
     "QAEngine",
     "QACache",
