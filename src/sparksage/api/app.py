@@ -967,6 +967,7 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
         _to_block_out,
         _to_ingest_response,
     )
+    from sparksage.generator.generator import GenerationError
 
     if not isinstance(qa_svc, QAService):
         raise TypeError("qa_service must be a QAService instance")
@@ -1030,6 +1031,8 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
             )
         except GenerationNotConfiguredError as exc:
             raise HTTPException(status_code=503, detail=_detail(exc)) from exc
+        except GenerationError as exc:
+            raise HTTPException(status_code=502, detail=_detail(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=_detail(exc)) from exc
         except Exception as exc:  # noqa: BLE001
