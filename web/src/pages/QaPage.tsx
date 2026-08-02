@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Card,
   Input,
@@ -20,6 +20,7 @@ import {
   LikeOutlined,
   DislikeOutlined,
   EditOutlined,
+  DeleteOutlined,
 } from '@ant-design/icons';
 import { api } from '@/api';
 import type { AskResponse, FeedbackRating } from '@/types';
@@ -47,6 +48,35 @@ export default function QaPage() {
   const [feedback, setFeedback] = useState<Record<string, FeedbackRating>>({});
   const [corrections, setCorrections] = useState<Record<string, string>>({});
 
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .queryHistory({ limit: 100, kb_id: selectedKbId ?? undefined })
+      .then((r) => {
+        if (cancelled) return;
+        const turns: Turn[] = [...r.items]
+          .reverse()
+          .map((item) =>
+            item.role === 'user'
+              ? { role: 'user', content: item.content }
+              : {
+                  role: 'assistant',
+                  content: item.content,
+                  result: item.result ?? undefined,
+                },
+          );
+        setHistory(turns);
+        setFeedback({});
+        setCorrections({});
+      })
+      .catch(() => {
+        // history restore is best-effort
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedKbId]);
+
   const ask = async () => {
     if (!query.trim()) return;
     setLoading(true);
@@ -73,6 +103,18 @@ export default function QaPage() {
 
   const removeTurn = (idx: number) => {
     setHistory((prev) => prev.filter((_, i) => i !== idx && i !== idx + 1));
+  };
+
+  const clearHistory = async () => {
+    try {
+      await api.clearHistory();
+      setHistory([]);
+      setFeedback({});
+      setCorrections({});
+      message.success('历史已清空');
+    } catch (e) {
+      message.error(errText(e));
+    }
   };
 
   const editTurn = (idx: number) => {
@@ -109,9 +151,14 @@ export default function QaPage() {
 
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      <Title level={4} style={{ margin: 0 }}>
-        问答测试
-      </Title>
+      <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+        <Title level={4} style={{ margin: 0 }}>
+          问答测试
+        </Title>
+        <Button size="small" icon={<DeleteOutlined />} onClick={clearHistory}>
+          清空历史
+        </Button>
+      </Space>
 
       <Card size="small" title="参数">
         <Space wrap>

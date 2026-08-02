@@ -623,6 +623,34 @@ class FeedbackListResponse(BaseModel):
     offset: int = Field(description="Offset used.")
 
 
+class QueryHistoryItem(BaseModel):
+    """One persisted QA turn for the conversation-history listing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str = Field(description="Stable turn id.")
+    role: str = Field(description="user | assistant.")
+    content: str = Field(description="The user query or the surfaced answer text.")
+    kb_id: str | None = Field(default=None, description="Source knowledge base.")
+    result: AskResponse | None = Field(
+        default=None,
+        description="Full answer payload for assistant turns (re-renderable).",
+    )
+    created_at: datetime = Field(description="UTC timestamp.")
+
+
+class QueryHistoryResponse(BaseModel):
+    """Paginated QA conversation-history listing (newest-first)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[QueryHistoryItem] = Field(description="Turns, newest-first.")
+    count: int = Field(description="Number of items in this page.")
+    total: int = Field(description="Total turns.")
+    limit: int = Field(description="Page size used.")
+    offset: int = Field(description="Offset used.")
+
+
 def _to_block_out(block: object) -> BlockOut:
     """Build a :class:`BlockOut` from an :class:`~sparksage.schema.IdeaBlock`."""
     tags = []

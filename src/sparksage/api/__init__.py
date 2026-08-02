@@ -17,6 +17,8 @@ Routes:
 * ``POST /api/v1/knowledge_base/ingest`` -- upload knowledge: parse -> chunk ->
   embed -> index (makes it retrievable).
 * ``POST /api/v1/query`` -- ask a question against the knowledge base.
+* ``GET /DELETE /api/v1/query/history`` -- list / clear the persisted QA
+  conversation history (the Q&A page restores its turns across reloads).
 * ``GET /api/v1/knowledge_base`` -- knowledge-base snapshot (counts).
 * ``POST/GET /api/v1/feedback`` -- record / aggregate user verdicts.
 """
@@ -63,6 +65,8 @@ from sparksage.api.schemas import (
     HealthResponse,
     IngestAndIndexResponse,
     KnowledgeBaseResponse,
+    QueryHistoryItem,
+    QueryHistoryResponse,
     RetagRequest,
     RetrievedChunkOut,
     SourceInfo,
@@ -100,6 +104,8 @@ __all__ = [
     "IngestResult",
     "KnowledgeBaseResponse",
     "QAService",
+    "QueryHistoryItem",
+    "QueryHistoryResponse",
     "RetagRequest",
     "RetrievedChunkOut",
     "ServiceError",

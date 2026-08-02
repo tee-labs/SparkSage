@@ -468,6 +468,20 @@ PYTHONPATH=src python3 examples/build_chunks.py
   back into ingest actions: repeated low-recall queries flag a coverage gap
   (re-chunk / new content); blocks with a high bad-feedback ratio become split
   candidates (the inverse of the Distill *merge*).
+- The QA conversation-history core (`qa/history.py`) is the persisted query
+  log that keeps the Q&A page's turns as durable as the feedback ratings: the
+  demo UI used to keep history in frontend state only, so a refresh wiped it
+  while `feedback/` kept the rated answers — the asymmetry this core fixes.
+  `QATurn` (Pydantic v2, `extra="forbid"`, closed `TurnRole` enum) is one
+  question (`role=user`) or answer (`role=assistant`), the assistant turn
+  carrying the full serialized HTTP `AskResponse` payload (`result`) so a UI
+  can re-render citations / retrieved chunks / confidence without re-running
+  the pipeline. The `QASessionStore` Protocol + `InMemoryQASessionStore`
+  (`history.py`, pure stdlib) store turns newest-first with optional `kb_id`
+  scoping and defensive copies, mirroring `feedback/store.py`. Recording lives
+  in `QAService.ask` (via the canonical `_to_ask_response` serialization), so
+  `GET /api/v1/query/history` / `DELETE /api/v1/query/history` restore / clear
+  the conversation across reloads, and the Q&A page reloads it per selected KB.
 - The evaluation core (`eval/`) is the answer-correctness counterpart of
   `bench/` (which scores retrieval alone). `QAEvaluator` (`evaluator.py`) runs
   a `QAEngine` over a `QATestCase` set and rolls per-case outcomes into a
@@ -549,7 +563,10 @@ sub-query RRF-fused retrieval, optional `QACache`), the multi-tenant
 multi-query expansion + `query/cache.py` embedding-keyed `SemanticCache`),
 the feedback flywheel (`feedback/`: `FeedbackRecord` + `FeedbackStore` +
 `extract_healing_signals` for coverage-gap / split-candidate signals back to
-ingest), and answer-correctness evaluation (`eval/`: `QAEvaluator` over a
+ingest), the persisted QA conversation log (`qa/history.py`: `QATurn` +
+`QASessionStore` recording every ask in `QAService.ask`, restored via
+`GET /api/v1/query/history` so the Q&A page keeps its turns across reloads),
+and answer-correctness evaluation (`eval/`: `QAEvaluator` over a
 `QATestCase` set, pluggable `TokenOverlapJudge` / `LLMCorrectnessJudge`,
 reusing `bench.evaluate_retrieval` for the retrieval metric). Also implemented
 now: a cross-encoder re-ranking backend (`retrieve/backends/cross_encoder.py`:
