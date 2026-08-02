@@ -88,6 +88,21 @@ class LexicalRetriever(Protocol):
         """(Re)build the lexical index over ``blocks``."""
         ...
 
+    def add(self, blocks: list[IdeaBlock]) -> None:
+        """Incrementally add (or overwrite) ``blocks`` without a full rebuild.
+
+        This is the counterpart to :meth:`index` for the streaming-ingest case:
+        it updates the corpus statistics (``df`` / ``n`` / ``avgdl``) in
+        ``O(len(blocks))`` time rather than the ``O(corpus)`` full
+        :meth:`index`, so adding one document to a 50k-block KB no longer
+        re-tokenizes the whole registry.
+        """
+        ...
+
+    def remove(self, block_ids: list[str]) -> None:
+        """Incrementally drop ``block_ids`` from the lexical index."""
+        ...
+
     def search(self, query: str, k: int = 10) -> list[SearchHit]:
         """Return the top-``k`` lexical hits, best first."""
         ...
@@ -166,6 +181,62 @@ class BM25Retriever:
     def __contains__(self, block_id: object) -> bool:
         return str(block_id) in self._ids
 
+    def add(self, blocks: list[IdeaBlock]) -> None:
+        """Incrementally add (or overwrite) ``blocks`` without a full rebuild.
+
+        A block whose id is already indexed is overwritten (remove-then-add)
+        so its corpus statistics are not double-counted. Token bags are
+        computed once per block; ``df`` / ``n`` / ``avgdl`` are updated in
+        place -- so this is ``O(len(blocks))`` rather than the
+        ``O(corpus)`` :meth:`index`. The streaming-ingest path uses this so
+        that uploading one document into a large KB never re-tokenizes the
+        whole registry.
+        """
+        if not blocks:
+            return
+        overwrites = [str(b.id) for b in blocks if str(b.id) in self._ids]
+        if overwrites:
+            self._discard_ids(set(overwrites))
+        for block in blocks:
+            tokens = _block_tokens(block)
+            tf: dict[str, int] = {}
+            for tok in tokens:
+                tf[tok] = tf.get(tok, 0) + 1
+            self._ids.append(str(block.id))
+            self._docs.append(tf)
+            self._lengths.append(len(tokens))
+            for term in tf:
+                self._df[term] = self._df.get(term, 0) + 1
+        self._finalize_mutation()
+
+    def remove(self, block_ids: list[str]) -> None:
+        """Incrementally drop ``block_ids`` (idempotent, missing ids ignored)."""
+        ids = {str(bid) for bid in block_ids}
+        if not ids:
+            return
+        self._discard_ids(ids)
+        self._finalize_mutation()
+
+    def _discard_ids(self, ids: set[str]) -> None:
+        """Drop the indexed docs whose id is in ``ids`` and decrement ``df``."""
+        keep_idx = [i for i, bid in enumerate(self._ids) if bid not in ids]
+        for i, bid in enumerate(self._ids):
+            if bid in ids:
+                for term in self._docs[i]:
+                    cnt = self._df.get(term, 0) - 1
+                    if cnt > 0:
+                        self._df[term] = cnt
+                    else:
+                        self._df.pop(term, None)
+        self._ids = [self._ids[i] for i in keep_idx]
+        self._docs = [self._docs[i] for i in keep_idx]
+        self._lengths = [self._lengths[i] for i in keep_idx]
+
+    def _finalize_mutation(self) -> None:
+        self._n = len(self._ids)
+        total = sum(self._lengths)
+        self._avgdl = (total / self._n) if self._n else 0.0
+
     def search(self, query: str, k: int = 10) -> list[SearchHit]:
         """Return the top-``k`` BM25 hits for ``query``, best first.
 
@@ -222,6 +293,12 @@ class NullLexicalRetriever:
 
     def index(self, blocks: list[IdeaBlock]) -> None:
         self._n = len(blocks)
+
+    def add(self, blocks: list[IdeaBlock]) -> None:
+        self._n += len(blocks)
+
+    def remove(self, block_ids: list[str]) -> None:
+        self._n = max(0, self._n - len(list(block_ids)))
 
     def search(self, query: str, k: int = 10) -> list[SearchHit]:
         return []

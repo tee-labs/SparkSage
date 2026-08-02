@@ -133,6 +133,110 @@ class TestBM25:
             BM25Retriever(b=2.0)
 
 
+class TestBM25Incremental:
+    def _blocks(self):
+        return [
+            _block("A", "qa?", "general prose about systems", keywords=["deploy"]),
+            _block("B", "qb?", "step by step deploy procedure", keywords=["deploy"]),
+            _block("C", "qc?", "spark tuning and cluster sizing", keywords=["spark"]),
+        ]
+
+    def test_add_matches_full_rebuild(self):
+        blocks = self._blocks()
+        full = BM25Retriever()
+        full.index(blocks)
+
+        incr = BM25Retriever()
+        incr.index([blocks[0]])
+        incr.add(blocks[1:])
+
+        assert len(incr) == len(full) == 3
+        for term in full._df:
+            assert incr._df[term] == full._df[term]
+        assert incr._avgdl == pytest.approx(full._avgdl)
+        for q in ("deploy", "spark", "systems procedure"):
+            assert [h.block_id for h in incr.search(q, k=3)] == [
+                h.block_id for h in full.search(q, k=3)
+            ]
+
+    def test_add_empty_is_noop(self):
+        blocks = self._blocks()
+        lex = BM25Retriever()
+        lex.index(blocks)
+        before = len(lex)
+        lex.add([])
+        assert len(lex) == before
+
+    def test_add_overwrite_does_not_double_count(self):
+        blocks = self._blocks()
+        lex = BM25Retriever()
+        lex.index(blocks)
+        df_before = dict(lex._df)
+        avgdl_before = lex._avgdl
+        lex.add([blocks[0]])
+        assert lex._df == df_before
+        assert lex._avgdl == pytest.approx(avgdl_before)
+        assert len(lex) == 3
+
+    def test_add_with_changed_body_overwrites(self):
+        blocks = self._blocks()
+        lex = BM25Retriever()
+        lex.index(blocks)
+        new_version = blocks[0].model_copy(
+            update={
+                "trusted_answer": "totally different content about redis caching",
+                "keywords": ["redis"],
+            }
+        )
+        lex.add([new_version])
+        assert len(lex) == 3
+        hits = lex.search("redis", k=1)
+        assert hits and hits[0].block_id == str(new_version.id)
+        deploy_hits = lex.search("deploy", k=5)
+        assert str(blocks[0].id) not in {h.block_id for h in deploy_hits}
+
+    def test_remove_matches_full_rebuild(self):
+        blocks = self._blocks()
+        full = BM25Retriever()
+        full.index([blocks[0], blocks[1]])
+        incr = BM25Retriever()
+        incr.index(blocks)
+        incr.remove([str(blocks[2].id)])
+        assert len(incr) == 2
+        for term in full._df:
+            assert incr._df[term] == full._df[term]
+        assert incr._avgdl == pytest.approx(full._avgdl)
+        for q in ("deploy", "spark"):
+            assert [h.block_id for h in incr.search(q, k=2)] == [
+                h.block_id for h in full.search(q, k=2)
+            ]
+
+    def test_remove_missing_id_is_idempotent(self):
+        blocks = self._blocks()
+        lex = BM25Retriever()
+        lex.index(blocks)
+        before = len(lex)
+        lex.remove(["does-not-exist"])
+        assert len(lex) == before
+
+    def test_remove_all_then_search_empty(self):
+        blocks = self._blocks()
+        lex = BM25Retriever()
+        lex.index(blocks)
+        lex.remove([str(b.id) for b in blocks])
+        assert len(lex) == 0
+        assert lex.search("deploy", k=3) == []
+        assert lex._df == {}
+
+    def test_null_lexical_add_remove(self):
+        null = NullLexicalRetriever()
+        null.index(self._blocks())
+        assert len(null) == 0
+        null.add(self._blocks())
+        null.remove([str(self._blocks()[0].id)])
+        assert null.search("x", k=3) == []
+
+
 # --------------------------------------------------------------------------- #
 # RRF fusion
 # --------------------------------------------------------------------------- #

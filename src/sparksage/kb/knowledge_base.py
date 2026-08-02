@@ -201,7 +201,9 @@ class KnowledgeBase:
         """Register, embed and index ``blocks`` (stamping ``kb_id`` on each).
 
         Newly added blocks overwrite any prior block with the same id (the
-        vector store overwrites in place; the lexical index is rebuilt).
+        vector store overwrites in place; the lexical index is updated
+        *incrementally* via ``LexicalRetriever.add`` -- not a full rebuild --
+        so uploading one document into a large KB stays ``O(len(blocks))``).
         Pass ``doc_id`` to link the blocks to a document so
         :meth:`remove_document` cascades to them.
 
@@ -230,7 +232,7 @@ class KnowledgeBase:
                     new_vectors[str(b.id)] = list(b.embedding)
             if new_vectors:
                 self._store.add_many(new_vectors)
-            self._rebuild_lexical()
+            self._lexical.add(added)
         if added and self._state_store is not None:
             doc_id_str = str(doc_id) if doc_id is not None else None
             for b in added:
@@ -252,7 +254,7 @@ class KnowledgeBase:
             self._doc_blocks[doc_id].discard(bid)
             if not self._doc_blocks[doc_id]:
                 del self._doc_blocks[doc_id]
-        self._rebuild_lexical()
+        self._lexical.remove([bid])
         if self._state_store is not None:
             self._state_store.delete_block(self.kb_id, bid)
         return True
@@ -398,6 +400,13 @@ class KnowledgeBase:
         self._doc_blocks.setdefault(doc_id, set()).add(block_id)
 
     def _rebuild_lexical(self) -> None:
+        """Full lexical rebuild -- used by :meth:`reindex` / hydration only.
+
+        The streaming-ingest path uses the incremental
+        ``LexicalRetriever.add`` / ``remove`` instead (see :meth:`add_blocks`
+        / :meth:`remove_block`). A full rebuild is still the right call when
+        rehydrating from a state store or recovering from drift.
+        """
         if isinstance(self._lexical, NullLexicalRetriever):
             return
         self._lexical.index(list(self._registry.values()))

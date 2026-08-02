@@ -36,6 +36,7 @@ evaluation at function-definition time -- when those names are in the enclosing
 scope -- is what lets FastAPI see them.
 """
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -644,7 +645,9 @@ def create_app(
     ) -> ConvertResponse:
         data = await file.read()
         try:
-            out = svc.convert(data, file.filename, clean=clean)
+            out = await asyncio.to_thread(
+                svc.convert, data, file.filename, clean=clean
+            )
         except Exception as exc:  # noqa: BLE001 - surface as HTTP error
             raise HTTPException(status_code=422, detail=_detail(exc)) from exc
         return to_convert_response(out)
@@ -671,7 +674,8 @@ def create_app(
     ) -> GenerateResponse:
         data = await file.read()
         try:
-            out = svc.generate(
+            out = await asyncio.to_thread(
+                svc.generate,
                 data,
                 file.filename,
                 clean=clean,
@@ -731,7 +735,8 @@ def create_app(
     ) -> DocumentResponse:
         data = await file.read()
         try:
-            record = svc.ingest_document(
+            record = await asyncio.to_thread(
+                svc.ingest_document,
                 data,
                 file.filename,
                 title=title,
@@ -1016,7 +1021,8 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
         if tags is not None:
             parsed_tags = [p.strip() for p in tags.split(",") if p.strip()]
         try:
-            result = qa_svc.ingest_and_index(
+            result = await asyncio.to_thread(
+                qa_svc.ingest_and_index,
                 data,
                 file.filename,
                 title=title,
@@ -1049,7 +1055,8 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
     ) -> AskResponse:
         flt, context = _build_filter_from_request(body)
         try:
-            result = qa_svc.ask(
+            result = await asyncio.to_thread(
+                qa_svc.ask,
                 body.query,
                 context=context,
                 filter=flt,
