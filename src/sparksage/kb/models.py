@@ -57,7 +57,7 @@ class KnowledgeBaseInfo(BaseModel):
     name: str = Field(..., min_length=1, description="Human-readable KB name.")
     description: str | None = Field(default=None, description="Free-text description.")
     language: str = Field(
-        default="en", min_length=2, max_length=16, description="Default block language."
+        default="zh", min_length=2, max_length=16, description="Default block language."
     )
     tags: list[str] = Field(
         default_factory=list, description="Free-form KB-level labels."

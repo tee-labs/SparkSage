@@ -279,7 +279,7 @@ class QAService:
         name: str,
         *,
         description: str | None = None,
-        language: str = "en",
+        language: str = "zh",
         tags: list[str] | None = None,
         kb_id: str | None = None,
         set_active: bool = False,

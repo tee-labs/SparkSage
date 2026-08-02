@@ -167,7 +167,7 @@ def build_default_service() -> SparkSageService:
     if api_key:
         base_url = _env(ENV_BASE_URL) or _env(ENV_OPENAI_BASE_URL)
         model = _env(ENV_MODEL) or DEFAULT_MODEL
-        language = _env("SPARKSAGE_LANGUAGE") or "en"
+        language = _env("SPARKSAGE_LANGUAGE") or "zh"
         stream = _env_bool(ENV_STREAM, DEFAULT_STREAM)
         client = OpenAICompatibleClient(
             base_url=base_url, api_key=api_key, model=model, stream=stream

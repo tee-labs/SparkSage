@@ -62,7 +62,7 @@ export default function KnowledgeBasesPage() {
       await api.createKnowledgeBase({
         name: values.name,
         description: values.description || null,
-        language: values.language || 'en',
+        language: values.language || 'zh',
         tags: values.tags,
         set_active: Boolean(values.set_active),
       });
