@@ -15,6 +15,7 @@ import type {
   KnowledgeBaseInfo,
   KnowledgeBaseListResponse,
   KnowledgeBaseSummary,
+  QueryHistoryResponse,
   TagsResponse,
 } from '@/types';
 
@@ -154,6 +155,11 @@ export const api = {
     client.get<FeedbackListResponse>('/feedback/records', { params }).then((r) => r.data),
   submitFeedback: (payload: FeedbackPayload) =>
     client.post('/feedback', payload).then((r) => r.data),
+
+  // ---- QA conversation history ----
+  queryHistory: (params: { limit?: number; offset?: number; kb_id?: string | null } = {}) =>
+    client.get<QueryHistoryResponse>('/query/history', { params }).then((r) => r.data),
+  clearHistory: () => client.delete('/query/history').then((r) => r.data),
 };
 
 export { client as axiosClient };

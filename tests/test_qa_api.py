@@ -281,6 +281,68 @@ class TestFeedback:
 
 
 # ---------------------------------------------------------------------------- #
+# QAService conversation history (the query log the Q&A page restores)
+# ---------------------------------------------------------------------------- #
+class TestHistory:
+    def test_ask_records_user_and_assistant_turns(self):
+        svc = _make_qa_service()
+        svc.ingest_and_index(b"data", "guide.md")
+        svc.ask("How to install?", use_lexical=False)
+        page, total = svc.list_history()
+        assert total == 2
+        assert [t.role.value for t in page] == ["assistant", "user"]
+        assert page[1].content == "How to install?"
+
+    def test_assistant_turn_carries_serialized_answer(self):
+        svc = _make_qa_service()
+        svc.ingest_and_index(b"data", "guide.md")
+        res = svc.ask("How to install?", use_lexical=False)
+        page, _ = svc.list_history()
+        assistant = page[0]
+        assert assistant.result is not None
+        assert assistant.result["query"] == res.query
+        assert assistant.result["answer"] == res.text
+        assert "citations" in assistant.result
+        assert assistant.query == "How to install?"
+
+    def test_history_scoped_per_kb(self):
+        svc = _make_qa_service()
+        new_info = svc.create_knowledge_base("second")
+        svc.ingest_and_index(b"data", "guide.md", kb_id=new_info.kb_id)
+        svc.ask("How to install?", use_lexical=False, kb_id=new_info.kb_id)
+        # default KB has no history; the second KB has the turns
+        page, total = svc.list_history()
+        assert total == 0
+        page, total = svc.list_history(kb_id=new_info.kb_id)
+        assert total == 2
+
+    def test_clear_history(self):
+        svc = _make_qa_service()
+        svc.ingest_and_index(b"data", "guide.md")
+        svc.ask("How to install?", use_lexical=False)
+        assert svc.clear_history() == 2
+        _, total = svc.list_history()
+        assert total == 0
+
+    def test_clear_history_scoped_per_kb(self):
+        svc = _make_qa_service()
+        new_info = svc.create_knowledge_base("second")
+        svc.ingest_and_index(b"data", "guide.md", kb_id=new_info.kb_id)
+        svc.ask("How to install?", use_lexical=False, kb_id=new_info.kb_id)
+        assert svc.clear_history(kb_id=new_info.kb_id) == 2
+        # default KB untouched (still empty)
+        _, total = svc.list_history()
+        assert total == 0
+
+    def test_abstention_still_recorded(self):
+        svc = _make_qa_service()
+        # ask before any ingest -> abstention, but the turn is still logged
+        svc.ask("anything?", use_lexical=False)
+        _, total = svc.list_history()
+        assert total == 2
+
+
+# ---------------------------------------------------------------------------- #
 # QAService.knowledge_base_info
 # ---------------------------------------------------------------------------- #
 class TestKnowledgeBaseInfo:
@@ -505,6 +567,50 @@ class TestFeedbackRoute:
         )
         assert resp.status_code == 200
         assert resp.json()["rating"] == "corrected"
+
+
+class TestQueryHistoryRoute:
+    def test_history_after_ask(self, qa_client):
+        _ingest(qa_client)
+        qa_client.post(
+            "/api/v1/query",
+            json={"query": "How to install?", "use_lexical": False},
+        )
+        resp = qa_client.get("/api/v1/query/history")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 2
+        assert [i["role"] for i in body["items"]] == ["assistant", "user"]
+        assert body["items"][1]["content"] == "How to install?"
+
+    def test_history_item_includes_answer_payload(self, qa_client):
+        _ingest(qa_client)
+        qa_client.post(
+            "/api/v1/query",
+            json={"query": "How to install?", "use_lexical": False},
+        )
+        body = qa_client.get("/api/v1/query/history").json()
+        assistant = body["items"][0]
+        assert assistant["result"] is not None
+        assert assistant["result"]["query"] == "How to install?"
+        assert "answer" in assistant["result"]
+        assert "citations" in assistant["result"]
+
+    def test_history_empty_before_any_ask(self, qa_client):
+        resp = qa_client.get("/api/v1/query/history")
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 0
+
+    def test_clear_history(self, qa_client):
+        _ingest(qa_client)
+        qa_client.post(
+            "/api/v1/query",
+            json={"query": "How to install?", "use_lexical": False},
+        )
+        resp = qa_client.delete("/api/v1/query/history")
+        assert resp.status_code == 200
+        assert resp.json()["removed"] == 2
+        assert qa_client.get("/api/v1/query/history").json()["total"] == 0
 
 
 # ---------------------------------------------------------------------------- #

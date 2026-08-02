@@ -11,9 +11,10 @@ built in this roadmap:
 
 It owns no business logic -- every stage is a swappable protocol -- so it runs
 fully offline under :class:`~sparksage.generator.FakeLLMClient` and
-:class:`~sparksage.embed.FakeEmbeddingClient`. Not yet wired to the web layer;
-a future ``/api/v1/query`` route will be a thin wrapper around
-:meth:`QAEngine.ask`.
+:class:`~sparksage.embed.FakeEmbeddingClient`. The QA conversation log that
+:mod:`sparksage.qa.history` persists keeps the Q&A page's turns across page
+reloads, so the surfaced questions/answers are as durable as the feedback
+ratings the user leaves on them.
 
 Example
 -------
@@ -35,12 +36,22 @@ from sparksage.qa.engine import (
     QAEngine,
     QAResult,
 )
+from sparksage.qa.history import (
+    InMemoryQASessionStore,
+    QASessionStore,
+    QATurn,
+    TurnRole,
+)
 
 __all__ = [
     "DEFAULT_MAX_REFINE_ITERATIONS",
     "DEFAULT_MIN_RELEVANCE",
+    "InMemoryQASessionStore",
     "IntentKBRouter",
-    "QAEngine",
     "QACache",
+    "QAEngine",
     "QAResult",
+    "QASessionStore",
+    "QATurn",
+    "TurnRole",
 ]

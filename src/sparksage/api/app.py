@@ -798,6 +798,8 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
         KnowledgeBaseListResponse,
         KnowledgeBaseResponse,
         KnowledgeBaseSummary,
+        QueryHistoryItem,
+        QueryHistoryResponse,
         TagsResponse,
         _build_filter_from_request,
         _to_ask_response,
@@ -1148,6 +1150,48 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
         return FeedbackListResponse(
             items=items, count=len(items), total=total, limit=limit, offset=offset
         )
+
+    @app.get(
+        "/api/v1/query/history",
+        response_model=QueryHistoryResponse,
+        summary="List the persisted QA conversation history (newest-first)",
+    )
+    async def query_history(
+        kb_id: Annotated[
+            str | None,
+            Query(description="Target KB (defaults to the active KB)."),
+        ] = None,
+        limit: Annotated[int, Query(ge=1, le=1000, description="Page size.")] = 100,
+        offset: Annotated[int, Query(ge=0, description="Page offset.")] = 0,
+    ) -> QueryHistoryResponse:
+        page, total = qa_svc.list_history(limit=limit, offset=offset, kb_id=kb_id)
+        items = [
+            QueryHistoryItem(
+                turn_id=t.turn_id,
+                role=t.role.value,
+                content=t.content,
+                kb_id=t.kb_id,
+                result=t.result,
+                created_at=t.created_at,
+            )
+            for t in page
+        ]
+        return QueryHistoryResponse(
+            items=items, count=len(items), total=total, limit=limit, offset=offset
+        )
+
+    @app.delete(
+        "/api/v1/query/history",
+        summary="Clear the persisted QA conversation history",
+    )
+    async def clear_history(
+        kb_id: Annotated[
+            str | None,
+            Query(description="Target KB (defaults to the active KB)."),
+        ] = None,
+    ) -> dict[str, int]:
+        removed = qa_svc.clear_history(kb_id=kb_id)
+        return {"removed": removed}
 
 
 def _detail(exc: BaseException) -> str:
