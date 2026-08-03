@@ -122,6 +122,11 @@ ENV PIP_NO_CACHE_DIR=1 \
 RUN groupadd --system --gid 1001 sparksage && \
     useradd --system --uid 1001 --gid sparksage --create-home sparksage
 
+# gosu: a tiny, non-TTY su replacement used by the entrypoint to drop root
+# privileges after fixing bind-mounted volume ownership.
+RUN apt-get update && apt-get install -y --no-install-recommends gosu && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Stable layer: install all third-party dependencies from the pre-built local
@@ -151,7 +156,14 @@ COPY --from=frontend --chown=sparksage:sparksage /web/dist /app/web/dist
 RUN mkdir -p /app/data && chown -R sparksage:sparksage /app/data
 VOLUME ["/app/data"]
 
-USER sparksage
+# Entrypoint: fixes ownership of a bind-mounted data dir (which retains host
+# ownership the non-root user cannot write to) and then drops to the sparksage
+# user. Without this an empty host data dir (-v "$PWD/data:/app/data") causes
+# sqlite3 "unable to open database file" on startup.
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 
 EXPOSE 8000
 
