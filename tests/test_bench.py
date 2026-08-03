@@ -18,12 +18,15 @@ from sparksage.bench import (
     Chunk,
     RecursiveCharSplitter,
     RetrievalMetrics,
+    ScalingReport,
     StrategyReport,
+    TierResult,
     approx_tokens,
     evaluate_retrieval,
     token_stats,
 )
 from sparksage.bench.report import _safe_ratio
+from sparksage.bench.runner import _compute_tier_sizes, _default_query_count
 
 
 # ---------------------------------------------------------------------------- #
@@ -324,3 +327,242 @@ class TestBenchmarkRunner:
         assert report.config["embedding_dimension"] == 64
         assert report.config["splitter"] == "RecursiveCharSplitter"
         assert report.config["k_values"] == [1, 3, 5]
+
+
+# ---------------------------------------------------------------------------- #
+# scaling staircase helpers
+# ---------------------------------------------------------------------------- #
+class TestTierSizeComputation:
+    def test_default_query_count_small_corpus(self):
+        assert _default_query_count(1) == 1
+        assert _default_query_count(2) == 1
+        assert _default_query_count(3) == 1
+
+    def test_default_query_count_third_of_corpus(self):
+        assert _default_query_count(9) == 3
+        assert _default_query_count(30) == 10
+
+    def test_compute_tier_sizes_grows_geometrically(self):
+        sizes = _compute_tier_sizes(10, 100, 2.0, None)
+        assert sizes[0] == 10
+        assert sizes[-1] == 100  # always ends at max
+        # each step roughly doubles (ceil)
+        assert sizes[1] == 20
+        assert sizes[2] == 40
+
+    def test_compute_tier_sizes_caps_at_max(self):
+        sizes = _compute_tier_sizes(10, 25, 2.0, None)
+        assert sizes[-1] == 25
+        assert all(s <= 25 for s in sizes)
+
+    def test_compute_tier_sizes_deduplicates(self):
+        sizes = _compute_tier_sizes(10, 10, 1.25, None)
+        assert sizes == [10]
+
+    def test_compute_tier_sizes_respects_max_tiers(self):
+        sizes = _compute_tier_sizes(10, 1000, 1.25, max_tiers=3)
+        assert len(sizes) == 3
+
+    def test_compute_tier_sizes_growth_125(self):
+        sizes = _compute_tier_sizes(8, 40, 1.25, None)
+        assert sizes[0] == 8
+        assert sizes[-1] == 40
+        # 8 -> 10 -> 13 -> 17 -> 22 -> 28 -> 35 -> 40(append full)
+        assert len(sizes) >= 5
+
+
+# ---------------------------------------------------------------------------- #
+# scaling report
+# ---------------------------------------------------------------------------- #
+class TestScalingReport:
+    def _tier(
+        self,
+        idx: int,
+        size: int,
+        ib_hit1: float,
+        base_hit1: float,
+    ) -> TierResult:
+        return TierResult(
+            tier_index=idx,
+            block_count=size,
+            ideablock=StrategyReport(
+                name="IdeaBlock",
+                retrieval=RetrievalMetrics(
+                    query_count=5, hit_at_k={1: ib_hit1, 3: 1.0, 5: 1.0}, mrr=0.9
+                ),
+            ),
+            baseline=StrategyReport(
+                name="Naive chunks",
+                retrieval=RetrievalMetrics(
+                    query_count=5,
+                    hit_at_k={1: base_hit1, 3: 0.8, 5: 0.9},
+                    mrr=0.7,
+                ),
+            ),
+        )
+
+    def test_metric_series(self):
+        report = ScalingReport(
+            tiers=[
+                self._tier(0, 10, 0.9, 0.3),
+                self._tier(1, 20, 0.8, 0.5),
+            ],
+            query_count=5,
+        )
+        series = report.metric_series("hit_at_1")
+        assert series == [(10, 0.9, 0.3), (20, 0.8, 0.5)]
+
+    def test_leader_detection(self):
+        report = ScalingReport(
+            tiers=[self._tier(0, 10, 0.9, 0.3), self._tier(1, 20, 0.5, 0.8)]
+        )
+        assert report.leader(0, "hit_at_1") == "ideablock"
+        assert report.leader(1, "hit_at_1") == "baseline"
+
+    def test_leader_tie(self):
+        tier = self._tier(0, 10, 0.5, 0.5)
+        report = ScalingReport(tiers=[tier])
+        assert report.leader(0, "hit_at_1") == "tie"
+
+    def test_crossover_tier_found(self):
+        report = ScalingReport(
+            tiers=[
+                self._tier(0, 10, 0.9, 0.3),
+                self._tier(1, 20, 0.5, 0.8),  # baseline overtakes
+            ]
+        )
+        assert report.crossover_tier("hit_at_1") == 1
+
+    def test_crossover_tier_none_when_no_change(self):
+        report = ScalingReport(
+            tiers=[
+                self._tier(0, 10, 0.9, 0.3),
+                self._tier(1, 20, 0.8, 0.5),
+            ]
+        )
+        assert report.crossover_tier("hit_at_1") is None
+
+    def test_crossover_empty_report(self):
+        report = ScalingReport(tiers=[])
+        assert report.crossover_tier() is None
+
+    def test_summary_mentions_crossover(self):
+        report = ScalingReport(
+            tiers=[
+                self._tier(0, 10, 0.9, 0.3),
+                self._tier(1, 20, 0.5, 0.8),
+            ],
+            query_count=5,
+        )
+        s = report.summary("hit_at_1")
+        assert "Crossover" in s
+
+    def test_to_dict_is_json_safe(self):
+        import json
+
+        report = ScalingReport(
+            tiers=[self._tier(0, 10, 0.9, 0.3)],
+            query_count=5,
+            config={"growth_factor": 1.25},
+        )
+        data = report.to_dict()
+        json.dumps(data)
+
+    def test_to_html_is_self_contained(self):
+        report = ScalingReport(
+            tiers=[self._tier(0, 10, 0.9, 0.3)],
+            query_count=5,
+        )
+        out = report.to_html()
+        assert out.startswith("<!doctype html>")
+        assert "</html>" in out
+        assert "IdeaBlock" in out
+        assert "src=" not in out
+
+
+# ---------------------------------------------------------------------------- #
+# BenchmarkRunner.run_scaling: end-to-end
+# ---------------------------------------------------------------------------- #
+class TestRunScaling:
+    def _runner(self, **kwargs: object) -> BenchmarkRunner:
+        embedder = BlockEmbedder(FakeEmbeddingClient(dimension=64))
+        return BenchmarkRunner(embedder=embedder, **kwargs)  # type: ignore[arg-type]
+
+    def _blocks(self, n: int) -> list[IdeaBlock]:
+        return [
+            _make_block(
+                f"Block {i}",
+                f"what is topic {i} about?",
+                f"topic {i} discusses subject number {i} in detail here",
+            )
+            for i in range(n)
+        ]
+
+    def test_requires_blocks(self):
+        with pytest.raises(ValueError):
+            self._runner().run_scaling([])
+
+    def test_returns_scaling_report(self):
+        runner = self._runner(k_values=(1, 3))
+        report = runner.run_scaling(self._blocks(20), query_count=5)
+        assert isinstance(report, ScalingReport)
+        assert report.query_count == 5
+        assert report.tier_count >= 2
+        assert all(isinstance(t, TierResult) for t in report.tiers)
+
+    def test_last_tier_is_full_corpus(self):
+        blocks = self._blocks(30)
+        report = self._runner().run_scaling(blocks, query_count=5)
+        assert report.tiers[-1].block_count == 30
+
+    def test_first_tier_contains_query_set(self):
+        report = self._runner().run_scaling(self._blocks(30), query_count=5)
+        assert report.tiers[0].block_count >= 5
+
+    def test_tiers_are_monotonically_increasing(self):
+        report = self._runner().run_scaling(self._blocks(50), query_count=5)
+        sizes = [t.block_count for t in report.tiers]
+        assert sizes == sorted(sizes)
+        assert len(sizes) == len(set(sizes))  # no duplicates
+
+    def test_growth_factor_in_config(self):
+        report = self._runner().run_scaling(
+            self._blocks(20), query_count=5, growth_factor=1.5
+        )
+        assert report.growth_factor == 1.5
+        assert report.config["growth_factor"] == 1.5
+
+    def test_rejects_bad_growth_factor(self):
+        with pytest.raises(ValueError):
+            self._runner().run_scaling(self._blocks(10), growth_factor=1.0)
+        with pytest.raises(ValueError):
+            self._runner().run_scaling(self._blocks(10), growth_factor=0.5)
+
+    def test_rejects_bad_query_count(self):
+        with pytest.raises(ValueError):
+            self._runner().run_scaling(self._blocks(10), query_count=0)
+        with pytest.raises(ValueError):
+            self._runner().run_scaling(self._blocks(10), query_count=11)
+
+    def test_rejects_min_tier_below_query_count(self):
+        with pytest.raises(ValueError):
+            self._runner().run_scaling(
+                self._blocks(20), query_count=10, min_tier_size=5
+            )
+
+    def test_max_tiers_cap(self):
+        report = self._runner().run_scaling(
+            self._blocks(100), query_count=5, max_tiers=3
+        )
+        assert report.tier_count <= 3
+
+    def test_fixed_query_set_across_tiers(self):
+        report = self._runner().run_scaling(self._blocks(30), query_count=5)
+        for tier in report.tiers:
+            assert tier.ideablock.retrieval.query_count == 5
+            assert tier.baseline.retrieval.query_count == 5
+
+    def test_single_block_corpus(self):
+        report = self._runner().run_scaling(self._blocks(1), query_count=1)
+        assert report.tier_count == 1
+        assert report.tiers[0].block_count == 1
