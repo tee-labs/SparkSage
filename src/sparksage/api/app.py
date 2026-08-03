@@ -1120,6 +1120,8 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
         FeedbackResponse,
         FeedbackStatsResponse,
         IngestAndIndexResponse,
+        IngestJobSnapshotResponse,
+        IngestJobSubmitResponse,
         KnowledgeBaseListResponse,
         KnowledgeBaseResponse,
         KnowledgeBaseSummary,
@@ -1129,6 +1131,7 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
         _build_filter_from_request,
         _to_ask_response,
         _to_block_out,
+        _to_ingest_job_snapshot_response,
         _to_ingest_response,
     )
     from sparksage.generator.generator import GenerationError
@@ -1203,6 +1206,115 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=422, detail=_detail(exc)) from exc
         return _to_ingest_response(result)
+
+    @app.post(
+        "/api/v1/knowledge_base/ingest/async",
+        response_model=IngestJobSubmitResponse,
+        status_code=202,
+        summary="Upload knowledge asynchronously: returns a job id immediately",
+    )
+    async def kb_ingest_async(
+        file: Annotated[
+            UploadFile, File(description="The source document to ingest and index.")
+        ],
+        title: Annotated[
+            str | None, Form(description="Explicit title override.")
+        ] = None,
+        tags: Annotated[
+            str | None,
+            Form(description="Comma-separated tags. When empty, tags are auto-extracted."),
+        ] = None,
+        auto_tag: Annotated[
+            bool, Form(description="Auto-extract tags when none are given.")
+        ] = True,
+        clean: Annotated[
+            bool, Form(description="Apply text cleaning before generation.")
+        ] = True,
+        summarize: Annotated[
+            bool, Form(description="Produce a document-level summary.")
+        ] = True,
+        top_k: Annotated[
+            int, Form(ge=1, description="Number of tags to extract when auto-tagging.")
+        ] = 8,
+        max_blocks: Annotated[
+            int | None, Form(ge=1, description="Max IdeaBlocks to emit.")
+        ] = None,
+        language: Annotated[
+            str | None, Form(description="BCP-47 code written into every block.")
+        ] = None,
+        kb_id: Annotated[
+            str | None,
+            Form(description="Target knowledge base id (defaults to the active KB)."),
+        ] = None,
+    ) -> IngestJobSubmitResponse:
+        """Submit an async ingest job (non-blocking).
+
+        Returns a ``job_id`` immediately -- the heavy convert -> generate ->
+        embed -> index work runs in a background thread, so there is no HTTP
+        timeout to race (the failure mode behind the "5-file upload, second
+        file showed failed but the backend finished" bug). Poll
+        ``GET /api/v1/jobs/{job_id}`` until ``status`` is ``success`` /
+        ``failed`` / ``cancelled``.
+        """
+        data = await file.read()
+        parsed_tags = None
+        if tags is not None:
+            parsed_tags = [p.strip() for p in tags.split(",") if p.strip()]
+        try:
+            job = qa_svc.submit_ingest(
+                data,
+                file.filename,
+                title=title,
+                tags=parsed_tags,
+                auto_tag=auto_tag,
+                clean=clean,
+                summarize=summarize,
+                top_k=top_k,
+                max_blocks=max_blocks,
+                language=language,
+                kb_id=kb_id,
+            )
+        except GenerationNotConfiguredError as exc:
+            raise HTTPException(status_code=503, detail=_detail(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=_detail(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail=_detail(exc)) from exc
+        snap = job.snapshot()
+        return IngestJobSubmitResponse(
+            job_id=job.job_id,
+            status=snap.status.value,
+            filename=snap.filename,
+        )
+
+    @app.get(
+        "/api/v1/jobs/{job_id}",
+        response_model=IngestJobSnapshotResponse,
+        summary="Poll an async ingest job's status / progress",
+    )
+    async def get_ingest_job(
+        job_id: Annotated[str, Path(description="The job id returned by the async ingest.")],
+    ) -> IngestJobSnapshotResponse:
+        job = qa_svc.ingest_jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+        snap = job.snapshot()
+        return _to_ingest_job_snapshot_response(snap, result=job.result)
+
+    @app.post(
+        "/api/v1/jobs/{job_id}/cancel",
+        response_model=IngestJobSnapshotResponse,
+        summary="Cancel an async ingest job (cooperative)",
+    )
+    async def cancel_ingest_job(
+        job_id: Annotated[str, Path(description="The job id to cancel.")],
+    ) -> IngestJobSnapshotResponse:
+        job = qa_svc.ingest_jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+        job.cancel()
+        snap = job.snapshot()
+        return _to_ingest_job_snapshot_response(snap, result=job.result)
 
     @app.post(
         "/api/v1/query",

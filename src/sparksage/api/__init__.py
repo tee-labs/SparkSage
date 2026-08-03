@@ -30,6 +30,13 @@ from sparksage.api.config_manager import (
     read_config,
     write_config,
 )
+from sparksage.api.ingest_jobs import (
+    IngestCancelled,
+    IngestJob,
+    IngestJobManager,
+    IngestJobSnapshot,
+    IngestJobStatus,
+)
 from sparksage.api.pipeline import (
     ConvertOutput,
     GenerateOutput,
@@ -64,6 +71,8 @@ from sparksage.api.schemas import (
     GenerationStatsOut,
     HealthResponse,
     IngestAndIndexResponse,
+    IngestJobSnapshotResponse,
+    IngestJobSubmitResponse,
     KnowledgeBaseResponse,
     QueryHistoryItem,
     QueryHistoryResponse,
@@ -101,6 +110,13 @@ __all__ = [
     "GenerationStatsOut",
     "HealthResponse",
     "IngestAndIndexResponse",
+    "IngestCancelled",
+    "IngestJob",
+    "IngestJobManager",
+    "IngestJobSnapshot",
+    "IngestJobSnapshotResponse",
+    "IngestJobStatus",
+    "IngestJobSubmitResponse",
     "IngestResult",
     "KnowledgeBaseResponse",
     "QAService",

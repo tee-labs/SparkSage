@@ -322,6 +322,35 @@ PYTHONPATH=src python3 examples/build_chunks.py
   deliberately omits `from __future__ import annotations` so FastAPI can
   resolve the lazily-imported route-parameter types (`UploadFile`/`File`/`Form`)
   via eager annotation evaluation.
+- The async ingest job layer (`api/ingest_jobs.py`) is the engineering fix for
+  the "5-file upload, second file showed failed but the backend finished" bug:
+  a long ingest (convert → LLM generate → embed → index, minutes on a large
+  doc) no longer holds open an HTTP connection to race a client-side timeout.
+  `IngestJob` / `IngestJobManager` mirror the `distill/job.py` shape (the same
+  `queued → running → success | failed | cancelled` state machine + lock-
+  protected frozen `IngestJobSnapshot` + cooperative cancellation) but stay
+  self-contained in the `api` package — ingest observability is an HTTP-layer
+  concern, not a distill concern. The job owns no ingest config; it takes a
+  fully-bound `work` callable produced by `QAService.submit_ingest`.
+  `QAService.ingest_and_index` gained optional `on_progress` / `is_cancelled`
+  params so the job can surface coarse phase progress (`converting` /
+  `generating` / `indexing`) and abort at a phase boundary *before* the
+  knowledge-base write — the cooperative `IngestCancelled` exception inverts
+  the old "client gone but server still wrote" dirty-write bug (a cancelled
+  ingest leaves the KB untouched). `QAService.submit_ingest` validates eagerly
+  (generator configured, `kb_id` resolvable) so a bad request fails fast
+  rather than producing a job that immediately errors. Wired to the web layer
+  via `POST /api/v1/knowledge_base/ingest/async` (returns a `job_id`
+  immediately, HTTP 202), `GET /api/v1/jobs/{job_id}` (pollable snapshot; the
+  terminal-success poll carries the full `IngestAndIndexResponse` in its
+  `result` field so the client gets the generated blocks in the same final
+  poll — no second round-trip), and `POST /api/v1/jobs/{job_id}/cancel`
+  (cooperative). The React `IngestPage` uses this async path for the
+  "入库" toggle: each file is submitted + polled independently with single-
+  file try/catch isolation so one failure no longer aborts the rest, and a
+  per-file progress card (`phase` / `percent` / `success`/`failed`/`cancelled`)
+  replaces the all-or-nothing spinner. The sync `POST .../ingest` route is
+  unchanged (backward-compatible).
 - The configuration management (`api/config_manager.py`) is the pure-stdlib
   bridge between the WEB UI's `/config` page and the `.env` file. It depends
   only on `sparksage.config.parse_env_file` (never a third-party env loader).
