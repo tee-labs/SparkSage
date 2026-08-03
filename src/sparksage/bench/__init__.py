@@ -38,10 +38,12 @@ from sparksage.bench.metrics import (
 from sparksage.bench.report import BenchmarkReport, StrategyReport
 from sparksage.bench.runner import (
     DEFAULT_CHARS_PER_TOKEN,
+    DEFAULT_GROWTH_FACTOR,
     DEFAULT_K_VALUES,
     BenchmarkConfig,
     BenchmarkRunner,
 )
+from sparksage.bench.scaling import ScalingReport, TierResult
 
 __all__ = [
     "BenchmarkConfig",
@@ -49,11 +51,14 @@ __all__ = [
     "BenchmarkRunner",
     "Chunk",
     "DEFAULT_CHARS_PER_TOKEN",
+    "DEFAULT_GROWTH_FACTOR",
     "DEFAULT_K_VALUES",
     "DEFAULT_SEPARATORS",
     "RecursiveCharSplitter",
     "RetrievalMetrics",
+    "ScalingReport",
     "StrategyReport",
+    "TierResult",
     "TokenStats",
     "approx_tokens",
     "evaluate_retrieval",

@@ -205,7 +205,19 @@ PYTHONPATH=src python3 examples/build_chunks.py
   self-contained HTML page (inlined CSS, no externals, no template engine) —
   the "prove the ROI on your own data" artifact. The comparison is fair by
   construction: same embedder, same queries, same ground truth — only the
-  chunking strategy differs.
+  chunking strategy differs. `BenchmarkRunner.run_scaling()` (`runner.py` +
+  `scaling.py`) is the nested-staircase counterpart: it slices the *same*
+  corpus into a geometric staircase of increasingly large subsets (each tier
+  grows by `growth_factor=`, default `1.25` per the paper §3.3), keeps the
+  **question set fixed** (the first `query_count` blocks' `critical_question`),
+  and runs the IdeaBlock-vs-naive comparison at every tier. `ScalingReport`
+  (`scaling.py`) exposes `crossover_tier(metric=)` — the first tier where the
+  strategy leader changes (the scale-dependent crossover the single-tier
+  benchmark cannot see), `metric_series(metric=)` for trend plotting, and a
+  `to_html()` renderer. The private `_evaluate_*` methods were generalized to
+  accept a `query_blocks=` param (defaults to the full corpus for the
+  single-tier path) so the staircase indexes a growing background corpus while
+  querying the same fixed set.
 - Configuration (`config.py`) is pure stdlib — never import `python-dotenv` or
   any env-loading library. `load_dotenv()` is called once at the top of
   `build_default_service()`; it reads `.env` from the CWD but **real env vars
@@ -601,7 +613,21 @@ PYTHONPATH=src python3 examples/build_chunks.py
   (reuses `bench.evaluate_retrieval` for comparability), mean faithfulness.
   Correctness is a pluggable `CorrectnessJudge`: the default `TokenOverlapJudge`
   is dependency-free token-F1 (fully offline); `LLMCorrectnessJudge` swaps in
-  (reuses `LLMClient`, token-F1 fallback on a bad response).
+  (reuses `LLMClient`, token-F1 fallback on a bad response). The adversarial
+  robustness module (`eval/distractors.py`) is the "can the retriever resist
+  traps?" counterpart: `DistractorInjector` generates **trap blocks** — blocks
+  that mimic a target's `name` + `critical_question` (so dense retrieval finds
+  them) but carry a **wrong** `trusted_answer` borrowed from a semantically
+  similar donor (found via the embedder's cosine, no LLM needed); donors with
+  identical answers are skipped. `RobustnessEvaluator` injects traps into the
+  corpus, builds both the IdeaBlock and the naive-chunk index (the same A/B
+  comparison `BenchmarkRunner` uses), queries each target's
+  `critical_question`, and measures how often traps contaminate the top-k.
+  `RobustnessReport` reports the **true-hit rate** vs **trap-contamination
+  rate** for both strategies plus `trap_resistance_improvement` (how many times
+  lower the IdeaBlock contamination is), directly quantifying the
+  `trusted_answer` dividend that naive chunks cannot guarantee. Pure stdlib
+  beyond `BlockEmbedder` / `InMemoryVectorStore` / `RecursiveCharSplitter`.
 
 ## Roadmap context
 
@@ -681,7 +707,19 @@ ingest), the persisted QA conversation log (`qa/history.py`: `QATurn` +
 and answer-correctness evaluation (`eval/`: `QAEvaluator` over a
 `QATestCase` set, pluggable `TokenOverlapJudge` / `LLMCorrectnessJudge`,
 reusing `bench.evaluate_retrieval` for the retrieval metric). Also implemented
-now: a cross-encoder re-ranking backend (`retrieve/backends/cross_encoder.py`:
+now: the nested-tier scaling benchmark (`bench/scaling.py`:
+`BenchmarkRunner.run_scaling()` slices the same corpus into a geometric
+staircase of increasingly large subsets — each tier grows by
+`growth_factor=1.25` per the paper §3.3 — keeping the question set fixed and
+running the IdeaBlock-vs-naive comparison at every tier, exposing the
+scale-dependent crossover the single-tier benchmark cannot see;
+`ScalingReport.crossover_tier(metric=)` finds where the strategy leader
+changes) and adversarial distractor injection (`eval/distractors.py`:
+`DistractorInjector` generates trap blocks that mimic a target's question but
+carry a wrong answer borrowed from a semantically similar donor;
+`RobustnessEvaluator` injects traps and measures true-hit rate vs
+trap-contamination rate for both strategies, quantifying the `trusted_answer`
+dividend). Also implemented now: a cross-encoder re-ranking backend (`retrieve/backends/cross_encoder.py`:
 `CrossEncoderReranker` under `[rerank]` via `sentence-transformers`, sigmoid-
 normalized logits, the largest point lever after chunking strategy), the
 Context-Cliff guard (`reader/budget.py`: `trim_to_token_budget` wired into

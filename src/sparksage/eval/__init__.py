@@ -32,6 +32,16 @@ Example
     print(report.mean_correctness, report.abstention_rate)
 """
 
+from sparksage.eval.distractors import (
+    DEFAULT_ROBUSTNESS_K,
+    DEFAULT_TRAPS_PER_BLOCK,
+    DistractorInjector,
+    RobustnessCaseResult,
+    RobustnessEvaluator,
+    RobustnessReport,
+    StrategyRobustness,
+    TrapRecord,
+)
 from sparksage.eval.evaluator import (
     DEFAULT_EVAL_K,
     CorrectnessJudge,
@@ -45,11 +55,19 @@ from sparksage.eval.models import QACaseResult, QAEvalReport, QATestCase
 __all__ = [
     "CorrectnessJudge",
     "DEFAULT_EVAL_K",
+    "DEFAULT_ROBUSTNESS_K",
+    "DEFAULT_TRAPS_PER_BLOCK",
+    "DistractorInjector",
     "LLMCorrectnessJudge",
     "QACaseResult",
     "QAEvalReport",
     "QATestCase",
     "QAEvaluator",
+    "RobustnessCaseResult",
+    "RobustnessEvaluator",
+    "RobustnessReport",
+    "StrategyRobustness",
     "TokenOverlapJudge",
+    "TrapRecord",
     "token_f1",
 ]
