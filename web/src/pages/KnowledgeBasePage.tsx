@@ -189,7 +189,7 @@ export default function KnowledgeBasePage() {
       </Card>
 
       <List
-        grid={{ gutter: 16, xs: 1, sm: 1, md: 2, lg: 2, xl: 3 }}
+        grid={{ gutter: 16, xs: 1, sm: 2, md: 2, lg: 3, xl: 3, xxl: 4 }}
         dataSource={blocks}
         loading={loading}
         locale={{ emptyText: '没有匹配的 block' }}
