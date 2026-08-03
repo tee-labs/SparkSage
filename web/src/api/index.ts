@@ -14,6 +14,8 @@ import type {
   GenerateResponse,
   HealthResponse,
   IngestAndIndexResponse,
+  IngestJobSnapshot,
+  IngestJobSubmitResponse,
   KnowledgeBaseInfo,
   KnowledgeBaseListResponse,
   KnowledgeBaseSummary,
@@ -52,7 +54,7 @@ export const api = {
     form.append('file', file);
     form.append('clean', String(clean));
     return client
-      .post<ConvertResponse>('/convert', form)
+      .post<ConvertResponse>('/convert', form, { timeout: 0 })
       .then((r) => r.data);
   },
   generate: (
@@ -65,7 +67,7 @@ export const api = {
     if (opts.max_blocks) form.append('max_blocks', String(opts.max_blocks));
     if (opts.language) form.append('language', opts.language);
     return client
-      .post<GenerateResponse>('/generate', form)
+      .post<GenerateResponse>('/generate', form, { timeout: 0 })
       .then((r) => r.data);
   },
   kbIngest: (
@@ -90,9 +92,38 @@ export const api = {
     if (opts.top_k) form.append('top_k', String(opts.top_k));
     if (opts.kb_id) form.append('kb_id', opts.kb_id);
     return client
-      .post<IngestAndIndexResponse>('/knowledge_base/ingest', form)
+      .post<IngestAndIndexResponse>('/knowledge_base/ingest', form, { timeout: 0 })
       .then((r) => r.data);
   },
+  kbIngestAsync: (
+    file: File,
+    opts: {
+      clean?: boolean;
+      max_blocks?: number | null;
+      language?: string;
+      tags?: string[];
+      auto_tag?: boolean;
+      top_k?: number;
+      kb_id?: string | null;
+    } = {},
+  ) => {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('clean', String(opts.clean ?? true));
+    if (opts.max_blocks) form.append('max_blocks', String(opts.max_blocks));
+    if (opts.language) form.append('language', opts.language);
+    if (opts.tags?.length) form.append('tags', opts.tags.join(','));
+    form.append('auto_tag', String(opts.auto_tag ?? true));
+    if (opts.top_k) form.append('top_k', String(opts.top_k));
+    if (opts.kb_id) form.append('kb_id', opts.kb_id);
+    return client
+      .post<IngestJobSubmitResponse>('/knowledge_base/ingest/async', form)
+      .then((r) => r.data);
+  },
+  getIngestJob: (jobId: string) =>
+    client.get<IngestJobSnapshot>(`/jobs/${jobId}`).then((r) => r.data),
+  cancelIngestJob: (jobId: string) =>
+    client.post<IngestJobSnapshot>(`/jobs/${jobId}/cancel`).then((r) => r.data),
 
   // ---- documents ----
   listDocuments: (params: {

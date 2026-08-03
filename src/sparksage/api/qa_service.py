@@ -55,6 +55,12 @@ from sparksage.agent.controller import AgentController
 from sparksage.agent.engine import DEFAULT_MAX_ITERATIONS as DEFAULT_MAX_AGENT_ITERATIONS
 from sparksage.agent.engine import AgenticQAEngine
 from sparksage.agent.models import AgentResult
+from sparksage.api.ingest_jobs import (
+    IngestCancelled,
+    IngestJob,
+    IngestJobManager,
+    ProgressCallback,
+)
 from sparksage.api.pipeline import (
     GenerationNotConfiguredError,
     SparkSageService,
@@ -193,6 +199,7 @@ class QAService:
         agent_step_min_relevance: float | None = None,
         agent_step_max_refine: int | None = None,
         agent_expander_n_variants: int | None = None,
+        ingest_jobs: IngestJobManager | None = None,
     ) -> None:
         self._service = service
         self._embedder = embedder
@@ -220,6 +227,15 @@ class QAService:
         self._agent_step_min_relevance = agent_step_min_relevance
         self._agent_step_max_refine = agent_step_max_refine
         self._agent_expander_n_variants = agent_expander_n_variants
+
+        # Async ingest job registry. A long ingest (minutes on a large doc)
+        # must not hold open an HTTP connection; ``submit_ingest`` returns a
+        # job id immediately and ``GET /jobs/{id}`` polls the snapshot.
+        # Defaults to a fresh in-process manager so async ingest works with
+        # zero configuration.
+        self._ingest_jobs: IngestJobManager = (
+            ingest_jobs if ingest_jobs is not None else IngestJobManager()
+        )
 
         if kb is not None:
             default_kb = kb
@@ -305,6 +321,11 @@ class QAService:
     def has_generator(self) -> bool:
         """Whether block generation is available (ingest-and-index needs this)."""
         return self._service.has_generator
+
+    @property
+    def ingest_jobs(self) -> IngestJobManager:
+        """The async ingest job registry (backs ``POST .../ingest/async``)."""
+        return self._ingest_jobs
 
     # ------------------------------------------------------------------ #
     # multi-knowledge-base management
@@ -547,6 +568,8 @@ class QAService:
         max_blocks: int | None = None,
         language: str | None = None,
         kb_id: str | None = None,
+        on_progress: ProgressCallback | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> IngestResult:
         """Convert -> clean -> generate IdeaBlocks -> embed + index -> store doc.
 
@@ -567,6 +590,17 @@ class QAService:
             Forwarded to the :class:`IdeaBlockGenerator`.
         kb_id:
             Target knowledge base. Defaults to the active KB.
+        on_progress:
+            Optional phase-progress callback (called with ``"converting"`` /
+            ``"generating"`` / ``"indexing"`` before each phase). Used by
+            :meth:`submit_ingest` so the async job's snapshot reflects live
+            progress.
+        is_cancelled:
+            Optional cooperative-cancellation predicate. When it returns
+            ``True`` at a phase boundary the ingest aborts with
+            :class:`~sparksage.api.ingest_jobs.IngestCancelled` *before* the
+            knowledge-base write -- so a cancelled async ingest leaves the KB
+            untouched.
 
         Raises
         ------
@@ -574,7 +608,16 @@ class QAService:
             If the underlying service has no generator wired (no LLM key).
         KeyError:
             If ``kb_id`` does not match a registered knowledge base.
+        IngestCancelled:
+            If ``is_cancelled`` fires at a phase boundary.
         """
+
+        def _check_cancelled() -> None:
+            if is_cancelled is not None and is_cancelled():
+                raise IngestCancelled(
+                    "ingest cancelled before the next phase (no data written)"
+                )
+
         if not self._service.has_generator:
             raise GenerationNotConfiguredError(
                 "no IdeaBlockGenerator configured; cannot ingest-and-index."
@@ -591,6 +634,9 @@ class QAService:
         )
         t_total = time.perf_counter()
 
+        _check_cancelled()
+        if on_progress is not None:
+            on_progress("converting")
         t0 = time.perf_counter()
         conv = self._service.convert(data, filename, clean=clean)
         elapsed_conv = time.perf_counter() - t0
@@ -610,6 +656,9 @@ class QAService:
         final_tags = list(tags) if tags else []
         need_tags = not final_tags and auto_tag
 
+        _check_cancelled()
+        if on_progress is not None:
+            on_progress("generating")
         t_parallel = time.perf_counter()
         with ThreadPoolExecutor(max_workers=3) as pool:
             fut_blocks = pool.submit(
@@ -655,6 +704,9 @@ class QAService:
             source=SourceRef(uri=source.uri, title=resolved_title),
         )
 
+        _check_cancelled()
+        if on_progress is not None:
+            on_progress("indexing")
         t0 = time.perf_counter()
         stored = kb.add_document(record, blocks=blocks)
         elapsed_index = time.perf_counter() - t0
@@ -679,6 +731,77 @@ class QAService:
             source=source,
             tags=list(final_tags),
             summary=summary,
+        )
+
+    def submit_ingest(
+        self,
+        data: bytes | str,
+        filename: str | None = None,
+        *,
+        title: str | None = None,
+        tags: list[str] | None = None,
+        auto_tag: bool = True,
+        clean: bool = True,
+        summarize: bool = True,
+        max_summary_sentences: int = 3,
+        top_k: int = 8,
+        max_blocks: int | None = None,
+        language: str | None = None,
+        kb_id: str | None = None,
+        job_id: str | None = None,
+    ) -> IngestJob:
+        """Submit an async ingest job and return it immediately.
+
+        This is the non-blocking counterpart of :meth:`ingest_and_index` for
+        the "5-file upload, one timed out" failure mode: the HTTP request
+        returns a job id at once (no axios timeout to race) and the heavy
+        convert -> generate -> embed -> index work runs in a background
+        thread. Poll ``job.snapshot()`` (or ``GET /api/v1/jobs/{job_id}``) for
+        progress / completion.
+
+        Validation (generator configured, ``kb_id`` resolvable) runs eagerly
+        so a misconfigured request fails fast rather than producing a job that
+        immediately errors. All ingest options mirror :meth:`ingest_and_index`.
+
+        Cancellation is cooperative: ``job.cancel()`` flips the predicate the
+        work polls at phase boundaries; a cancel that lands before the
+        knowledge-base write aborts the ingest cleanly (no partial doc /
+        blocks indexed), exactly inverting the old "client gone but server
+        still wrote" bug.
+        """
+        if not self._service.has_generator:
+            raise GenerationNotConfiguredError(
+                "no IdeaBlockGenerator configured; cannot ingest-and-index."
+            )
+        # Validate kb_id eagerly so a bad target fails fast (KeyError) rather
+        # than producing a job that errors on the worker thread.
+        kb = self._resolve_kb(kb_id)
+        target_kb_id = kb.kb_id
+
+        kwargs = dict(
+            title=title,
+            tags=list(tags) if tags else None,
+            auto_tag=auto_tag,
+            clean=clean,
+            summarize=summarize,
+            max_summary_sentences=max_summary_sentences,
+            top_k=top_k,
+            max_blocks=max_blocks,
+            language=language,
+            kb_id=target_kb_id,
+        )
+
+        def _work(on_progress, is_cancelled):
+            return self.ingest_and_index(
+                data,
+                filename,
+                on_progress=on_progress,
+                is_cancelled=is_cancelled,
+                **kwargs,
+            )
+
+        return self._ingest_jobs.submit(
+            _work, job_id=job_id, filename=filename
         )
 
     def remove_document(self, doc_id: str, *, kb_id: str | None = None) -> bool:
@@ -1078,6 +1201,7 @@ class QAService:
 
 
 __all__ = [
+    "IngestCancelled",
     "IngestResult",
     "QAService",
 ]

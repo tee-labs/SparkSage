@@ -63,6 +63,26 @@ export interface IngestAndIndexResponse {
   summary?: string | null;
 }
 
+export interface IngestJobSubmitResponse {
+  job_id: string;
+  status: string;
+  filename?: string | null;
+}
+
+export interface IngestJobSnapshot {
+  job_id: string;
+  status: 'queued' | 'running' | 'success' | 'failed' | 'cancelled';
+  phase: string;
+  percent: number;
+  filename?: string | null;
+  title?: string | null;
+  block_count: number;
+  doc_id?: string | null;
+  error?: string | null;
+  duration?: number | null;
+  result?: IngestAndIndexResponse | null;
+}
+
 export interface ConfigResponse {
   variables: Record<string, string>;
 }

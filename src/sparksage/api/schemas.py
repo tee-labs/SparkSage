@@ -319,6 +319,67 @@ class IngestAndIndexResponse(BaseModel):
     summary: str | None = Field(default=None, description="Document summary.")
 
 
+class IngestJobSubmitResponse(BaseModel):
+    """Response body for ``POST /api/v1/knowledge_base/ingest/async``.
+
+    Returns a job id immediately -- the heavy convert -> generate -> embed ->
+    index work runs in a background thread. Poll
+    :class:`IngestJobSnapshotResponse` via ``GET /api/v1/jobs/{job_id}`` until
+    ``status`` is terminal (``success`` / ``failed`` / ``cancelled``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str = Field(description="The opaque ingest job id.")
+    status: str = Field(description="Initial status (``queued`` or ``running``).")
+    filename: str | None = Field(
+        default=None, description="The uploaded filename (for the per-file row)."
+    )
+
+
+class IngestJobSnapshotResponse(BaseModel):
+    """Response body for ``GET /api/v1/jobs/{job_id}`` -- a pollable snapshot.
+
+    Every field a progress UI needs: ``status`` + ``phase`` + ``percent`` for
+    the bar, ``filename`` for the row, and ``doc_id`` / ``block_count`` /
+    ``title`` once the work succeeds (``None`` / ``0`` until then). ``error``
+    carries the failure message when ``status == failed``. ``result`` carries
+    the full ingest payload (blocks + tags + summary) on success so the client
+    gets the generated blocks in the same final poll that reports completion
+    -- no second round-trip.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str = Field(description="The ingest job id.")
+    status: str = Field(
+        description="queued | running | success | failed | cancelled."
+    )
+    phase: str = Field(
+        description=(
+            "Coarse stage: queued | converting | generating | indexing | done."
+        )
+    )
+    percent: float = Field(description="Completion fraction in [0, 1].")
+    filename: str | None = Field(default=None, description="Uploaded filename.")
+    title: str | None = Field(default=None, description="Document title on success.")
+    block_count: int = Field(default=0, description="Indexed block count on success.")
+    doc_id: str | None = Field(default=None, description="Stored document id on success.")
+    error: str | None = Field(default=None, description="Failure message when failed.")
+    duration: float | None = Field(
+        default=None, description="Elapsed seconds (running or finished)."
+    )
+    result: IngestAndIndexResponse | None = Field(
+        default=None,
+        description=(
+            "Full ingest payload (blocks / tags / summary) when "
+            "``status == success``; ``None`` otherwise. Delivered on the "
+            "terminal poll so the client renders the generated blocks without "
+            "a second round-trip."
+        ),
+    )
+
+
 class AskRequest(BaseModel):
     """JSON body for ``POST /api/v1/query``."""
 
@@ -786,6 +847,39 @@ def _to_ingest_response(result: object) -> IngestAndIndexResponse:
         source=SourceInfo(uri=result.source.uri, title=result.source.title),
         tags=list(result.tags),
         summary=result.summary,
+    )
+
+
+def _to_ingest_job_snapshot_response(
+    snap: object,
+    *,
+    result: object | None = None,
+) -> IngestJobSnapshotResponse:
+    """Build an :class:`IngestJobSnapshotResponse` from an :class:`IngestJobSnapshot`.
+
+    Accepts the frozen dataclass structurally so this stays free of an import
+    cycle with :mod:`sparksage.api.ingest_jobs`. ``result`` is the live
+    :class:`IngestResult` (read off the job); when non-None it is serialized
+    into the ``result`` field so the client gets the generated blocks on the
+    terminal poll.
+    """
+    status = getattr(snap, "status", None)
+    status_val = status.value if hasattr(status, "value") else str(status)
+    payload: IngestAndIndexResponse | None = None
+    if result is not None and status_val == "success":
+        payload = _to_ingest_response(result)
+    return IngestJobSnapshotResponse(
+        job_id=getattr(snap, "job_id", ""),
+        status=status_val,
+        phase=getattr(snap, "phase", "queued"),
+        percent=float(getattr(snap, "percent", 0.0)),
+        filename=getattr(snap, "filename", None),
+        title=getattr(snap, "title", None),
+        block_count=int(getattr(snap, "block_count", 0)),
+        doc_id=getattr(snap, "doc_id", None),
+        error=getattr(snap, "error", None),
+        duration=getattr(snap, "duration", None),
+        result=payload,
     )
 
 
