@@ -23,6 +23,7 @@ import {
   DeleteOutlined,
 } from '@ant-design/icons';
 import { api } from '@/api';
+import type { AgentProgressEvent } from '@/api';
 import type { AskResponse, FeedbackRating } from '@/types';
 import Markdown from '@/components/Markdown';
 import KbSelector from '@/components/KbSelector';
@@ -46,6 +47,7 @@ export default function QaPage() {
   const [mode, setMode] = useState<string>('default');
   const [history, setHistory] = useState<Turn[]>([]);
   const [loading, setLoading] = useState(false);
+  const [agentProgress, setAgentProgress] = useState<AgentProgressEvent | null>(null);
   const [feedback, setFeedback] = useState<Record<string, FeedbackRating>>({});
   const [corrections, setCorrections] = useState<Record<string, string>>({});
 
@@ -81,17 +83,23 @@ export default function QaPage() {
   const ask = async () => {
     if (!query.trim()) return;
     setLoading(true);
+    if (mode === 'agent') setAgentProgress({ iteration: 0, max_iterations: 0, phase: 'thinking', percent: 0, evidence_count: 0 });
     try {
-      const res = await api.ask({
-        query,
-        kb_id: selectedKbId ?? undefined,
-        k,
-        use_lexical: useLexical,
-        use_rerank: useRerank,
-        tags: tagFilter.length ? tagFilter : undefined,
-        mode,
-        history: history.map((t) => ({ role: t.role, content: t.content })),
-      });
+      const res = await api.ask(
+        {
+          query,
+          kb_id: selectedKbId ?? undefined,
+          k,
+          use_lexical: useLexical,
+          use_rerank: useRerank,
+          tags: tagFilter.length ? tagFilter : undefined,
+          mode,
+          history: history.map((t) => ({ role: t.role, content: t.content })),
+        },
+        {
+          onProgress: (p) => setAgentProgress(p),
+        },
+      );
       const userTurn: Turn = { role: 'user', content: query };
       const assistantTurn: Turn = { role: 'assistant', content: res.answer, result: res };
       setHistory((prev) => [...prev, userTurn, assistantTurn]);
@@ -100,6 +108,7 @@ export default function QaPage() {
       message.error(errText(e));
     } finally {
       setLoading(false);
+      setAgentProgress(null);
     }
   };
 
@@ -243,6 +252,9 @@ export default function QaPage() {
       ))}
 
       <Card size="small">
+        {loading && mode === 'agent' && agentProgress && (
+          <AgentProgressView progress={agentProgress} />
+        )}
         <Input.TextArea
           rows={3}
           value={query}
@@ -478,4 +490,44 @@ function errText(e: unknown): string {
     return resp?.data?.detail ?? '请求失败';
   }
   return (e as Error)?.message ?? String(e);
+}
+
+const AGENT_PHASE_LABEL: Record<string, string> = {
+  thinking: '思考中（规划子查询）',
+  retrieving: '检索知识库',
+  synthesizing: '整合证据并生成答案',
+  done: '完成',
+};
+
+function AgentProgressView({ progress }: { progress: AgentProgressEvent }) {
+  const label = AGENT_PHASE_LABEL[progress.phase] ?? progress.phase;
+  const pct = Math.max(0, Math.min(100, Math.round(progress.percent * 100)));
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <Space style={{ marginBottom: 6 }}>
+        <AntTag color="geekblue">Agent 推理中</AntTag>
+        <Text strong>{label}</Text>
+        {progress.iteration > 0 && (
+          <Text type="secondary">
+            第 {progress.iteration}/{progress.max_iterations} 轮 · 证据 {progress.evidence_count}
+          </Text>
+        )}
+        {progress.action && <AntTag color="blue">{progress.action}</AntTag>}
+      </Space>
+      {progress.query && (
+        <Paragraph type="secondary" style={{ margin: '2px 0', fontSize: 12 }} ellipsis={{ rows: 1 }}>
+          子查询：{progress.query}
+        </Paragraph>
+      )}
+      {progress.relevance_score != null && (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          相关度 {progress.relevance_score.toFixed(2)}
+          {progress.refined_query ? ' · 已改写查询重试' : ''}
+        </Text>
+      )}
+      <div style={{ marginTop: 6, height: 4, background: '#f0f0f0', borderRadius: 2, overflow: 'hidden' }}>
+        <div style={{ width: `${pct}%`, height: '100%', background: '#1677ff', transition: 'width .3s' }} />
+      </div>
+    </div>
+  );
 }
