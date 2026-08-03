@@ -141,16 +141,24 @@ export const api = {
     client.post<KnowledgeBaseSummary>(`/knowledge_bases/${kbId}/activate`).then((r) => r.data),
 
   // ---- QA ----
-  ask: (body: {
-    query: string;
-    kb_id?: string;
-    k?: number;
-    use_lexical?: boolean;
-    use_rerank?: boolean;
-    tags?: string[];
-    history?: { role: 'user' | 'assistant'; content: string }[];
-    mode?: string;
-  }) => client.post<AskResponse>('/query', body).then((r) => r.data),
+  ask: (
+    body: {
+      query: string;
+      kb_id?: string;
+      k?: number;
+      use_lexical?: boolean;
+      use_rerank?: boolean;
+      tags?: string[];
+      history?: { role: 'user' | 'assistant'; content: string }[];
+      mode?: string;
+    },
+    options?: { onProgress?: (p: AgentProgressEvent) => void; signal?: AbortSignal },
+  ) => {
+    if (body.mode === 'agent') {
+      return askAgentStream(body, options);
+    }
+    return client.post<AskResponse>('/query', body).then((r) => r.data);
+  },
 
   // ---- feedback ----
   feedbackStats: () => client.get<FeedbackStats>('/feedback').then((r) => r.data),
@@ -167,5 +175,133 @@ export const api = {
       .delete('/query/history', { params: kbId ? { kb_id: kbId } : undefined })
       .then((r) => r.data),
 };
+
+export interface AgentProgressEvent {
+  iteration: number;
+  max_iterations: number;
+  phase: string;
+  percent: number;
+  evidence_count: number;
+  action?: string;
+  thought?: string;
+  query?: string;
+  relevance_score?: number;
+  relevance_reasoning?: string;
+  refined_query?: string;
+}
+
+interface AskRequestBody {
+  query: string;
+  kb_id?: string;
+  k?: number;
+  use_lexical?: boolean;
+  use_rerank?: boolean;
+  tags?: string[];
+  history?: { role: 'user' | 'assistant'; content: string }[];
+  mode?: string;
+}
+
+interface AxiosLikeError {
+  response?: { status?: number; data?: { detail?: string } };
+  message?: string;
+}
+
+function makeError(status: number, detail: string): AxiosLikeError {
+  return { response: { status, data: { detail } } };
+}
+
+function parseSseBlock(raw: string): { event: string; data: unknown } | null {
+  let event = '';
+  let dataStr = '';
+  for (const line of raw.split('\n')) {
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    else if (line.startsWith('data:')) dataStr += line.slice(5).trim();
+  }
+  if (!event) return null;
+  let data: unknown = dataStr;
+  if (dataStr) {
+    try {
+      data = JSON.parse(dataStr);
+    } catch {
+      /* keep raw string */
+    }
+  }
+  return { event, data };
+}
+
+async function askAgentStream(
+  body: AskRequestBody,
+  options?: { onProgress?: (p: AgentProgressEvent) => void; signal?: AbortSignal },
+): Promise<AskResponse> {
+  const base = (client.defaults.baseURL ?? '/api/v1').replace(/\/$/, '');
+  let resp: Response;
+  try {
+    resp = await fetch(`${base}/query`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: JSON.stringify({ ...body, stream: true }),
+      signal: options?.signal,
+    });
+  } catch (e) {
+    throw (e as Error)?.name === 'AbortError'
+      ? makeError(0, '已取消')
+      : makeError(0, (e as Error)?.message ?? '请求失败');
+  }
+  if (!resp.ok || !resp.body) {
+    let detail = '请求失败';
+    try {
+      const data = await resp.json();
+      detail = (data as { detail?: string })?.detail ?? detail;
+    } catch {
+      /* ignore */
+    }
+    throw makeError(resp.status, detail);
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let result: AskResponse | null = null;
+  let errorDetail: string | null = null;
+
+  for (;;) {
+    let chunk;
+    try {
+      chunk = await reader.read();
+    } catch (e) {
+      errorDetail = (e as Error)?.name === 'AbortError' ? '已取消' : '连接中断';
+      break;
+    }
+    if (chunk.done) break;
+    buffer += decoder.decode(chunk.value, { stream: true });
+    let sep: number;
+    while ((sep = buffer.indexOf('\n\n')) >= 0) {
+      const raw = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      const evt = parseSseBlock(raw);
+      if (!evt) continue;
+      if (evt.event === 'progress') {
+        if (options?.onProgress) options.onProgress(evt.data as AgentProgressEvent);
+      } else if (evt.event === 'result') {
+        result = evt.data as AskResponse;
+      } else if (evt.event === 'error') {
+        errorDetail =
+          ((evt.data as { detail?: string } | undefined)?.detail) ?? 'agent 运行出错';
+      } else if (evt.event === 'done') {
+        break;
+      }
+    }
+    if (result || errorDetail) break;
+  }
+
+  try {
+    reader.releaseLock();
+  } catch {
+    /* ignore */
+  }
+  if (errorDetail) throw makeError(0, errorDetail);
+  if (!result) throw makeError(0, 'agent 运行未返回结果');
+  return result;
+}
 
 export { client as axiosClient };

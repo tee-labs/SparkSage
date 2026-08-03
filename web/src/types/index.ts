@@ -125,6 +125,9 @@ export interface AgentStep {
   query: string;
   retrieved_count: number;
   observation: string;
+  relevance_score?: number | null;
+  relevance_reasoning?: string | null;
+  refined_query?: string | null;
   created_at?: string | null;
 }
 
