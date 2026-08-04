@@ -1641,6 +1641,81 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
             raise HTTPException(status_code=404, detail=f"document not found: {doc_id}")
         return {"deleted": True}
 
+    @app.put(
+        "/api/v1/knowledge_base/documents/{doc_id}",
+        response_model=IngestAndIndexResponse,
+        summary="Replace a document's content and re-index it (hash-aware)",
+    )
+    async def kb_update_document(
+        doc_id: Annotated[str, Path(description="The document id.")],
+        file: Annotated[
+            UploadFile, File(description="New source content replacing the body.")
+        ],
+        title: Annotated[
+            str | None, Form(description="Explicit title override.")
+        ] = None,
+        tags: Annotated[
+            str | None,
+            Form(
+                description=(
+                    "Comma-separated tags. When empty, tags are auto-extracted "
+                    "when the body changed."
+                )
+            ),
+        ] = None,
+        auto_tag: Annotated[
+            bool, Form(description="Auto-extract tags when none are given.")
+        ] = True,
+        clean: Annotated[
+            bool, Form(description="Apply text cleaning before generation.")
+        ] = True,
+        summarize: Annotated[
+            bool, Form(description="Produce a document-level summary.")
+        ] = True,
+        top_k: Annotated[
+            int, Form(ge=1, description="Number of tags to extract when auto-tagging.")
+        ] = 8,
+        max_blocks: Annotated[
+            int | None, Form(ge=1, description="Max IdeaBlocks to emit.")
+        ] = None,
+        language: Annotated[
+            str | None, Form(description="BCP-47 code written into every block.")
+        ] = None,
+        kb_id: Annotated[
+            str | None,
+            Form(description="Target knowledge base id (defaults to the active KB)."),
+        ] = None,
+    ) -> IngestAndIndexResponse:
+        data = await file.read()
+        parsed_tags = None
+        if tags is not None:
+            parsed_tags = [p.strip() for p in tags.split(",") if p.strip()]
+        try:
+            result = await asyncio.to_thread(
+                qa_svc.update_document_and_reindex,
+                doc_id,
+                data,
+                file.filename,
+                title=title,
+                tags=parsed_tags,
+                auto_tag=auto_tag,
+                clean=clean,
+                summarize=summarize,
+                top_k=top_k,
+                max_blocks=max_blocks,
+                language=language,
+                kb_id=kb_id,
+            )
+        except GenerationNotConfiguredError as exc:
+            raise HTTPException(status_code=503, detail=_detail(exc)) from exc
+        except GenerationError as exc:
+            raise HTTPException(status_code=502, detail=_detail(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=_detail(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail=_detail(exc)) from exc
+        return _to_ingest_response(result)
+
     @app.post(
         "/api/v1/feedback",
         response_model=FeedbackResponse,

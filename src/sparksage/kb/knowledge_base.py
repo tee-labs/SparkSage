@@ -175,6 +175,10 @@ class KnowledgeBase:
         """
         return len(self._doc_ids)
 
+    def contains_document(self, doc_id: object) -> bool:
+        """Whether ``doc_id`` is a document owned by this knowledge base."""
+        return str(doc_id) in self._doc_ids
+
     def blocks(self) -> list[IdeaBlock]:
         """Return a snapshot of all blocks in the registry."""
         return list(self._registry.values())

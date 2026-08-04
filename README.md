@@ -1110,6 +1110,9 @@ passing a `QAService`), these additional routes are mounted automatically:
   blocks.
 * `DELETE /api/v1/knowledge_base/documents/{doc_id}` — remove a document and
   cascade-remove its indexed blocks.
+* `PUT /api/v1/knowledge_base/documents/{doc_id}` — replace a document's content
+  and re-index it while keeping its `doc_id`; hash-aware, so re-uploading the
+  same body is a metadata-only no-op (no re-embed, no LLM re-run).
 * `POST / GET / DELETE /api/v1/knowledge_bases[/{kb_id}]` — multi-KB management
   (`POST .../{kb_id}/activate` sets the active routing target).
 * `POST / GET /api/v1/feedback`[`/records`] — record / aggregate user verdicts.

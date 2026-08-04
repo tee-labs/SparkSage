@@ -49,6 +49,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from sparksage.agent.controller import AgentController
@@ -65,7 +66,7 @@ from sparksage.api.pipeline import (
     GenerationNotConfiguredError,
     SparkSageService,
 )
-from sparksage.documents.models import new_record
+from sparksage.documents.models import content_hash_of, new_record
 from sparksage.embed.indexer import BlockEmbedder
 from sparksage.feedback.models import FeedbackRating, FeedbackRecord
 from sparksage.feedback.store import FeedbackStats, FeedbackStore, InMemoryFeedbackStore
@@ -676,32 +677,17 @@ class QAService:
         if on_progress is not None:
             on_progress("generating")
         t_parallel = time.perf_counter()
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            fut_blocks = pool.submit(
-                gen.generate,
-                text,
-                source=source,
-                max_blocks=max_blocks,
-                language=language,
-            )
-            fut_tags = (
-                pool.submit(self._service.auto_tag, text, top_k=top_k)
-                if need_tags
-                else None
-            )
-            fut_summary = (
-                pool.submit(
-                    self._service.summarize_text,
-                    text,
-                    max_sentences=max_summary_sentences,
-                )
-                if summarize
-                else None
-            )
-            blocks = fut_blocks.result()
-            if fut_tags is not None:
-                final_tags = fut_tags.result()
-            summary = fut_summary.result() if fut_summary is not None else None
+        blocks, final_tags, summary = self._parallel_generate(
+            text,
+            source,
+            final_tags=final_tags,
+            need_tags=need_tags,
+            top_k=top_k,
+            summarize=summarize,
+            max_summary_sentences=max_summary_sentences,
+            max_blocks=max_blocks,
+            language=language,
+        )
         elapsed_parallel = time.perf_counter() - t_parallel
         _logger.debug(
             "ingest generate/tag/summarize done: %d blocks, %d tags, "
@@ -748,6 +734,167 @@ class QAService:
             tags=list(final_tags),
             summary=summary,
         )
+
+    def update_document_and_reindex(
+        self,
+        doc_id: str,
+        data: bytes | str,
+        filename: str | None = None,
+        *,
+        title: str | None = None,
+        tags: list[str] | None = None,
+        auto_tag: bool = True,
+        clean: bool = True,
+        summarize: bool = True,
+        max_summary_sentences: int = 3,
+        top_k: int = 8,
+        max_blocks: int | None = None,
+        language: str | None = None,
+        kb_id: str | None = None,
+    ) -> IngestResult:
+        """Replace a document's content in a KB, re-indexing hash-aware.
+
+        The knowledge-base content-update counterpart of :meth:`ingest_and_index`:
+        convert -> (re)generate IdeaBlocks -> replace the document's blocks in the
+        index while keeping ``doc_id`` stable. The write is hash-aware, mirroring
+        :meth:`KnowledgeBase.update_document`: when the new body's ``content_hash``
+        equals the stored one, generation + re-embedding are skipped entirely
+        (only title/tags are patched), so re-uploading the same file is cheap.
+        When the body changed, the old linked blocks are cascade-removed and the
+        new ones indexed -- the consistency guarantee :meth:`remove_document`
+        provides, without the delete-then-recreate dance.
+
+        Returns an :class:`IngestResult` carrying the refreshed blocks (the
+        existing live blocks on an unchanged body).
+
+        Raises
+        ------
+        GenerationNotConfiguredError:
+            If the body changed and the service has no generator wired (no LLM key).
+        KeyError:
+            If ``doc_id`` is not a document in the target KB.
+        """
+        kb = self._resolve_kb(kb_id)
+        if not kb.contains_document(doc_id):
+            raise KeyError(f"document not found: {doc_id}")
+        existing = kb.document_store.get(doc_id)
+
+        conv = self._service.convert(data, filename, clean=clean)
+        text = conv.markdown
+        source = conv.source
+        body_changed = content_hash_of(text) != existing.content_hash
+        resolved_title = title if title is not None else conv.title or existing.title
+
+        if not body_changed:
+            changes: dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
+            if title is not None:
+                changes["title"] = title
+            if tags is not None:
+                changes["tags"] = list(tags)
+            record = existing.model_copy(update=changes)
+            stored = kb.update_document(doc_id, record=record, blocks=None)
+            blocks = kb.blocks_for_document(doc_id)
+            _logger.info(
+                "updated document %s (unchanged body, metadata-only; kb=%s)",
+                doc_id,
+                kb.kb_id,
+            )
+            return IngestResult(
+                doc_id=stored.doc_id,
+                blocks=blocks,
+                block_count=len(blocks),
+                title=stored.title,
+                source=stored.source,
+                tags=list(stored.tags),
+                summary=stored.summary,
+            )
+
+        if not self._service.has_generator:
+            raise GenerationNotConfiguredError(
+                "no IdeaBlockGenerator configured; cannot re-generate blocks on update."
+            )
+
+        final_tags = list(tags) if tags else []
+        need_tags = not final_tags and auto_tag
+        blocks, final_tags, summary = self._parallel_generate(
+            text,
+            source,
+            final_tags=final_tags,
+            need_tags=need_tags,
+            top_k=top_k,
+            summarize=summarize,
+            max_summary_sentences=max_summary_sentences,
+            max_blocks=max_blocks,
+            language=language,
+        )
+        record = new_record(
+            doc_id=doc_id,
+            title=resolved_title,
+            summary=summary,
+            body_markdown=text,
+            tags=final_tags,
+            source=SourceRef(uri=source.uri, title=resolved_title),
+        )
+        stored = kb.update_document(doc_id, record=record, blocks=blocks)
+        _logger.info(
+            "updated document %s: %d blocks re-indexed (kb=%s)",
+            doc_id,
+            len(blocks),
+            kb.kb_id,
+        )
+        return IngestResult(
+            doc_id=stored.doc_id,
+            blocks=blocks,
+            block_count=len(blocks),
+            title=resolved_title,
+            source=source,
+            tags=list(final_tags),
+            summary=summary,
+        )
+
+    def _parallel_generate(
+        self,
+        text: str,
+        source: SourceRef,
+        *,
+        final_tags: list[str],
+        need_tags: bool,
+        top_k: int,
+        summarize: bool,
+        max_summary_sentences: int,
+        max_blocks: int | None,
+        language: str | None,
+    ) -> tuple[list[IdeaBlock], list[str], str | None]:
+        """Run block generation + auto-tagging + summarization in parallel."""
+        gen = self._service.generator
+        assert gen is not None
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            fut_blocks = pool.submit(
+                gen.generate,
+                text,
+                source=source,
+                max_blocks=max_blocks,
+                language=language,
+            )
+            fut_tags = (
+                pool.submit(self._service.auto_tag, text, top_k=top_k)
+                if need_tags
+                else None
+            )
+            fut_summary = (
+                pool.submit(
+                    self._service.summarize_text,
+                    text,
+                    max_sentences=max_summary_sentences,
+                )
+                if summarize
+                else None
+            )
+            blocks = fut_blocks.result()
+            if fut_tags is not None:
+                final_tags = fut_tags.result()
+            summary = fut_summary.result() if fut_summary is not None else None
+        return blocks, final_tags, summary
 
     def submit_ingest(
         self,
