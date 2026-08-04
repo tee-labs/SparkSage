@@ -106,6 +106,28 @@ ENV_AGENT_REFLECTION = "SPARKSAGE_AGENT_REFLECTION"
 ENV_AGENT_STEP_MIN_RELEVANCE = "SPARKSAGE_AGENT_STEP_MIN_RELEVANCE"
 #: Cap on per-step refine + re-retrieve rounds inside the agent loop.
 ENV_AGENT_STEP_MAX_REFINE = "SPARKSAGE_AGENT_STEP_MAX_REFINE"
+#: Whether the agentic loop auto-wires the HyDE query expander. ``off`` disables
+#: so each per-step retrieval is a single search (no LLM expansion call) -- the
+#: biggest latency lever when the corpus already covers the query vocabulary.
+ENV_AGENT_EXPANDER = "SPARKSAGE_AGENT_EXPANDER"
+#: Max consecutive controller-decided steps that add zero new evidence before
+#: the loop terminates early (the stall detector). ``0`` disables it.
+ENV_AGENT_MAX_STALE_STEPS = "SPARKSAGE_AGENT_MAX_STALE_STEPS"
+
+# Cross-encoder re-ranking
+#: Whether a ``CrossEncoderReranker`` is wired into every KnowledgeBase. Off by
+#: default (no extra model download); set ``on`` to make ``use_rerank=True`` on
+#: ``POST /api/v1/query`` actually re-order the candidate pool.
+ENV_RERANKER = "SPARKSAGE_RERANKER"
+#: Hugging Face id of the cross-encoder / re-ranker checkpoint. Defaults to the
+#: small English ``cross-encoder/ms-marco-MiniLM-L-6-v2``; use
+#: ``BAAI/bge-reranker-v2-m3`` for CJK / multilingual corpora.
+ENV_RERANKER_MODEL = "SPARKSAGE_RERANKER_MODEL"
+#: Torch device (``cpu`` / ``cuda`` / ...) forwarded to the CrossEncoder.
+ENV_RERANKER_DEVICE = "SPARKSAGE_RERANKER_DEVICE"
+#: Per-pair max token length forwarded to the CrossEncoder (``off`` -> provider
+#: default).
+ENV_RERANKER_MAX_LENGTH = "SPARKSAGE_RERANKER_MAX_LENGTH"
 
 # Durable persistence (one directory for every SQLite file). When set, every
 # default service wires durable backends so a Docker restart loses nothing:
@@ -143,6 +165,14 @@ DEFAULT_AGENT_REFLECTION = True
 DEFAULT_AGENT_STEP_MIN_RELEVANCE = 0.5
 #: Default cap on per-step refine + re-retrieve rounds inside the agent loop.
 DEFAULT_AGENT_STEP_MAX_REFINE = 1
+#: Whether the agent loop auto-wires the HyDE query expander (default on, but
+#: disabling is the biggest latency lever for short-query / well-covered corpora).
+DEFAULT_AGENT_EXPANDER = True
+#: Default stall-detector cap: after this many consecutive steps add zero new
+#: evidence the loop terminates early instead of thrashing a barren corpus.
+DEFAULT_AGENT_MAX_STALE_STEPS = 2
+#: Whether a cross-encoder reranker is wired by default (off: no model download).
+DEFAULT_RERANKER = False
 #: Default file names for each durable store when only ``SPARKSAGE_DATA_DIR``
 #: is set (each is a SQLite database; the document store table is separate).
 DEFAULT_DOC_DB_NAME = "sparksage.docs.db"
@@ -451,6 +481,25 @@ def build_qa_service():
     ``SPARKSAGE_EMBEDDING_BASE_URL`` Embedding base URL (falls back to LLM base URL)
     ``SPARKSAGE_EMBEDDING_MODEL``    Embedding model (default ``text-embedding-3-small``)
     ``SPARKSAGE_AGENT_MAX_ITERATIONS``  Cap on agent-mode retrievals (default ``4``)
+    ``SPARKSAGE_AGENT_REFLECTION``   Auto-wire grader + refiner (default ``on``)
+    ``SPARKSAGE_AGENT_EXPANDER``     Auto-wire HyDE expander (default ``on``; ``off``
+                                      is the biggest latency lever -- saves ~10-15s
+                                      per agent step)
+    ``SPARKSAGE_AGENT_STEP_MIN_RELEVANCE``  Per-step relevance floor (default ``0.5``)
+    ``SPARKSAGE_AGENT_STEP_MAX_REFINE``     Per-step refine rounds (default ``1``)
+    ``SPARKSAGE_AGENT_MAX_STALE_STEPS``     Stall detector: consecutive steps adding
+                                      zero new evidence before early termination
+                                      (default ``2``; ``0`` disables)
+    ``SPARKSAGE_RERANKER``           Wire a cross-encoder reranker into every KB
+                                      (default ``off``; ``on`` makes ``use_rerank``
+                                      on ``POST /api/v1/query`` actually re-order
+                                      the candidate pool). Requires the ``[rerank]``
+                                      extra (included in the default image).
+    ``SPARKSAGE_RERANKER_MODEL``     Cross-encoder checkpoint (default
+                                      ``cross-encoder/ms-marco-MiniLM-L-6-v2``; use
+                                      ``BAAI/bge-reranker-v2-m3`` for CJK / multilingual)
+    ``SPARKSAGE_RERANKER_DEVICE``    Torch device (``cpu`` / ``cuda`` / ...)
+    ``SPARKSAGE_RERANKER_MAX_LENGTH``  Per-pair max tokens (``off`` -> provider default)
     ``SPARKSAGE_DATA_DIR``           Unified data dir for durable SQLite stores
                                       (documents + KB metadata + KB state + feedback).
                                       Set this once and a restart loses nothing.
@@ -549,14 +598,18 @@ def build_qa_service():
 
         agent_controller = LLMAgentController(llm_client, model=model)
         # Per-step reflection components: the grader + refiner drive the
-        # CRAG / Self-RAG ``ISREL`` gate (low-relevance -> refine -> re-retrieve),
-        # the HyDE expander lands short queries in the trusted-answer semantic
-        # space. All three are auto-wired so the agent loop is not an "island"
-        # divorced from the right-half components -- the biggest quality lever
-        # after chunking strategy. Disable with SPARKSAGE_AGENT_REFLECTION=off.
+        # CRAG / Self-RAG ``ISREL`` gate (low-relevance -> refine -> re-retrieve).
+        # All are auto-wired so the agent loop is not an "island" divorced from
+        # the right-half components -- the biggest quality lever after chunking
+        # strategy. Disable with SPARKSAGE_AGENT_REFLECTION=off.
         if _env_bool(ENV_AGENT_REFLECTION, DEFAULT_AGENT_REFLECTION):
             agent_grader = LLMRetrievalGrader(llm_client, model=model)
             agent_refiner = LLMQueryRefiner(llm_client, model=model)
+        # The HyDE expander lands short queries in the trusted-answer semantic
+        # space, but each per-step expansion is an extra LLM call. Disable with
+        # SPARKSAGE_AGENT_EXPANDER=off when latency matters more than recall
+        # (the biggest single-call latency lever -- saves ~10-15s per step).
+        if _env_bool(ENV_AGENT_EXPANDER, DEFAULT_AGENT_EXPANDER):
             agent_expander = HyDEExpander(llm_client, model=model)
     else:
         reader = Reader(generator=_DummyAnswerGenerator())
@@ -567,6 +620,7 @@ def build_qa_service():
         service=spark_service,
         embedder=embedder,
         reader=reader,
+        reranker=_build_reranker(),
         agent_controller=agent_controller,
         agent_max_iterations=_env_int(
             ENV_AGENT_MAX_ITERATIONS, DEFAULT_AGENT_MAX_ITERATIONS
@@ -580,9 +634,35 @@ def build_qa_service():
         agent_step_max_refine=_env_int(
             ENV_AGENT_STEP_MAX_REFINE, DEFAULT_AGENT_STEP_MAX_REFINE
         ),
+        agent_max_stale_steps=_env_int(
+            ENV_AGENT_MAX_STALE_STEPS, DEFAULT_AGENT_MAX_STALE_STEPS
+        ),
         kb_store=kb_store,
         state_store=state_store,
         feedback_store=feedback_store,
+    )
+
+
+def _build_reranker():
+    """Resolve a :class:`CrossEncoderReranker` from configuration.
+
+    Returns ``None`` unless ``SPARKSAGE_RERANKER=on`` (no model is downloaded by
+    default). When enabled, constructs the reranker eagerly so a missing
+    ``sentence-transformers`` (the ``[rerank]`` extra) or an invalid model id
+    fails fast at startup with a clear message rather than silently disabling
+    re-ranking at query time.
+    """
+    if not _env_bool(ENV_RERANKER, DEFAULT_RERANKER):
+        return None
+    from sparksage.retrieve.backends.cross_encoder import (
+        DEFAULT_CROSS_ENCODER_MODEL,
+        CrossEncoderReranker,
+    )
+
+    return CrossEncoderReranker(
+        model_name=_env(ENV_RERANKER_MODEL) or DEFAULT_CROSS_ENCODER_MODEL,
+        max_length=_env_int_optional(ENV_RERANKER_MAX_LENGTH, None),
+        device=_env(ENV_RERANKER_DEVICE),
     )
 
 
@@ -1791,6 +1871,7 @@ __all__ = [
     "DEFAULT_KB_STATE_DB_NAME",
     "DEFAULT_MODEL",
     "DEFAULT_STREAM",
+    "DEFAULT_RERANKER",
     "ENV_API_KEY",
     "ENV_BASE_URL",
     "ENV_DATA_DIR",
@@ -1802,6 +1883,10 @@ __all__ = [
     "ENV_EMBEDDING_MODEL",
     "ENV_LOG_LEVEL",
     "ENV_MODEL",
+    "ENV_RERANKER",
+    "ENV_RERANKER_DEVICE",
+    "ENV_RERANKER_MAX_LENGTH",
+    "ENV_RERANKER_MODEL",
     "ENV_STREAM",
     "build_default_service",
     "build_qa_service",

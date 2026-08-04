@@ -31,6 +31,7 @@ from sparksage.retrieve import (
     RetrievalFilter,
     RetrievedChunk,
     Retriever,
+    multi_query_retrieve,
     tokenize,
     tune_rrf_k,
     tune_rrf_weights,
@@ -985,3 +986,96 @@ class TestApplyScoreFloor:
         chunks = self._chunks([0.1])
         out = _apply_score_floor(chunks, 0.5, retry_factor=0.7, retry_floor=0.3, min_top1=0.15)
         assert out == []
+
+
+# --------------------------------------------------------------------------- #
+# multi_query_retrieve (shared RRF-fusion + post-fusion rerank path)
+# --------------------------------------------------------------------------- #
+class TestMultiQueryRetrieve:
+    def _make(self, blocks, *, reranker=None):
+        dim = 64
+        embedder = BlockEmbedder(FakeEmbeddingClient(dimension=dim))
+        store = InMemoryVectorStore(dimension=dim)
+        registry: dict[str, IdeaBlock] = {}
+        retriever = Retriever(
+            registry,
+            store,
+            embedder,
+            lexical=BM25Retriever(),
+            min_fetch=5,
+            fetch_factor=2,
+            reranker=reranker,
+        )
+        retriever.index(blocks)
+        return retriever
+
+    def _blocks(self):
+        return [
+            _block(
+                "Alpha", "how to deploy?", "run pip install sparksage deploy",
+                keywords=["deploy", "install"],
+            ),
+            _block(
+                "Beta", "what is deployment?", "deployment is shipping code",
+                keywords=["deploy"],
+            ),
+            _block(
+                "Gamma", "what to eat?", "try apples and oranges",
+                keywords=["eat"],
+            ),
+        ]
+
+    def test_rerank_applied_after_fusion(self):
+        rr = _FixedScoreReranker({"Alpha": 0.9, "Beta": 0.8, "Gamma": 0.1})
+        retriever = self._make(self._blocks(), reranker=rr)
+        result = multi_query_retrieve(
+            retriever,
+            "deploy",
+            ["install", "eat"],
+            k=3,
+            use_lexical=True,
+            use_rerank=True,
+        )
+        assert result.reranked
+        assert result.fused
+        assert [c.block.name for c in result.chunks] == ["Alpha", "Beta", "Gamma"]
+
+    def test_no_rerank_when_disabled(self):
+        rr = _FixedScoreReranker({"Gamma": 0.9, "Alpha": 0.1, "Beta": 0.1})
+        retriever = self._make(self._blocks(), reranker=rr)
+        result = multi_query_retrieve(
+            retriever,
+            "deploy",
+            ["install", "eat"],
+            k=3,
+            use_lexical=True,
+            use_rerank=False,
+        )
+        assert not result.reranked
+        # Un-reranked: the fused RRF order is preserved, not the reranker's.
+        assert [c.block.name for c in result.chunks] != ["Gamma", "Alpha", "Beta"]
+
+    def test_no_rerank_with_identity(self):
+        retriever = self._make(self._blocks())  # default IdentityReranker
+        result = multi_query_retrieve(
+            retriever,
+            "deploy",
+            ["install", "eat"],
+            k=3,
+            use_lexical=True,
+            use_rerank=True,
+        )
+        assert not result.reranked
+
+    def test_single_query_short_circuit_reranks(self):
+        rr = _FixedScoreReranker({"Alpha": 0.9, "Beta": 0.8, "Gamma": 0.1})
+        retriever = self._make(self._blocks(), reranker=rr)
+        result = multi_query_retrieve(
+            retriever,
+            "deploy",
+            [],
+            k=3,
+            use_lexical=False,
+            use_rerank=True,
+        )
+        assert result.reranked

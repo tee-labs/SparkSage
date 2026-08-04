@@ -314,6 +314,119 @@ class TestAgentSelfReflectiveStep:
                 expander_n_variants=0,
             )
 
+    def test_invalid_max_stale_steps(self):
+        retriever = _make_retriever([_block("A", "a")])
+        reader = _make_reader()
+        with pytest.raises(ValueError):
+            AgenticQAEngine(
+                _ScriptedController([]),
+                retriever,
+                reader,
+                max_stale_steps=-1,
+            )
+        with pytest.raises(TypeError):
+            AgenticQAEngine(
+                _ScriptedController([]),
+                retriever,
+                reader,
+                max_stale_steps=True,  # type: ignore[arg-type]
+            )
+
+
+# --------------------------------------------------------------------------- #
+# Stall detector -- early termination when evidence stops growing
+# --------------------------------------------------------------------------- #
+class TestAgentStallDetector:
+    def test_stall_terminates_early(self):
+        """When consecutive steps add zero new evidence the loop stops."""
+        # Single block: every retrieval after the seed finds the same chunk.
+        blocks = [_block("alpha", "alpha revenue grew")]
+        retriever = _make_retriever(blocks)
+        reader = _make_reader("best effort answer")
+        ctrl = _ScriptedController(
+            [
+                _action(ActionType.RETRIEVE, query="alpha revenue"),
+                _action(ActionType.RETRIEVE, query="alpha growth"),
+                _action(ActionType.RETRIEVE, query="should not reach"),
+                _action(ActionType.SYNTHESIZE),
+            ]
+        )
+        engine = AgenticQAEngine(
+            ctrl,
+            retriever,
+            reader,
+            max_iterations=10,
+            max_stale_steps=2,
+        )
+        result = engine.ask("alpha revenue")
+        # seed (evidence 0->1) + iter1 stale (1->1) + iter2 stale (1->1) = break
+        # the controller should NOT have been called 4 times
+        assert ctrl.calls <= 3
+        # evidence never grew beyond 1
+        assert len(result.evidence) == 1
+
+    def test_stall_reset_on_new_evidence(self):
+        """Stale counter resets when a step actually adds evidence."""
+        # Use k=1 so the seed retrieval only gets 1 block; later steps can
+        # then find new evidence on different sub-queries.
+        blocks = [
+            _block("alpha", "alpha revenue grew significantly"),
+            _block("beta", "beta revenue fell sharply"),
+            _block("gamma", "gamma revenue was stable"),
+        ]
+        retriever = _make_retriever(blocks)
+        reader = _make_reader("answer")
+        ctrl = _ScriptedController(
+            [
+                # Retrieves alpha again (stale=1)
+                _action(ActionType.RETRIEVE, query="alpha"),
+                # Retrieves gamma (new evidence -> stale resets to 0)
+                _action(ActionType.RETRIEVE, query="gamma"),
+                # Retrieves alpha again (stale=1) -- not enough to trigger
+                _action(ActionType.RETRIEVE, query="alpha"),
+                _action(ActionType.SYNTHESIZE),
+            ]
+        )
+        engine = AgenticQAEngine(
+            ctrl,
+            retriever,
+            reader,
+            max_iterations=10,
+            max_stale_steps=2,
+        )
+        result = engine.ask("compare alpha beta gamma", k=1)
+        # all 3 controller-decided retrievals ran (stale never hit 2 consecutively)
+        assert result.iterations >= 3
+        assert ctrl.calls >= 4
+
+    def test_stall_disabled_when_zero(self):
+        """``max_stale_steps=0`` disables the stall detector entirely."""
+        blocks = [_block("alpha", "alpha revenue grew")]
+        retriever = _make_retriever(blocks)
+        reader = _make_reader("answer")
+        ctrl = _ScriptedController(
+            [
+                _action(ActionType.RETRIEVE, query="alpha"),
+                _action(ActionType.RETRIEVE, query="alpha again"),
+                _action(ActionType.SYNTHESIZE),
+            ]
+        )
+        engine = AgenticQAEngine(
+            ctrl,
+            retriever,
+            reader,
+            max_iterations=3,
+            max_stale_steps=0,
+        )
+        result = engine.ask("alpha")
+        # 2 RETRIEVE actions ran before SYNTHESIZE (no stall cut-off)
+        assert result.iterations == 2
+
+    def test_stall_default_is_two(self):
+        from sparksage.agent.engine import DEFAULT_MAX_STALE_STEPS
+
+        assert DEFAULT_MAX_STALE_STEPS == 2
+
 
 # --------------------------------------------------------------------------- #
 # Phase 2.5 -- per-step query expansion + RRF

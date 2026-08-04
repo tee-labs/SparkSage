@@ -18,6 +18,7 @@ from __future__ import annotations
 from sparksage.retrieve.fusion import reciprocal_rank_fusion
 from sparksage.retrieve.models import RetrievalResult, RetrievedChunk
 from sparksage.retrieve.orchestrator import Retriever
+from sparksage.retrieve.reranker import IdentityReranker
 
 
 def multi_query_retrieve(
@@ -35,7 +36,11 @@ def multi_query_retrieve(
     Each variant gets its own recall (without the expensive rerank pass -- RRF
     needs ranks only), the ranked lists are fused via RRF, and the fused pool is
     rebuilt as :class:`RetrievedChunk` objects carrying the fused score plus the
-    underlying dense/lexical scores for transparency.
+    underlying dense/lexical scores for transparency. When ``use_rerank`` is
+    true and the retriever has a non-identity reranker wired, the *fused* pool
+    is re-ranked in one pass before the top-``k`` slice (the per-variant fetches
+    stay un-reranked; reranking a larger fused pool once is both cheaper and
+    higher quality than reranking every variant separately).
 
     A single-query call (no usable sub-queries) short-circuits to one plain
     :meth:`Retriever.search` so there is no RRF overhead when expansion is off.
@@ -54,8 +59,9 @@ def multi_query_retrieve(
         Top-k to finally return (and the per-variant fetch depth scales with
         ``max(k * 2, 5)`` so the fusion pool is generous).
     filter, use_lexical, use_rerank:
-        Forwarded to each per-variant retrieval. ``use_rerank`` is forced to
-        ``False`` on the per-variant fetches (rerank happens after fusion).
+        Forwarded to each per-variant retrieval. ``use_rerank`` additionally
+        triggers one rerank pass over the fused pool (see above) when a real
+        reranker is wired.
     """
     queries = [primary] + [q for q in (sub_queries or []) if q and q != primary]
     if len(queries) == 1:
@@ -93,7 +99,7 @@ def multi_query_retrieve(
     for h in fused:
         fused_ids[h.block_id] = h.score
 
-    chunks = [
+    pool = [
         RetrievedChunk(
             block=registry[bid],
             score=score,
@@ -105,7 +111,12 @@ def multi_query_retrieve(
             sorted(fused_ids.items(), key=lambda kv: (-kv[1], kv[0]))
         )
         if bid in registry
-    ][:k]
+    ]
+    reranked = False
+    if use_rerank and not isinstance(retriever.reranker, IdentityReranker) and pool:
+        pool = retriever.reranker.rerank(primary, pool)
+        reranked = True
+    chunks = pool[:k]
 
     return RetrievalResult(
         query=primary,
@@ -113,7 +124,7 @@ def multi_query_retrieve(
         dense_hits=[h for h in fused if h.block_id in dense_by] or fused,
         lexical_hits=[],
         fused=True,
-        reranked=False,
+        reranked=reranked,
         filtered_out=0,
     )
 

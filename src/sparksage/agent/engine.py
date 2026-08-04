@@ -94,6 +94,12 @@ DEFAULT_STEP_MAX_REFINE = 1
 #: each per-step sub-query (RRF-fused recall boost).
 DEFAULT_EXPANDER_N_VARIANTS = 3
 
+#: Default cap on consecutive controller-decided steps that add **zero** new
+#: evidence chunks. When the loop stalls (every retrieval returns blocks already
+#: in the evidence pool), further iterations are futile -- the corpus simply
+#: does not contain more relevant material. ``0`` disables the stall detector.
+DEFAULT_MAX_STALE_STEPS = 2
+
 ProgressCallback = Callable[[AgentProgress], None]
 CancelledPredicate = Callable[[], bool]
 
@@ -233,6 +239,7 @@ class AgenticQAEngine:
         config: RetrievalConfig | None = None,
         observation_top_k: int = DEFAULT_OBSERVATION_TOP_K,
         observation_answer_chars: int = DEFAULT_OBSERVATION_ANSWER_CHARS,
+        max_stale_steps: int = DEFAULT_MAX_STALE_STEPS,
     ) -> None:
         if not isinstance(controller, AgentController):
             raise TypeError(
@@ -266,6 +273,10 @@ class AgenticQAEngine:
             raise TypeError("expander_n_variants must be an int")
         if expander_n_variants < 1:
             raise ValueError("expander_n_variants must be >= 1")
+        if not isinstance(max_stale_steps, int) or isinstance(max_stale_steps, bool):
+            raise TypeError("max_stale_steps must be an int")
+        if max_stale_steps < 0:
+            raise ValueError("max_stale_steps must be >= 0")
         self._controller = controller
         self._retriever = retriever
         self._reader = reader
@@ -281,6 +292,7 @@ class AgenticQAEngine:
         self._config = config if config is not None else RetrievalConfig()
         self._observation_top_k = observation_top_k
         self._observation_answer_chars = observation_answer_chars
+        self._max_stale_steps = max_stale_steps
 
     @property
     def controller(self) -> AgentController:
@@ -317,6 +329,10 @@ class AgenticQAEngine:
     @property
     def max_evidence(self) -> int:
         return self._max_evidence
+
+    @property
+    def max_stale_steps(self) -> int:
+        return self._max_stale_steps
 
     def ask(
         self,
@@ -369,6 +385,7 @@ class AgenticQAEngine:
 
         iterations = 0
         aborted = False
+        stale_steps = 0
         # Sub-queries enqueued by a PLAN action -- drained one per iteration
         # through the same retrieve path (graded / refined / expanded like any
         # step) WITHOUT consulting the controller between them, so a single
@@ -381,6 +398,16 @@ class AgenticQAEngine:
             if is_cancelled is not None and is_cancelled():
                 _logger.info("agent run cancelled at iteration %d", iterations)
                 break
+            if (
+                self._max_stale_steps > 0
+                and stale_steps >= self._max_stale_steps
+            ):
+                _logger.info(
+                    "agent stalled: %d consecutive steps added no evidence; "
+                    "synthesizing best-effort",
+                    stale_steps,
+                )
+                break
             self._emit(
                 on_progress,
                 AgentProgress(
@@ -392,7 +419,11 @@ class AgenticQAEngine:
             )
             if pending:
                 # Drain the next planned sub-query without consulting the
-                # controller -- the plan already committed to it.
+                # controller -- the plan already committed to it.  Planned
+                # steps are excluded from the stall detector: a PLAN action
+                # is a committed decomposition, not an open-ended probe, so
+                # every queued sub-query deserves its retrieval even if the
+                # seed already covered it.
                 sub = pending.popleft()
                 iterations += 1
                 self._retrieve_step(
@@ -449,6 +480,7 @@ class AgenticQAEngine:
                 )
                 continue
             # RETRIEVE (controller-decided, not plan-driven).
+            ev_before = len(state.evidence)
             self._retrieve_step(
                 state,
                 action.query or seed_query,
@@ -461,6 +493,7 @@ class AgenticQAEngine:
                 progress_iteration=iterations,
                 progress_action=action,
             )
+            stale_steps = stale_steps + 1 if len(state.evidence) == ev_before else 0
         else:
             # Reached only when ``iterations >= max_iterations`` (the loop
             # condition went false without a break). ``max_iterations == 0`` is
@@ -756,6 +789,7 @@ __all__ = [
     "DEFAULT_EXPANDER_N_VARIANTS",
     "DEFAULT_MAX_EVIDENCE",
     "DEFAULT_MAX_ITERATIONS",
+    "DEFAULT_MAX_STALE_STEPS",
     "DEFAULT_OBSERVATION_ANSWER_CHARS",
     "DEFAULT_OBSERVATION_TOP_K",
     "DEFAULT_STEP_MAX_REFINE",
