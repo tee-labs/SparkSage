@@ -66,7 +66,7 @@ from sparksage.api.pipeline import (
     GenerationNotConfiguredError,
     SparkSageService,
 )
-from sparksage.documents.models import content_hash_of, new_record
+from sparksage.documents.models import DocumentRecord, content_hash_of, new_record
 from sparksage.embed.indexer import BlockEmbedder
 from sparksage.feedback.models import FeedbackRating, FeedbackRecord
 from sparksage.feedback.store import FeedbackStats, FeedbackStore, InMemoryFeedbackStore
@@ -114,6 +114,7 @@ class IngestResult:
     source: SourceRef
     tags: list[str]
     summary: str | None
+    action: str = "created"
 
 
 class QAService:
@@ -585,6 +586,10 @@ class QAService:
         max_blocks: int | None = None,
         language: str | None = None,
         kb_id: str | None = None,
+        external_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        source_system: str | None = None,
+        source_extra: dict[str, Any] | None = None,
         on_progress: ProgressCallback | None = None,
         is_cancelled: Callable[[], bool] | None = None,
     ) -> IngestResult:
@@ -607,6 +612,17 @@ class QAService:
             Forwarded to the :class:`IdeaBlockGenerator`.
         kb_id:
             Target knowledge base. Defaults to the active KB.
+        external_key:
+            Deterministic external id (e.g. ``"wiki:123"``) stamped on the
+            :class:`DocumentRecord` so a later :meth:`upsert_document` can
+            address this document without knowing its opaque ``doc_id``.
+        metadata:
+            Free-form caller metadata attached to the document record (in
+            addition to anything the pipeline derives).
+        source_system, source_extra:
+            Provenance enrichment carried into the stored ``SourceRef``
+            (``system`` / ``extra``) so wiki/CRM-style sources can link
+            citations back to their originating page.
         on_progress:
             Optional phase-progress callback (called with ``"converting"`` /
             ``"generating"`` / ``"indexing"`` before each phase). Used by
@@ -703,7 +719,14 @@ class QAService:
             summary=summary,
             body_markdown=text,
             tags=final_tags,
-            source=SourceRef(uri=source.uri, title=resolved_title),
+            source=SourceRef(
+                uri=source.uri,
+                title=resolved_title,
+                system=source_system or source.system,
+                extra=source_extra if source_extra is not None else dict(source.extra),
+            ),
+            metadata=metadata,
+            external_key=external_key,
         )
 
         _check_cancelled()
@@ -751,6 +774,10 @@ class QAService:
         max_blocks: int | None = None,
         language: str | None = None,
         kb_id: str | None = None,
+        external_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        source_system: str | None = None,
+        source_extra: dict[str, Any] | None = None,
     ) -> IngestResult:
         """Replace a document's content in a KB, re-indexing hash-aware.
 
@@ -791,6 +818,10 @@ class QAService:
                 changes["title"] = title
             if tags is not None:
                 changes["tags"] = list(tags)
+            if metadata is not None:
+                changes["metadata"] = dict(metadata)
+            if external_key is not None:
+                changes["external_key"] = external_key
             record = existing.model_copy(update=changes)
             stored = kb.update_document(doc_id, record=record, blocks=None)
             blocks = kb.blocks_for_document(doc_id)
@@ -807,6 +838,7 @@ class QAService:
                 source=stored.source,
                 tags=list(stored.tags),
                 summary=stored.summary,
+                action="unchanged",
             )
 
         if not self._service.has_generator:
@@ -833,7 +865,18 @@ class QAService:
             summary=summary,
             body_markdown=text,
             tags=final_tags,
-            source=SourceRef(uri=source.uri, title=resolved_title),
+            source=SourceRef(
+                uri=source.uri,
+                title=resolved_title,
+                system=source_system or source.system or existing.source.system,
+                extra=(
+                    source_extra
+                    if source_extra is not None
+                    else dict(existing.source.extra)
+                ),
+            ),
+            metadata=metadata if metadata is not None else dict(existing.metadata),
+            external_key=external_key if external_key is not None else existing.external_key,
         )
         stored = kb.update_document(doc_id, record=record, blocks=blocks)
         _logger.info(
@@ -850,6 +893,7 @@ class QAService:
             source=source,
             tags=list(final_tags),
             summary=summary,
+            action="updated",
         )
 
     def _parallel_generate(
@@ -971,6 +1015,188 @@ class QAService:
         """Remove a document *and* cascade-remove its indexed blocks."""
         kb = self._resolve_kb(kb_id)
         return kb.remove_document(doc_id)
+
+    def find_by_external_key(
+        self, external_key: str, *, kb_id: str | None = None
+    ) -> DocumentRecord | None:
+        """Return the :class:`DocumentRecord` owned by ``kb_id`` with ``external_key``.
+
+        ``None`` when no owned document carries that external id. Scoped to the
+        KB's own ``doc_id``s because the underlying document store may be shared
+        across knowledge bases.
+        """
+        kb = self._resolve_kb(kb_id)
+        for doc_id in kb.document_ids():
+            record = kb.document_store.get(doc_id)
+            if record is not None and record.external_key == external_key:
+                return record
+        return None
+
+    def upsert_document(
+        self,
+        data: bytes | str,
+        filename: str | None = None,
+        *,
+        external_key: str,
+        title: str | None = None,
+        tags: list[str] | None = None,
+        auto_tag: bool = True,
+        clean: bool = True,
+        summarize: bool = True,
+        max_summary_sentences: int = 3,
+        top_k: int = 8,
+        max_blocks: int | None = None,
+        language: str | None = None,
+        kb_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        source_system: str | None = None,
+        source_extra: dict[str, Any] | None = None,
+    ) -> IngestResult:
+        """Idempotent upsert keyed by ``external_key`` (the wiki-sync primitive).
+
+        The external-id counterpart of :meth:`ingest_and_index` /
+        :meth:`update_document_and_reindex` that makes a full wiki sync
+        naturally incremental:
+
+        * no document with ``external_key`` in the KB -> ingest (create),
+        * a document with the *same* ``content_hash`` -> metadata-only patch,
+          ``action="unchanged"`` (zero LLM cost),
+        * a document whose body changed -> :meth:`update_document_and_reindex`
+          (cascade re-index, ``doc_id`` kept stable), ``action="updated"``.
+
+        ``external_key`` is required and deterministic (e.g. ``"wiki:123"``);
+        pass it to the shared-document-store upserts so re-syncs can never
+        duplicate a page. The returned :class:`IngestResult.action` reports
+        which branch ran.
+
+        Raises
+        ------
+        ValueError:
+            If ``external_key`` is empty / ``None``.
+        GenerationNotConfiguredError:
+            If the body changed and the service has no generator wired.
+        KeyError:
+            If ``kb_id`` does not match a registered knowledge base.
+        """
+        if not external_key or not str(external_key).strip():
+            raise ValueError("external_key is required for an idempotent upsert")
+        kb = self._resolve_kb(kb_id)
+        target_kb_id = kb.kb_id
+
+        existing = self.find_by_external_key(external_key, kb_id=target_kb_id)
+        if existing is None:
+            result = self.ingest_and_index(
+                data,
+                filename,
+                title=title,
+                tags=tags,
+                auto_tag=auto_tag,
+                clean=clean,
+                summarize=summarize,
+                max_summary_sentences=max_summary_sentences,
+                top_k=top_k,
+                max_blocks=max_blocks,
+                language=language,
+                kb_id=target_kb_id,
+                external_key=external_key,
+                metadata=metadata,
+                source_system=source_system,
+                source_extra=source_extra,
+            )
+            result.action = "created"
+            _logger.info(
+                "upserted (created) external_key=%s -> doc=%s kb=%s",
+                external_key,
+                result.doc_id,
+                target_kb_id,
+            )
+            return result
+
+        conv = self._service.convert(data, filename, clean=clean)
+        body_changed = content_hash_of(conv.markdown) != existing.content_hash
+        if not body_changed:
+            changes: dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
+            if title is not None:
+                changes["title"] = title
+            if tags is not None:
+                changes["tags"] = list(tags)
+            if metadata is not None:
+                changes["metadata"] = dict(metadata)
+            stored = kb.update_document(
+                existing.doc_id,
+                record=existing.model_copy(update=changes),
+                blocks=None,
+            )
+            blocks = kb.blocks_for_document(existing.doc_id)
+            _logger.info(
+                "upserted (unchanged) external_key=%s -> doc=%s kb=%s",
+                external_key,
+                existing.doc_id,
+                target_kb_id,
+            )
+            return IngestResult(
+                doc_id=stored.doc_id,
+                blocks=blocks,
+                block_count=len(blocks),
+                title=stored.title,
+                source=stored.source,
+                tags=list(stored.tags),
+                summary=stored.summary,
+                action="unchanged",
+            )
+
+        result = self.update_document_and_reindex(
+            existing.doc_id,
+            data,
+            filename,
+            title=title,
+            tags=tags,
+            auto_tag=auto_tag,
+            clean=clean,
+            summarize=summarize,
+            max_summary_sentences=max_summary_sentences,
+            top_k=top_k,
+            max_blocks=max_blocks,
+            language=language,
+            kb_id=target_kb_id,
+            external_key=external_key,
+            metadata=metadata,
+            source_system=source_system,
+            source_extra=source_extra,
+        )
+        _logger.info(
+            "upserted (updated) external_key=%s -> doc=%s kb=%s",
+            external_key,
+            result.doc_id,
+            target_kb_id,
+        )
+        return result
+
+    def list_documents(
+        self,
+        *,
+        kb_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[DocumentRecord], int]:
+        """Return a paginated slice of a knowledge base's own documents.
+
+        Scoped to the target KB's ``doc_id``s (the document store may be
+        shared across KBs). Returns ``(page, total)``; ``total`` is the KB's
+        document count, not the whole shared store's. Powers the wiki-sync
+        deletion-detection step: list ``external_key``s and diff against the
+        latest page snapshot.
+        """
+        kb = self._resolve_kb(kb_id)
+        doc_ids = sorted(kb.document_ids())
+        total = len(doc_ids)
+        page_ids = doc_ids[offset : offset + limit]
+        page: list[DocumentRecord] = []
+        for doc_id in page_ids:
+            record = kb.document_store.get(doc_id)
+            if record is not None:
+                page.append(record)
+        return page, total
 
     # ------------------------------------------------------------------ #
     # query: ask the knowledge base

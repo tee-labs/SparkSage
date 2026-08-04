@@ -149,6 +149,10 @@ class DocumentResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     doc_id: str = Field(description="Stable unique id.")
+    external_key: str | None = Field(
+        default=None,
+        description="Deterministic external id (e.g. 'wiki:123') for idempotent upserts.",
+    )
     title: str | None = Field(default=None, description="Document title, if known.")
     summary: str | None = Field(default=None, description="Document-level summary.")
     body_markdown: str = Field(description="Full parsed Markdown body.")
@@ -170,6 +174,10 @@ class DocumentSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     doc_id: str = Field(description="Stable unique id.")
+    external_key: str | None = Field(
+        default=None,
+        description="Deterministic external id (e.g. 'wiki:123') for idempotent upserts.",
+    )
     title: str | None = Field(default=None, description="Document title, if known.")
     summary: str | None = Field(default=None, description="Document-level summary.")
     tags: list[str] = Field(default_factory=list, description="Free-form tags.")
@@ -245,6 +253,7 @@ def to_document_response(record: object) -> DocumentResponse:
     """Build a :class:`DocumentResponse` from a :class:`DocumentRecord`."""
     return DocumentResponse(
         doc_id=record.doc_id,
+        external_key=record.external_key,
         title=record.title,
         summary=record.summary,
         body_markdown=record.body_markdown,
@@ -261,6 +270,7 @@ def to_document_summary(record: object) -> DocumentSummary:
     """Build a :class:`DocumentSummary` from a :class:`DocumentRecord`."""
     return DocumentSummary(
         doc_id=record.doc_id,
+        external_key=record.external_key,
         title=record.title,
         summary=record.summary,
         tags=list(record.tags),
@@ -317,6 +327,22 @@ class IngestAndIndexResponse(BaseModel):
     source: SourceInfo = Field(description="Provenance of the source document.")
     tags: list[str] = Field(default_factory=list, description="Document tags.")
     summary: str | None = Field(default=None, description="Document summary.")
+
+
+class UpsertResponse(IngestAndIndexResponse):
+    """Response body for ``POST /api/v1/knowledge_base/documents/upsert``.
+
+    Identical to :class:`IngestAndIndexResponse` plus an ``action`` field
+    reporting which branch of the idempotent upsert ran: ``"created"`` (new
+    external key -> ingest), ``"updated"`` (body changed -> re-index),
+    ``"unchanged"`` (body identical -> metadata-only, zero LLM cost).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: str = Field(
+        description="created | updated | unchanged -- which upsert branch ran."
+    )
 
 
 class IngestJobSubmitResponse(BaseModel):
@@ -847,6 +873,15 @@ def _to_ingest_response(result: object) -> IngestAndIndexResponse:
         source=SourceInfo(uri=result.source.uri, title=result.source.title),
         tags=list(result.tags),
         summary=result.summary,
+    )
+
+
+def _to_upsert_response(result: object) -> UpsertResponse:
+    """Build an :class:`UpsertResponse` from an :class:`IngestResult`."""
+    base = _to_ingest_response(result)
+    return UpsertResponse(
+        **base.model_dump(),
+        action=getattr(result, "action", "created"),
     )
 
 

@@ -83,6 +83,7 @@ from sparksage.api.schemas import (
     RetrievedChunkOut,
     SourceInfo,
     TagsResponse,
+    UpsertResponse,
 )
 
 __all__ = [
@@ -131,6 +132,7 @@ __all__ = [
     "SourceInfo",
     "SparkSageService",
     "TagsResponse",
+    "UpsertResponse",
     "mask_value",
     "read_config",
     "write_config",

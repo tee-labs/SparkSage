@@ -106,6 +106,7 @@ class SqliteDocumentStore:
                 f"""
                 CREATE TABLE IF NOT EXISTS "{self._table}" (
                     doc_id        TEXT PRIMARY KEY,
+                    external_key  TEXT,
                     title         TEXT,
                     summary       TEXT,
                     body_markdown TEXT NOT NULL,
@@ -126,6 +127,9 @@ class SqliteDocumentStore:
                 )
                 """
             )
+            cols = {r[1] for r in cur.execute(f'PRAGMA table_info("{self._table}")')}
+            if "external_key" not in cols:
+                cur.execute(f'ALTER TABLE "{self._table}" ADD COLUMN external_key TEXT')
             self._conn.commit()
 
     def close(self) -> None:
@@ -142,6 +146,7 @@ class SqliteDocumentStore:
     ) -> DocumentRecord:
         return DocumentRecord(
             doc_id=row["doc_id"],
+            external_key=row["external_key"],
             title=row["title"],
             summary=row["summary"],
             body_markdown=row["body_markdown"],
@@ -185,8 +190,9 @@ class SqliteDocumentStore:
                 f"""
                 INSERT OR REPLACE INTO "{self._table}"
                     (doc_id, title, summary, body_markdown, source_json,
-                     created_at, updated_at, content_hash, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     created_at, updated_at, content_hash, metadata_json,
+                     external_key)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(stored.doc_id),
@@ -198,6 +204,7 @@ class SqliteDocumentStore:
                     updated_iso,
                     stored.content_hash,
                     metadata_json,
+                    stored.external_key,
                 ),
             )
             cur.execute(
