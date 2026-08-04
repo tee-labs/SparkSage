@@ -29,14 +29,12 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Protocol, runtime_checkable
 
 from sparksage.generator.client import JSON_RESPONSE_FORMAT, LLMClient
+from sparksage.llmutil import extract_json
 
 _logger = logging.getLogger(__name__)
-
-_FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*|\s*```\s*$", re.MULTILINE)
 
 #: Maximum length of a refined query (keeps retrieval prompts bounded).
 DEFAULT_MAX_REFINED_CHARS = 400
@@ -81,25 +79,12 @@ class IdentityRefiner:
 
 
 def _extract_json(text: str) -> str:
-    cleaned = text.strip()
-    if not cleaned:
-        raise ValueError("empty refine response")
-    cleaned = _FENCE_RE.sub("", cleaned).strip()
-    try:
-        json.loads(cleaned)
-        return cleaned
-    except json.JSONDecodeError:
-        pass
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        candidate = cleaned[start : end + 1]
-        try:
-            json.loads(candidate)
-            return candidate
-        except json.JSONDecodeError:
-            pass
-    raise ValueError("refine response was not valid JSON")
+    return extract_json(
+        text,
+        error_type=ValueError,
+        empty_msg="empty refine response",
+        invalid_msg="refine response was not valid JSON",
+    )
 
 
 class LLMQueryRefiner:

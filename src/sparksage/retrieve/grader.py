@@ -23,13 +23,13 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from sparksage.generator.client import JSON_RESPONSE_FORMAT, LLMClient
+from sparksage.llmutil import extract_json
 from sparksage.retrieve.models import RetrievedChunk
 
 _logger = logging.getLogger(__name__)
@@ -39,8 +39,6 @@ DEFAULT_RELEVANCE = 0.5
 
 #: Default cap on how many top chunks the grader inspects (cost control).
 DEFAULT_GRADE_TOP_K = 5
-
-_FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*|\s*```\s*$", re.MULTILINE)
 
 _SYSTEM_TEMPLATE = """\
 You are a strict retrieval-relevance grader. Given a user question and the \
@@ -101,25 +99,12 @@ class RelevanceResult:
 
 
 def _extract_json(text: str) -> str:
-    cleaned = text.strip()
-    if not cleaned:
-        raise CoercionError("empty grader response")
-    cleaned = _FENCE_RE.sub("", cleaned).strip()
-    try:
-        json.loads(cleaned)
-        return cleaned
-    except json.JSONDecodeError:
-        pass
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        candidate = cleaned[start : end + 1]
-        try:
-            json.loads(candidate)
-            return candidate
-        except json.JSONDecodeError:
-            pass
-    raise CoercionError("grader response was not valid JSON")
+    return extract_json(
+        text,
+        error_type=CoercionError,
+        empty_msg="empty grader response",
+        invalid_msg="grader response was not valid JSON",
+    )
 
 
 def _coerce_score(raw: float, default: float) -> float:

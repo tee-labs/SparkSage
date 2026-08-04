@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 from sparksage.bench.baselines import RecursiveCharSplitter
 from sparksage.bench.report import _safe_ratio
 from sparksage.embed.indexer import BlockEmbedder
-from sparksage.embed.store import InMemoryVectorStore
+from sparksage.embed.store import InMemoryVectorStore, dot
 from sparksage.schema.ideablock import IdeaBlock
 
 #: Default ``k`` for the robustness top-k contamination window.
@@ -51,10 +51,6 @@ DEFAULT_ROBUSTNESS_K = 5
 
 #: Default number of trap blocks generated per target block.
 DEFAULT_TRAPS_PER_BLOCK = 1
-
-
-def _dot(a: list[float], b: list[float]) -> float:
-    return sum(x * y for x, y in zip(a, b, strict=True))
 
 
 @dataclass
@@ -73,16 +69,12 @@ class TrapRecord:
     similarity:
         Target-donor embedding cosine similarity (the higher, the harder the
         trap -- the donor was a close neighbor).
-    donor_rank:
-        Zero-based rank of the donor among the target's neighbours (0 = closest
-        non-identical donor).
     """
 
     trap_block: IdeaBlock
     target_block_id: str
     donor_block_id: str
     similarity: float = 0.0
-    donor_rank: int = 0
 
     @property
     def trap_id(self) -> str:
@@ -155,12 +147,12 @@ class DistractorInjector:
                     continue
                 if donor.trusted_answer.strip() == target.trusted_answer.strip():
                     continue
-                sim = _dot(target_vec, vectors[j])
+                sim = dot(target_vec, vectors[j])
                 if sim < self._min_similarity:
                     continue
                 scored.append((sim, j, donor))
             scored.sort(key=lambda t: t[0], reverse=True)
-            for rank, (sim, _, donor) in enumerate(scored[:traps_per_block]):
+            for _, (sim, _, donor) in enumerate(scored[:traps_per_block]):
                 trap = IdeaBlock(
                     name=target.name,
                     critical_question=target.critical_question,
@@ -175,7 +167,6 @@ class DistractorInjector:
                         target_block_id=str(target.id),
                         donor_block_id=str(donor.id),
                         similarity=sim,
-                        donor_rank=rank,
                     )
                 )
         return traps
@@ -203,14 +194,6 @@ class RobustnessCaseResult:
 
     Attributes
     ----------
-    query:
-        The query text (the target block's ``critical_question``).
-    target_block_id:
-        The ground-truth block id for this query.
-    trap_ids:
-        Ids of trap blocks targeting this query's block.
-    retrieved_ids:
-        Block (or chunk-derived) ids retrieved, best first, capped at ``k``.
     true_hit:
         Whether the true target appeared in the top-``k``.
     trap_hit:
@@ -219,10 +202,6 @@ class RobustnessCaseResult:
         One-based rank of the first trap in the ranking, or ``None``.
     """
 
-    query: str
-    target_block_id: str
-    trap_ids: set[str] = field(default_factory=set)
-    retrieved_ids: list[str] = field(default_factory=list)
     true_hit: bool = False
     trap_hit: bool = False
     first_trap_rank: int | None = None
@@ -397,10 +376,6 @@ class RobustnessEvaluator:
         self._splitter = splitter if splitter is not None else RecursiveCharSplitter()
         self._injector = DistractorInjector(embedder)
 
-    @property
-    def injector(self) -> DistractorInjector:
-        return self._injector
-
     def evaluate(
         self,
         blocks: list[IdeaBlock],
@@ -503,9 +478,7 @@ class RobustnessEvaluator:
             retrieved = [h.block_id for h in hits]
             tid = str(qb.id)
             trap_ids = target_to_traps.get(tid, set())
-            cases.append(
-                _score_case(qb.critical_question, tid, trap_ids, retrieved)
-            )
+            cases.append(_score_case(tid, trap_ids, retrieved))
         return cases
 
     def _evaluate_baseline_strategy(
@@ -555,10 +528,6 @@ class RobustnessEvaluator:
                     break
             cases.append(
                 RobustnessCaseResult(
-                    query=qb.critical_question,
-                    target_block_id=tid,
-                    trap_ids=trap_chunk_ids,
-                    retrieved_ids=retrieved_chunk_ids,
                     true_hit=true_hit,
                     trap_hit=trap_hit,
                     first_trap_rank=first_trap_rank,
@@ -568,7 +537,6 @@ class RobustnessEvaluator:
 
 
 def _score_case(
-    query: str,
     target_id: str,
     trap_ids: set[str],
     retrieved: list[str],
@@ -581,10 +549,6 @@ def _score_case(
             first_trap_rank = rank
             break
     return RobustnessCaseResult(
-        query=query,
-        target_block_id=target_id,
-        trap_ids=trap_ids,
-        retrieved_ids=retrieved,
         true_hit=true_hit,
         trap_hit=trap_hit,
         first_trap_rank=first_trap_rank,

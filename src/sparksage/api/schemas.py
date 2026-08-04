@@ -8,7 +8,7 @@ consistent with the project's ``ConfigDict(extra="forbid")`` convention.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -17,6 +17,20 @@ from sparksage.api.pipeline import GenerateOutput
 if TYPE_CHECKING:
     from sparksage.query.context import ConversationContext
     from sparksage.retrieve.models import RetrievalFilter
+
+T = TypeVar("T")
+
+
+class PageResponse(BaseModel, Generic[T]):
+    """Paginated listing base: the current page plus paging metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[T] = Field(description="The current page of items.")
+    count: int = Field(description="Number of items in this page.")
+    total: int = Field(description="Total items matching the filter.")
+    limit: int = Field(description="Page size used.")
+    offset: int = Field(description="Offset used.")
 
 
 class SourceInfo(BaseModel):
@@ -189,18 +203,11 @@ class DocumentSummary(BaseModel):
     )
 
 
-class DocumentListResponse(BaseModel):
+class DocumentListResponse(PageResponse[DocumentSummary]):
     """Paginated document listing."""
 
-    model_config = ConfigDict(extra="forbid")
-
-    items: list[DocumentSummary] = Field(description="The current page of documents.")
-    count: int = Field(description="Number of items in this page.")
-    total: int = Field(description="Total documents matching the filter.")
     tag: str | None = Field(default=None, description="Active tag filter, if any.")
     q: str | None = Field(default=None, description="Active text query, if any.")
-    limit: int = Field(description="Page size used.")
-    offset: int = Field(description="Offset used.")
 
 
 class TagsResponse(BaseModel):
@@ -630,16 +637,8 @@ class KnowledgeBaseSummary(BaseModel):
     updated_at: datetime = Field(description="Last write time (UTC, ISO 8601).")
 
 
-class KnowledgeBaseListResponse(BaseModel):
+class KnowledgeBaseListResponse(PageResponse[KnowledgeBaseSummary]):
     """Paginated multi-KB listing."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    items: list[KnowledgeBaseSummary] = Field(description="The current page of KBs.")
-    count: int = Field(description="Number of items in this page.")
-    total: int = Field(description="Total knowledge bases registered.")
-    limit: int = Field(description="Page size used.")
-    offset: int = Field(description="Offset used.")
 
 
 class CreateKnowledgeBaseRequest(BaseModel):
@@ -758,16 +757,8 @@ class BlockOut(BaseModel):
     updated_at: datetime | None = Field(default=None, description="Last update time.")
 
 
-class BlockListResponse(BaseModel):
+class BlockListResponse(PageResponse[BlockOut]):
     """Paginated IdeaBlock listing for the knowledge-base browser."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    items: list[BlockOut] = Field(description="The current page of blocks.")
-    count: int = Field(description="Number of items in this page.")
-    total: int = Field(description="Total blocks matching the filter.")
-    limit: int = Field(description="Page size used.")
-    offset: int = Field(description="Offset used.")
 
 
 class FeedbackRecordOut(BaseModel):
@@ -786,16 +777,8 @@ class FeedbackRecordOut(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict, description="Caller metadata.")
 
 
-class FeedbackListResponse(BaseModel):
+class FeedbackListResponse(PageResponse[FeedbackRecordOut]):
     """Paginated recent-feedback listing."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    items: list[FeedbackRecordOut] = Field(description="Feedback records, newest-first.")
-    count: int = Field(description="Number of items in this page.")
-    total: int = Field(description="Total feedback records.")
-    limit: int = Field(description="Page size used.")
-    offset: int = Field(description="Offset used.")
 
 
 class QueryHistoryItem(BaseModel):
@@ -814,16 +797,8 @@ class QueryHistoryItem(BaseModel):
     created_at: datetime = Field(description="UTC timestamp.")
 
 
-class QueryHistoryResponse(BaseModel):
+class QueryHistoryResponse(PageResponse[QueryHistoryItem]):
     """Paginated QA conversation-history listing (newest-first)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    items: list[QueryHistoryItem] = Field(description="Turns, newest-first.")
-    count: int = Field(description="Number of items in this page.")
-    total: int = Field(description="Total turns.")
-    limit: int = Field(description="Page size used.")
-    offset: int = Field(description="Offset used.")
 
 
 def _to_block_out(block: object) -> BlockOut:

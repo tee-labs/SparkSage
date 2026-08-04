@@ -2010,18 +2010,7 @@ def _to_kb_summary(snap: dict[str, Any]) -> Any:
     """Build a :class:`KnowledgeBaseSummary` from a QAService KB snapshot dict."""
     from sparksage.api.schemas import KnowledgeBaseSummary
 
-    return KnowledgeBaseSummary(
-        kb_id=snap["kb_id"],
-        name=snap["name"],
-        description=snap.get("description"),
-        language=snap.get("language", "en"),
-        tags=list(snap.get("tags", [])),
-        block_count=int(snap.get("block_count", 0)),
-        document_count=int(snap.get("document_count", 0)),
-        active=bool(snap.get("active", False)),
-        created_at=snap["created_at"],
-        updated_at=snap["updated_at"],
-    )
+    return KnowledgeBaseSummary(**snap)
 
 
 def run(  # pragma: no cover - thin launcher

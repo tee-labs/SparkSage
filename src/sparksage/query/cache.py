@@ -20,12 +20,12 @@ The cache implements the :class:`~sparksage.qa.QACache` protocol structurally
 from __future__ import annotations
 
 import logging
-import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 from sparksage.embed.client import EmbeddingClient
+from sparksage.embed.store import cosine
 
 _logger = logging.getLogger(__name__)
 
@@ -36,15 +36,6 @@ DEFAULT_CACHE_THRESHOLD = 0.90
 
 #: Default max cached entries (LRU-style eviction, FIFO actually -- oldest first).
 DEFAULT_MAX_ENTRIES = 1024
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(x * x for x in b))
-    if na == 0.0 or nb == 0.0:
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b, strict=True))
-    return dot / (na * nb)
 
 
 @dataclass
@@ -151,7 +142,7 @@ class InMemorySemanticCache(Generic[V]):
         best_idx = -1
         best_score = -1.0
         for i, entry in enumerate(self._entries):
-            score = _cosine(qvec, entry.vector)
+            score = cosine(qvec, entry.vector)
             if score > best_score:
                 best_score = score
                 best_idx = i

@@ -9,29 +9,25 @@ into the strict :class:`~sparksage.agent.models.AgentAction`
 enum the single source of truth while staying robust to messy LLM output
 (prose-wrapped JSON, unknown action labels, missing query on a retrieve).
 
-The ``_FENCE_RE`` / :func:`extract_json` helpers are duplicated here on purpose
--- each schema module stays standalone, exactly as the reader / query / distill
-schema modules do.
+The :func:`extract_json` helper is shared from :mod:`sparksage.llmutil` --
+the single copy every schema module imports.
 """
 
 from __future__ import annotations
 
 import json
-import re
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from sparksage.agent.models import ActionType, AgentAction
+from sparksage.llmutil import extract_json as _extract_json
 
 if TYPE_CHECKING:
     from sparksage.retrieve.models import RetrievalFilter
 
 #: Action assumed when the controller emits an unknown / empty action label.
 DEFAULT_ACTION = ActionType.SYNTHESIZE
-
-
-_FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*|\s*```\s*$", re.MULTILINE)
 
 
 class CoercionError(ValueError):
@@ -64,25 +60,7 @@ def extract_json(text: str) -> str:
     via outermost brace matching). Raises :class:`CoercionError` on an empty or
     unparseable response.
     """
-    cleaned = text.strip()
-    if not cleaned:
-        raise CoercionError("empty model response")
-    cleaned = _FENCE_RE.sub("", cleaned).strip()
-    try:
-        json.loads(cleaned)
-        return cleaned
-    except json.JSONDecodeError:
-        pass
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        candidate = cleaned[start : end + 1]
-        try:
-            json.loads(candidate)
-            return candidate
-        except json.JSONDecodeError:
-            pass
-    raise CoercionError("model response was not valid JSON")
+    return _extract_json(text, error_type=CoercionError)
 
 
 def _map_action(raw: str, *, strict: bool) -> ActionType:

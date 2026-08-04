@@ -11,11 +11,11 @@ output (arbitrary casing, missing fields, prose-wrapped JSON).
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from sparksage.llmutil import extract_json as _extract_json
 from sparksage.schema.enums import QueryIntent
 
 #: Default intent assumed when a model emits an unrecognised intent string.
@@ -23,8 +23,6 @@ DEFAULT_INTENT = QueryIntent.BUSINESS_ANALYSIS
 
 #: Confidence assumed when the model omits a usable confidence value.
 DEFAULT_CONFIDENCE = 0.5
-
-_FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*|\s*```\s*$", re.MULTILINE)
 
 
 class CoercionError(ValueError):
@@ -91,29 +89,7 @@ def extract_json(text: str) -> str:
     surrounding prose (extracted via outermost brace matching). Raises
     :class:`CoercionError` on an empty or unparseable response.
     """
-    cleaned = text.strip()
-    if not cleaned:
-        raise CoercionError("empty model response")
-
-    cleaned = _FENCE_RE.sub("", cleaned).strip()
-
-    try:
-        json.loads(cleaned)
-        return cleaned
-    except json.JSONDecodeError:
-        pass
-
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        candidate = cleaned[start : end + 1]
-        try:
-            json.loads(candidate)
-            return candidate
-        except json.JSONDecodeError:
-            pass
-
-    raise CoercionError("model response was not valid JSON")
+    return _extract_json(text, error_type=CoercionError)
 
 
 # --------------------------------------------------------------------------- #

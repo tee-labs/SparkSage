@@ -187,14 +187,6 @@ class QAEvaluator:
         self._engine = engine
         self._judge: CorrectnessJudge = judge if judge is not None else TokenOverlapJudge()
 
-    @property
-    def engine(self) -> QAEngine:
-        return self._engine
-
-    @property
-    def judge(self) -> CorrectnessJudge:
-        return self._judge
-
     def run(
         self,
         cases: list[QATestCase],
@@ -247,16 +239,10 @@ class QAEvaluator:
 
             results.append(
                 QACaseResult(
-                    query=case.query,
-                    generated_text=generated,
                     abstained=abstained,
                     correctness=correctness,
                     faithfulness=faithfulness,
                     confidence=confidence,
-                    retrieved_ids=retrieved_ids,
-                    relevant_block_ids=relevant,
-                    hit=hit,
-                    tags=list(case.tags),
                 )
             )
             rankings.append(retrieved_hits)
