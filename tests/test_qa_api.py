@@ -369,6 +369,131 @@ class TestUpdateDocumentAndReindex:
             svc.update_document_and_reindex(result.doc_id, b"data", "guide.md")
 
 
+class TestUpsertDocument:
+    def test_create_when_external_key_new(self):
+        svc = _make_qa_service()
+        result = svc.upsert_document(
+            b"data", "guide.md", external_key="wiki:123", title="Guide"
+        )
+        assert result.action == "created"
+        assert result.block_count == 2
+        stored = svc.service.get_document(result.doc_id)
+        assert stored is not None
+        assert stored.external_key == "wiki:123"
+        assert svc.knowledge_base.document_count() == 1
+
+    def test_unchanged_body_is_noop(self):
+        gen = FakeLLMClient(responses=[GEN_JSON])
+        converter = MarkdownConverter(backend=_ScriptedConverterBackend([(SAMPLE_MD, "Guide")]))
+        spark_service = SparkSageService(
+            converter=converter,
+            cleaner=TextCleaner(),
+            generator=IdeaBlockGenerator(gen),
+        )
+        embedder = BlockEmbedder(FakeEmbeddingClient(dimension=64))
+        answer_client = FakeLLMClient(responses=[_answer_json(), _faith_json()])
+        reader = Reader(
+            generator=LLMAnswerGenerator(answer_client),
+            faithfulness_judge=LLMFaithfulnessJudge(answer_client),
+        )
+        svc = QAService(service=spark_service, embedder=embedder, reader=reader)
+        first = svc.upsert_document(b"data", "guide.md", external_key="wiki:123")
+        gen_calls = len(gen.calls)
+        doc_id = first.doc_id
+        old_ids = {str(b.id) for b in first.blocks}
+
+        result = svc.upsert_document(
+            b"data", "guide.md", external_key="wiki:123", title="Renamed", tags=["ops"]
+        )
+
+        assert result.action == "unchanged"
+        assert result.doc_id == doc_id
+        assert result.title == "Renamed"
+        assert result.tags == ["ops"]
+        assert len(gen.calls) == gen_calls
+        assert {str(b.id) for b in result.blocks} == old_ids
+        assert svc.knowledge_base.document_count() == 1
+        stored = svc.service.get_document(doc_id)
+        assert stored is not None
+        assert stored.external_key == "wiki:123"
+
+    def test_changed_body_reindexes_keeping_doc_id(self):
+        svc = _make_scripted_qa_service(
+            [(SAMPLE_MD, "Guide"), (SAMPLE_MD_V2, "Guide v2")],
+            [GEN_JSON, GEN_JSON_V2],
+        )
+        first = svc.upsert_document(b"data", "guide.md", external_key="wiki:123")
+        old_ids = {str(b.id) for b in first.blocks}
+
+        result = svc.upsert_document(b"data2", "guide2.md", external_key="wiki:123")
+
+        assert result.action == "updated"
+        assert result.doc_id == first.doc_id
+        assert result.title == "Guide v2"
+        assert result.block_count == 1
+        assert {str(b.id) for b in result.blocks}.isdisjoint(old_ids)
+        assert svc.knowledge_base.document_count() == 1
+        stored = svc.service.get_document(first.doc_id)
+        assert stored is not None
+        assert stored.external_key == "wiki:123"
+        assert stored.body_markdown == SAMPLE_MD_V2
+
+    def test_external_key_is_scoped_per_kb(self):
+        svc = _make_qa_service()
+        new_info = svc.create_knowledge_base("second")
+        svc.upsert_document(b"data", "guide.md", external_key="wiki:123")
+        other = svc.upsert_document(
+            b"data", "guide.md", external_key="wiki:123", kb_id=new_info.kb_id
+        )
+        assert other.action == "created"
+        assert svc.knowledge_base.document_count() == 1
+        assert svc._kbs[new_info.kb_id].document_count() == 1
+
+    def test_find_by_external_key(self):
+        svc = _make_qa_service()
+        assert svc.find_by_external_key("wiki:nope") is None
+        result = svc.upsert_document(b"data", "guide.md", external_key="wiki:123")
+        found = svc.find_by_external_key("wiki:123")
+        assert found is not None
+        assert found.doc_id == result.doc_id
+        assert found.external_key == "wiki:123"
+
+    def test_missing_external_key_raises(self):
+        svc = _make_qa_service()
+        with pytest.raises(ValueError, match="external_key"):
+            svc.upsert_document(b"data", "guide.md", external_key="  ")
+
+    def test_provenance_and_metadata_passthrough(self):
+        svc = _make_qa_service()
+        result = svc.ingest_and_index(
+            b"data",
+            "guide.md",
+            external_key="wiki:9",
+            source_system="wiki",
+            source_extra={"wiki_url": "https://wiki.example/pages/9"},
+            metadata={"author": "alice"},
+        )
+        stored = svc.service.get_document(result.doc_id)
+        assert stored is not None
+        assert stored.external_key == "wiki:9"
+        assert stored.source.system == "wiki"
+        assert stored.source.extra == {"wiki_url": "https://wiki.example/pages/9"}
+        assert stored.metadata == {"author": "alice"}
+
+    def test_list_documents_scoped_per_kb(self):
+        svc = _make_qa_service()
+        svc.upsert_document(b"data", "guide.md", external_key="wiki:1")
+        new_info = svc.create_knowledge_base("second")
+        svc.upsert_document(b"data", "guide2.md", external_key="wiki:2", kb_id=new_info.kb_id)
+
+        page_a, total_a = svc.list_documents()
+        page_b, total_b = svc.list_documents(kb_id=new_info.kb_id)
+
+        assert total_a == 1 and total_b == 1
+        assert page_a[0].external_key == "wiki:1"
+        assert page_b[0].external_key == "wiki:2"
+
+
 # ---------------------------------------------------------------------------- #
 # Regression: KB ingest must be visible in the document-management store
 # (https://github.com/tee-labs/SparkSage/issues — "文档管理里什么都看不到")
@@ -800,6 +925,91 @@ class TestKBUpdateRoute:
             files={"file": ("guide2.md", b"data2", "text/plain")},
         )
         assert resp.status_code == 503
+
+
+def _upsert(client, external_key="wiki:123", filename="guide.md", data=b"data", **kw):
+    """Helper: upsert a doc and return the response body."""
+    resp = client.post(
+        "/api/v1/knowledge_base/documents/upsert",
+        files={"file": (filename, data, "text/plain")},
+        data={"external_key": external_key, **kw},
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+class TestKBUpsertRoute:
+    def test_created_on_new_external_key(self, qa_client):
+        body = _upsert(qa_client, external_key="wiki:1")
+        assert body["action"] == "created"
+        assert body["block_count"] == 2
+        assert body["doc_id"]
+
+    def test_unchanged_on_same_body(self, qa_client):
+        first = _upsert(qa_client, external_key="wiki:1")
+        old_ids = {b["id"] for b in first["blocks"]}
+        second = _upsert(qa_client, external_key="wiki:1", title="Renamed")
+        assert second["action"] == "unchanged"
+        assert second["doc_id"] == first["doc_id"]
+        assert second["title"] == "Renamed"
+        assert {b["id"] for b in second["blocks"]} == old_ids
+
+    def test_updated_on_changed_body(self):
+        client, svc = _make_scripted_qa_client(
+            [(SAMPLE_MD, "Guide"), (SAMPLE_MD_V2, "Guide v2")],
+            [GEN_JSON, GEN_JSON_V2],
+        )
+        first = _upsert(client, external_key="wiki:1")
+        second = _upsert(client, external_key="wiki:1", filename="guide2.md", data=b"data2")
+        assert second["action"] == "updated"
+        assert second["doc_id"] == first["doc_id"]
+        assert second["title"] == "Guide v2"
+        assert second["block_count"] == 1
+        assert svc.knowledge_base.document_count() == 1
+
+    def test_external_key_persisted_in_document(self, qa_client):
+        body = _upsert(qa_client, external_key="wiki:77")
+        resp = qa_client.get("/api/v1/documents")
+        item = next(d for d in resp.json()["items"] if d["doc_id"] == body["doc_id"])
+        assert item["external_key"] == "wiki:77"
+
+    def test_missing_external_key_422(self, qa_client):
+        resp = qa_client.post(
+            "/api/v1/knowledge_base/documents/upsert",
+            files={"file": ("guide.md", b"data", "text/plain")},
+        )
+        assert resp.status_code == 422
+
+    def test_source_system_stamped(self, qa_client):
+        _upsert(qa_client, external_key="wiki:1", source_system="wiki")
+        resp = qa_client.get("/api/v1/documents")
+        assert resp.json()["items"][0]["source"]["system"] == "wiki"
+
+
+class TestKBDocumentsListRoute:
+    def test_lists_kb_scoped_documents(self, qa_client):
+        _upsert(qa_client, external_key="wiki:1")
+        resp = qa_client.get("/api/v1/knowledge_base/documents")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 1
+        assert body["items"][0]["external_key"] == "wiki:1"
+
+    def test_list_scope_respects_kb_id(self, qa_client):
+        _upsert(qa_client, external_key="wiki:1")
+        resp = qa_client.post(
+            "/api/v1/knowledge_bases",
+            json={"name": "second", "set_active": False},
+        )
+        new_kb_id = resp.json()["kb_id"]
+        _upsert(qa_client, external_key="wiki:2", kb_id=new_kb_id)
+
+        first = qa_client.get("/api/v1/knowledge_base/documents").json()
+        second = qa_client.get(
+            f"/api/v1/knowledge_base/documents?kb_id={new_kb_id}"
+        ).json()
+        assert first["total"] == 1 and first["items"][0]["external_key"] == "wiki:1"
+        assert second["total"] == 1 and second["items"][0]["external_key"] == "wiki:2"
 
 
 class TestIngestRouteDoesNotBlockEventLoop:

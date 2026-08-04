@@ -50,6 +50,7 @@ from sparksage.api import (
     SourceInfo,
     SparkSageService,
     TagsResponse,
+    UpsertResponse,
 )
 from sparksage.bench import (
     DEFAULT_CHARS_PER_TOKEN,
@@ -457,6 +458,7 @@ __all__ = [
     "StrategyReport",
     "Summarizer",
     "TagsResponse",
+    "UpsertResponse",
     "Tag",
     "TechnicalBlock",
     "TextCleaner",

@@ -123,6 +123,16 @@ class TestStoreCore:
         assert got.title == "T"
         assert got.source.uri == "doc.md"
 
+    def test_external_key_round_trip(self, factory):
+        store = factory()
+        r = _record(doc_id="d1", body="body")
+        r.external_key = "wiki:123"
+        store.save(r)
+        got = store.get("d1")
+        assert got is not None
+        assert got.external_key == "wiki:123"
+        assert store.save(_record(doc_id="d2", body="other")).external_key is None
+
     def test_save_returns_copy(self, factory):
         store = factory()
         saved = store.save(_record(tags=["a"]))
@@ -231,6 +241,8 @@ class TestSqliteSpecific:
         path = tmp_path / "persist.db"
         s1 = SqliteDocumentStore(path)
         saved = s1.save(_record(tags=["keep", "me"], body="durable body"))
+        saved.external_key = "wiki:42"
+        s1.save(saved)
         s1.close()
 
         s2 = SqliteDocumentStore(path)
@@ -238,8 +250,31 @@ class TestSqliteSpecific:
         assert got is not None
         assert got.tags == ["keep", "me"]
         assert got.body_markdown == "durable body"
+        assert got.external_key == "wiki:42"
         assert len(s2) == 1
         s2.close()
+
+    def test_legacy_db_gains_external_key_column(self, tmp_path):
+        import sqlite3
+
+        path = tmp_path / "legacy.db"
+        conn = sqlite3.connect(path)
+        conn.execute(
+            "CREATE TABLE documents ("
+            "doc_id TEXT PRIMARY KEY, title TEXT, summary TEXT, "
+            "body_markdown TEXT NOT NULL, source_json TEXT NOT NULL, "
+            "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+            "content_hash TEXT, metadata_json TEXT NOT NULL DEFAULT '{}')"
+        )
+        conn.commit()
+        conn.close()
+
+        s = SqliteDocumentStore(path)
+        r = _record(doc_id="legacy", body="v1")
+        r.external_key = "wiki:legacy"
+        saved = s.save(r)
+        assert s.get(saved.doc_id).external_key == "wiki:legacy"
+        s.close()
 
     def test_invalid_table_name(self):
         with pytest.raises(ValueError, match="invalid table name"):

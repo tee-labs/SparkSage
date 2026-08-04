@@ -372,7 +372,24 @@ PYTHONPATH=src python3 examples/build_chunks.py
   `_parallel_generate` helper). Wired to the web layer via `PUT
   /api/v1/knowledge_base/documents/{doc_id}` (multipart file + optional
   title/tags, returns the same `IngestAndIndexResponse` as ingest); metadata
-  updates remain `PATCH /api/v1/documents/{id}`.
+  updates remain `PATCH /api/v1/documents/{id}`. Idempotent wiki-style sync is
+  the external-id bridge: `DocumentRecord` / `new_record` gained
+  `external_key` (a deterministic upstream id like `wiki:123`; persisted as a
+  column in `SqliteDocumentStore` with an ALTER-TABLE migration for legacy
+  DBs), `QAService.upsert_document` (`api/qa_service.py`) is the
+  external-key-keyed counterpart of ingest/update — no doc with the key →
+  ingest (`action="created"`), same `content_hash` → metadata-only patch
+  (`action="unchanged"`, zero LLM cost), body changed →
+  `update_document_and_reindex` keeping `doc_id` stable (`action="updated"`),
+  with `find_by_external_key` / KB-scoped `list_documents` powering the
+  deletion-detection diff. `ingest_and_index` / `update_document_and_reindex`
+  also pass through `external_key` / `metadata` / `source.system` + `extra`
+  (provenance no longer dropped on ingest/update) so citations chain back to
+  the upstream wiki page. Exposed as `POST
+  /api/v1/knowledge_base/documents/upsert` (multipart + `external_key` form
+  field → `UpsertResponse` with `action` / `doc_id` / `block_count`) and `GET
+  /api/v1/knowledge_base/documents` (KB-scoped `DocumentListResponse`
+  serializing `external_key`).
 - The configuration management (`api/config_manager.py`) is the pure-stdlib
   bridge between the WEB UI's `/config` page and the `.env` file. It depends
   only on `sparksage.config.parse_env_file` (never a third-party env loader).

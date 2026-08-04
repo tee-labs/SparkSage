@@ -76,11 +76,19 @@ class DocumentRecord(BaseModel):
     metadata:
         Free-form ``dict`` for caller-specific fields (author, department,
         ACL, ...).
+    external_key:
+        Deterministic external id (e.g. ``"wiki:123"``) mapping this document
+        to an upstream system's stable identifier -- the idempotent-upsert
+        key. ``None`` for documents with no external counterpart.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     doc_id: str = Field(default_factory=_new_id, description="Stable unique id.")
+    external_key: str | None = Field(
+        default=None,
+        description="Deterministic external id (e.g. 'wiki:123') for idempotent upserts.",
+    )
     title: str | None = Field(default=None, description="Document title, if known.")
     summary: str | None = Field(
         default=None, description="Document-level summary (extractive / LLM)."
@@ -137,6 +145,7 @@ def new_record(
     doc_id: str | None = None,
     content_hash: str | None = None,
     metadata: dict[str, Any] | None = None,
+    external_key: str | None = None,
 ) -> DocumentRecord:
     """Convenience factory for a :class:`DocumentRecord`.
 
@@ -154,6 +163,7 @@ def new_record(
         source=src,
         content_hash=content_hash,
         metadata=dict(metadata) if metadata is not None else {},
+        external_key=external_key,
     )
 
 

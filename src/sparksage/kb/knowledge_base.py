@@ -179,6 +179,16 @@ class KnowledgeBase:
         """Whether ``doc_id`` is a document owned by this knowledge base."""
         return str(doc_id) in self._doc_ids
 
+    def document_ids(self) -> set[str]:
+        """Return a snapshot of the ``doc_id``s owned by this knowledge base.
+
+        The document store may be shared across KBs (as in
+        :class:`~sparksage.api.qa_service.QAService`), so ownership is tracked
+        per aggregate -- this is the set that scopes KB-local document
+        operations (listing, ``external_key`` lookup, deletion detection).
+        """
+        return set(self._doc_ids)
+
     def blocks(self) -> list[IdeaBlock]:
         """Return a snapshot of all blocks in the registry."""
         return list(self._registry.values())
