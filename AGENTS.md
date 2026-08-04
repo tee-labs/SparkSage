@@ -362,7 +362,17 @@ PYTHONPATH=src python3 examples/build_chunks.py
   file try/catch isolation so one failure no longer aborts the rest, and a
   per-file progress card (`phase` / `percent` / `success`/`failed`/`cancelled`)
   replaces the all-or-nothing spinner. The sync `POST .../ingest` route is
-  unchanged (backward-compatible).
+  unchanged (backward-compatible). Content updates live on the same KB path:
+  `QAService.update_document_and_reindex` (`api/qa_service.py`) is the
+  hash-aware update counterpart of `ingest_and_index` — convert →
+  (re)generate blocks → `KnowledgeBase.update_document`, keeping `doc_id`
+  stable; when the new body's `content_hash` equals the stored one it patches
+  title/tags *without* re-running the LLM or re-embedding, so re-uploading the
+  same file is cheap (shared generation runs through the private
+  `_parallel_generate` helper). Wired to the web layer via `PUT
+  /api/v1/knowledge_base/documents/{doc_id}` (multipart file + optional
+  title/tags, returns the same `IngestAndIndexResponse` as ingest); metadata
+  updates remain `PATCH /api/v1/documents/{id}`.
 - The configuration management (`api/config_manager.py`) is the pure-stdlib
   bridge between the WEB UI's `/config` page and the `.env` file. It depends
   only on `sparksage.config.parse_env_file` (never a third-party env loader).
@@ -560,6 +570,8 @@ PYTHONPATH=src python3 examples/build_chunks.py
   (hash-aware change detection); `reindex` rebuilds both indexes from the live
   registry (drift recovery). Each block carries an optional additive `kb_id`
   (`schema/ideablock.py`) so `RetrievalFilter` can scope retrieval to one KB.
+  `contains_document` is the KB-scoped membership check (the document store may
+  be shared across KBs, so existence in the store is not ownership).
   `KnowledgeBaseInfo` (`models.py`) is the serializable metadata; the
   `KnowledgeBaseStore` Protocol + `InMemoryKnowledgeBaseStore` (`store.py`) is
   the multi-tenant registry — live vector state stays on the aggregate.

@@ -16,6 +16,9 @@ Routes:
 * ``GET /api/v1/tags`` -- distinct tag vocabulary across stored documents.
 * ``POST /api/v1/knowledge_base/ingest`` -- upload knowledge: parse -> chunk ->
   embed -> index (makes it retrievable).
+* ``PUT /api/v1/knowledge_base/documents/{doc_id}`` -- replace a document's
+  content and re-index it (hash-aware: re-uploading the same body is a
+  metadata-only no-op).
 * ``POST /api/v1/query`` -- ask a question against the knowledge base.
 * ``GET /DELETE /api/v1/query/history`` -- list / clear the persisted QA
   conversation history (the Q&A page restores its turns across reloads).

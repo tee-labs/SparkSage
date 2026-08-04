@@ -81,6 +81,45 @@ def _faith_json(score=0.9):
     return json.dumps({"score": score, "supported_claims": 1, "unsupported_claims": 0})
 
 
+SAMPLE_MD_V2 = (
+    "# Product Guide v2\n"
+    "SparkSage 2.0 ships question-aligned RAG with agentic QA. "
+    "Install the new version with pip install --upgrade sparksage."
+)
+
+GEN_JSON_V2 = json.dumps(
+    {
+        "blocks": [
+            {
+                "name": "Install v2",
+                "critical_question": "How to upgrade?",
+                "trusted_answer": "Install with pip install --upgrade sparksage.",
+                "tags": ["technology"],
+                "keywords": ["upgrade", "install"],
+            },
+        ]
+    }
+)
+
+
+class _ScriptedConverterBackend:
+    """Returns pre-scripted (markdown, title) pairs in call order.
+
+    Lets the update tests vary the *content* between ingest and update even
+    though both uploads hit the same converter (the converter only sees the
+    throwaway temp-file path, never the original filename).
+    """
+
+    def __init__(self, outputs):
+        self._outputs = [tuple(o) for o in outputs]
+        self.calls = 0
+
+    def convert(self, source, **kwargs):
+        md, title = self._outputs[min(self.calls, len(self._outputs) - 1)]
+        self.calls += 1
+        return md, title
+
+
 def _make_qa_service(
     *,
     markdown: str = SAMPLE_MD,
@@ -229,6 +268,105 @@ class TestIngestParallelism:
         assert elapsed < delay * 2 - 0.1, (
             f"ingest not parallelized: elapsed={elapsed:.2f}s >= ~{(delay * 2):.2f}s"
         )
+
+
+def _make_scripted_qa_service(
+    outputs, gen_responses, *, with_generator: bool = True
+) -> QAService:
+    converter = MarkdownConverter(backend=_ScriptedConverterBackend(outputs))
+    generator = (
+        IdeaBlockGenerator(FakeLLMClient(responses=gen_responses))
+        if with_generator
+        else None
+    )
+    spark_service = SparkSageService(
+        converter=converter,
+        cleaner=TextCleaner(),
+        generator=generator,
+    )
+    embedder = BlockEmbedder(FakeEmbeddingClient(dimension=64))
+    answer_client = FakeLLMClient(responses=[_answer_json(), _faith_json()])
+    reader = Reader(
+        generator=LLMAnswerGenerator(answer_client),
+        faithfulness_judge=LLMFaithfulnessJudge(answer_client),
+    )
+    return QAService(service=spark_service, embedder=embedder, reader=reader)
+
+
+class TestUpdateDocumentAndReindex:
+    def test_content_change_reindexes_keeping_doc_id(self):
+        svc = _make_scripted_qa_service(
+            [(SAMPLE_MD, "Guide"), (SAMPLE_MD_V2, "Guide v2")],
+            [GEN_JSON, GEN_JSON_V2],
+        )
+        first = svc.ingest_and_index(b"data", "guide.md")
+        old_ids = {str(b.id) for b in first.blocks}
+        assert svc.knowledge_base.block_count() == 2
+
+        result = svc.update_document_and_reindex(first.doc_id, b"data2", "guide2.md")
+
+        assert result.doc_id == first.doc_id
+        assert result.title == "Guide v2"
+        assert result.block_count == 1
+        assert svc.knowledge_base.block_count() == 1
+        assert {str(b.id) for b in result.blocks}.isdisjoint(old_ids)
+        assert svc.knowledge_base.search("upgrade", k=3).chunks
+        stored = svc.service.get_document(first.doc_id)
+        assert stored is not None
+        assert stored.body_markdown == SAMPLE_MD_V2
+        assert stored.title == "Guide v2"
+
+    def test_unchanged_content_skips_generation_and_patches_metadata(self):
+        gen = FakeLLMClient(responses=[GEN_JSON])
+        converter = MarkdownConverter(backend=_ScriptedConverterBackend([(SAMPLE_MD, "Guide")]))
+        spark_service = SparkSageService(
+            converter=converter,
+            cleaner=TextCleaner(),
+            generator=IdeaBlockGenerator(gen),
+        )
+        embedder = BlockEmbedder(FakeEmbeddingClient(dimension=64))
+        answer_client = FakeLLMClient(responses=[_answer_json(), _faith_json()])
+        reader = Reader(
+            generator=LLMAnswerGenerator(answer_client),
+            faithfulness_judge=LLMFaithfulnessJudge(answer_client),
+        )
+        svc = QAService(service=spark_service, embedder=embedder, reader=reader)
+        first = svc.ingest_and_index(b"data", "guide.md")
+        gen_calls_after_ingest = len(gen.calls)
+        old_ids = {str(b.id) for b in first.blocks}
+
+        result = svc.update_document_and_reindex(
+            first.doc_id, b"data", "guide.md", title="Renamed", tags=["ops"]
+        )
+
+        assert result.doc_id == first.doc_id
+        assert result.title == "Renamed"
+        assert result.tags == ["ops"]
+        assert len(gen.calls) == gen_calls_after_ingest
+        assert {str(b.id) for b in result.blocks} == old_ids
+        assert svc.knowledge_base.block_count() == len(old_ids)
+
+    def test_nonexistent_document_raises(self):
+        svc = _make_scripted_qa_service([(SAMPLE_MD, "Guide")], [GEN_JSON])
+        with pytest.raises(KeyError):
+            svc.update_document_and_reindex("nope", b"data", "guide.md")
+
+    def test_content_change_without_generator_raises(self):
+        svc = _make_scripted_qa_service(
+            [(SAMPLE_MD, "Guide"), (SAMPLE_MD_V2, "Guide v2")],
+            [GEN_JSON, GEN_JSON_V2],
+        )
+        first = svc.ingest_and_index(b"data", "guide.md")
+        svc._service._generator = None
+        with pytest.raises(GenerationNotConfiguredError):
+            svc.update_document_and_reindex(first.doc_id, b"data2", "guide2.md")
+
+    def test_cross_kb_update_raises(self):
+        svc = _make_scripted_qa_service([(SAMPLE_MD, "Guide")], [GEN_JSON])
+        new_info = svc.create_knowledge_base("second")
+        result = svc.ingest_and_index(b"data", "guide.md", kb_id=new_info.kb_id)
+        with pytest.raises(KeyError):
+            svc.update_document_and_reindex(result.doc_id, b"data", "guide.md")
 
 
 # ---------------------------------------------------------------------------- #
@@ -544,6 +682,12 @@ def _ingest(client, filename="guide.md"):
     return resp.json()
 
 
+def _make_scripted_qa_client(outputs, gen_responses):
+    """HTTP client + service over a scripted converter/generator pair."""
+    svc = _make_scripted_qa_service(outputs, gen_responses)
+    return TestClient(create_app(qa_service=svc)), svc
+
+
 class TestKBIngestRoute:
     def test_ingest_returns_blocks(self, qa_client):
         body = _ingest(qa_client)
@@ -591,6 +735,71 @@ class TestKBIngestRoute:
         qa_client.delete(f"/api/v1/knowledge_base/documents/{doc_id}")
         resp = qa_client.get("/api/v1/documents")
         assert resp.json()["total"] == 0
+
+
+class TestKBUpdateRoute:
+    def test_put_unchanged_content_patches_metadata(self, qa_client):
+        body = _ingest(qa_client)
+        doc_id = body["doc_id"]
+        old_ids = {b["id"] for b in body["blocks"]}
+
+        resp = qa_client.put(
+            f"/api/v1/knowledge_base/documents/{doc_id}",
+            files={"file": ("guide.md", b"data", "text/plain")},
+            data={"title": "Renamed", "tags": "alpha,beta"},
+        )
+
+        assert resp.status_code == 200, resp.text
+        out = resp.json()
+        assert out["doc_id"] == doc_id
+        assert out["title"] == "Renamed"
+        assert out["tags"] == ["alpha", "beta"]
+        assert {b["id"] for b in out["blocks"]} == old_ids
+
+    def test_put_content_change_reindexes(self):
+        client, svc = _make_scripted_qa_client(
+            [(SAMPLE_MD, "Guide"), (SAMPLE_MD_V2, "Guide v2")],
+            [GEN_JSON, GEN_JSON_V2],
+        )
+        body = _ingest(client)
+        doc_id = body["doc_id"]
+        old_ids = {b["id"] for b in body["blocks"]}
+
+        resp = client.put(
+            f"/api/v1/knowledge_base/documents/{doc_id}",
+            files={"file": ("guide2.md", b"data2", "text/plain")},
+        )
+
+        assert resp.status_code == 200, resp.text
+        out = resp.json()
+        assert out["doc_id"] == doc_id
+        assert out["title"] == "Guide v2"
+        assert out["block_count"] == 1
+        assert {b["id"] for b in out["blocks"]}.isdisjoint(old_ids)
+        assert svc.knowledge_base.block_count() == 1
+        doc_resp = client.get("/api/v1/documents")
+        assert doc_resp.status_code == 200
+        assert doc_resp.json()["total"] == 1
+
+    def test_put_nonexistent_document_404(self, qa_client):
+        resp = qa_client.put(
+            "/api/v1/knowledge_base/documents/nope",
+            files={"file": ("guide.md", b"data", "text/plain")},
+        )
+        assert resp.status_code == 404
+
+    def test_put_content_change_503_without_generator(self):
+        client, svc = _make_scripted_qa_client(
+            [(SAMPLE_MD, "Guide"), (SAMPLE_MD_V2, "Guide v2")],
+            [GEN_JSON, GEN_JSON_V2],
+        )
+        body = _ingest(client)
+        svc._service._generator = None
+        resp = client.put(
+            f"/api/v1/knowledge_base/documents/{body['doc_id']}",
+            files={"file": ("guide2.md", b"data2", "text/plain")},
+        )
+        assert resp.status_code == 503
 
 
 class TestIngestRouteDoesNotBlockEventLoop:
