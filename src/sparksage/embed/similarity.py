@@ -34,10 +34,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-
-def _dot(a: list[float], b: list[float]) -> float:
-    """Pure-Python dot product (no numpy needed)."""
-    return sum(x * y for x, y in zip(a, b, strict=True))
+from sparksage.embed.store import dot
 
 
 @runtime_checkable
@@ -210,7 +207,7 @@ def _brute_force_pairs(
         vec_i = vectors[id_i]
         for j in range(i + 1, n):
             id_j = ids[j]
-            score = _dot(vec_i, vectors[id_j])
+            score = dot(vec_i, vectors[id_j])
             if score >= threshold:
                 a, b = (id_i, id_j) if id_i <= id_j else (id_j, id_i)
                 pairs.append(SimilarityPair(a=a, b=b, score=score))
@@ -240,7 +237,7 @@ def _verify_candidates(
         seen.add(key)
         if a not in vectors or b not in vectors:
             continue
-        score = _dot(vectors[a], vectors[b])
+        score = dot(vectors[a], vectors[b])
         if score >= threshold:
             pairs.append(SimilarityPair(a=a, b=b, score=score))
     return pairs

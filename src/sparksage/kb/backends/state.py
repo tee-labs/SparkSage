@@ -35,19 +35,14 @@ aggregate's consistency guarantee extends across restarts.
 from __future__ import annotations
 
 import logging
-import re
-import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
+from sparksage._sqlite import SqliteMixin
 from sparksage.schema.ideablock import IdeaBlock
 
 _logger = logging.getLogger(__name__)
-
-#: A table name prefix must be a plain SQL identifier -- it cannot be passed as
-#: a parameter, so it is regex-validated before being interpolated into SQL.
-_TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _IN_MEMORY_PATH = ":memory:"
 
@@ -97,7 +92,7 @@ class KbStateStore(Protocol):
         ...
 
 
-class SqliteKbStateStore:
+class SqliteKbStateStore(SqliteMixin):
     """Durable block + vector + doc-link store backed by a single SQLite file.
 
     Parameters
@@ -137,30 +132,9 @@ class SqliteKbStateStore:
         *,
         table: str = "kb_state",
     ) -> None:
-        table_norm = str(table).strip()
-        if not _TABLE_NAME_RE.match(table_norm):
-            raise ValueError(
-                f"invalid table name {table!r}: must match ^[A-Za-z_][A-Za-z0-9_]*$"
-            )
-        self._table = table_norm
-        self._blocks_table = f"{table_norm}_blocks"
-        self._links_table = f"{table_norm}_doc_links"
-
-        path_str = str(path)
-        if path_str != _IN_MEMORY_PATH:
-            Path(path_str).parent.mkdir(parents=True, exist_ok=True)
-        self._path = path_str
-        self._conn = self._connect(path_str)
-        self._lock = threading.RLock()
-        self._init_schema()
-
-    @staticmethod
-    def _connect(path: str) -> Any:
-        import sqlite3
-
-        conn = sqlite3.connect(path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        return conn
+        self._blocks_table = f"{table.strip()}_blocks"
+        self._links_table = f"{table.strip()}_doc_links"
+        self._open(path, table)
 
     # ------------------------------------------------------------------ #
     # schema
@@ -190,11 +164,6 @@ class SqliteKbStateStore:
                 """
             )
             self._conn.commit()
-
-    def close(self) -> None:
-        """Close the underlying SQLite connection."""
-        with self._lock:
-            self._conn.close()
 
     # ------------------------------------------------------------------ #
     # KbStateStore protocol

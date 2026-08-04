@@ -30,12 +30,11 @@ from sparksage.generator.schema import (
     coerce_block,
     parse_raw_result,
 )
+from sparksage.llmutil import extract_json
 from sparksage.schema.ideablock import IdeaBlock
 from sparksage.schema.source import SourceRef
 
 _logger = logging.getLogger(__name__)
-
-_FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*|\s*```\s*$", re.MULTILINE)
 
 #: Default per-segment character budget for large inputs. Source text longer
 #: than this is split into coherent segments (see :func:`_split_text_segments`)
@@ -80,29 +79,12 @@ def _extract_json(text: str) -> str:
     Handles three common cases: plain JSON, JSON wrapped in ```json fences, and
     JSON embedded in surrounding prose (extracted via balanced brace matching).
     """
-    cleaned = text.strip()
-    if not cleaned:
-        raise ResponseParseError("empty model response")
-
-    cleaned = _FENCE_RE.sub("", cleaned).strip()
-
-    try:
-        json.loads(cleaned)
-        return cleaned
-    except json.JSONDecodeError:
-        pass
-
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        candidate = cleaned[start : end + 1]
-        try:
-            json.loads(candidate)
-            return candidate
-        except json.JSONDecodeError:
-            pass
-
-    return cleaned
+    return extract_json(
+        text,
+        error_type=ResponseParseError,
+        empty_msg="empty model response",
+        lenient=True,
+    )
 
 
 def _repair_json(text: str) -> str:

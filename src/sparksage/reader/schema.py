@@ -17,11 +17,11 @@ been filling but no consumer has read until now.
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from sparksage.llmutil import extract_json as _extract_json
 from sparksage.retrieve.models import Citation
 
 #: Confidence assumed when the generator omits a usable confidence value.
@@ -29,8 +29,6 @@ DEFAULT_ANSWER_CONFIDENCE = 0.5
 
 #: Confidence assumed when the faithfulness judge omits a usable score.
 DEFAULT_FAITHFULNESS = 0.5
-
-_FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*|\s*```\s*$", re.MULTILINE)
 
 
 class CoercionError(ValueError):
@@ -142,25 +140,7 @@ def extract_json(text: str) -> str:
     via outermost brace matching). Raises :class:`CoercionError` on an empty or
     unparseable response.
     """
-    cleaned = text.strip()
-    if not cleaned:
-        raise CoercionError("empty model response")
-    cleaned = _FENCE_RE.sub("", cleaned).strip()
-    try:
-        json.loads(cleaned)
-        return cleaned
-    except json.JSONDecodeError:
-        pass
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        candidate = cleaned[start : end + 1]
-        try:
-            json.loads(candidate)
-            return candidate
-        except json.JSONDecodeError:
-            pass
-    raise CoercionError("model response was not valid JSON")
+    return _extract_json(text, error_type=CoercionError)
 
 
 def _coerce_score(raw: float, default: float) -> float:

@@ -23,23 +23,18 @@ connection.
 from __future__ import annotations
 
 import logging
-import re
-import threading
 from pathlib import Path
 from typing import Any
 
+from sparksage._sqlite import SqliteMixin
 from sparksage.kb.models import KnowledgeBaseInfo
 
 _logger = logging.getLogger(__name__)
 
-#: A table name must be a plain SQL identifier -- it cannot be passed as a
-#: parameter, so it is regex-validated before being interpolated into SQL.
-_TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
 _IN_MEMORY_PATH = ":memory:"
 
 
-class SqliteKnowledgeBaseStore:
+class SqliteKnowledgeBaseStore(SqliteMixin):
     """Durable knowledge-base metadata store backed by a single SQLite file.
 
     Parameters
@@ -68,28 +63,7 @@ class SqliteKnowledgeBaseStore:
         *,
         table: str = "knowledge_bases",
     ) -> None:
-        table_norm = str(table).strip()
-        if not _TABLE_NAME_RE.match(table_norm):
-            raise ValueError(
-                f"invalid table name {table!r}: must match ^[A-Za-z_][A-Za-z0-9_]*$"
-            )
-        self._table = table_norm
-
-        path_str = str(path)
-        if path_str != _IN_MEMORY_PATH:
-            Path(path_str).parent.mkdir(parents=True, exist_ok=True)
-        self._path = path_str
-        self._conn = self._connect(path_str)
-        self._lock = threading.RLock()
-        self._init_schema()
-
-    @staticmethod
-    def _connect(path: str) -> Any:
-        import sqlite3
-
-        conn = sqlite3.connect(path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        return conn
+        self._open(path, table)
 
     # ------------------------------------------------------------------ #
     # schema
@@ -109,11 +83,6 @@ class SqliteKnowledgeBaseStore:
                 """
             )
             self._conn.commit()
-
-    def close(self) -> None:
-        """Close the underlying SQLite connection."""
-        with self._lock:
-            self._conn.close()
 
     # ------------------------------------------------------------------ #
     # helpers

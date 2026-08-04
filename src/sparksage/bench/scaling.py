@@ -80,11 +80,6 @@ class ScalingReport:
         """Number of tiers evaluated."""
         return len(self.tiers)
 
-    @property
-    def max_block_count(self) -> int:
-        """The largest corpus size evaluated (the final tier)."""
-        return self.tiers[-1].block_count if self.tiers else 0
-
     def metric_series(self, metric: str = "hit_at_1") -> list[tuple[int, float, float]]:
         """Return ``(tier_size, ideablock_value, baseline_value)`` per tier.
 

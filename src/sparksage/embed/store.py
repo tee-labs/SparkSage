@@ -27,6 +27,7 @@ Design mirrors the rest of SparkSage:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -86,9 +87,22 @@ class VectorStore(Protocol):
         ...
 
 
-def _dot(a: list[float], b: list[float]) -> float:
-    """Pure-Python dot product (no numpy needed)."""
+def dot(a: list[float], b: list[float]) -> float:
+    """Pure-Python dot product (no numpy needed).
+
+    Vectors are L2-normalized by every :class:`EmbeddingClient`, so cosine
+    similarity reduces to this plain dot product.
+    """
     return sum(x * y for x, y in zip(a, b, strict=True))
+
+
+def cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity with the zero-norm guard (for non-normalized vectors)."""
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot(a, b) / (na * nb)
 
 
 class InMemoryVectorStore:
@@ -183,7 +197,7 @@ class InMemoryVectorStore:
         if not self._vectors:
             return []
         scored = [
-            (block_id, _dot(query, vec)) for block_id, vec in self._vectors.items()
+            (block_id, dot(query, vec)) for block_id, vec in self._vectors.items()
         ]
         scored.sort(key=lambda item: item[1], reverse=True)
         top = scored[:k]

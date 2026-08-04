@@ -18,7 +18,6 @@ lifecycle fields: ``status=ACTIVE``, ``parents`` = every member id, and
 from __future__ import annotations
 
 import json
-import re
 
 from sparksage.distill.prompts import merge_messages
 from sparksage.distill.schema import (
@@ -28,11 +27,10 @@ from sparksage.distill.schema import (
     parse_raw_merged,
 )
 from sparksage.generator.client import JSON_RESPONSE_FORMAT, LLMClient
+from sparksage.llmutil import extract_json
 from sparksage.schema.enums import BlockStatus
 from sparksage.schema.ideablock import IdeaBlock
 from sparksage.schema.source import SourceRef
-
-_FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*|\s*```\s*$", re.MULTILINE)
 
 
 class MergeError(RuntimeError):
@@ -53,27 +51,12 @@ def _extract_json(text: str) -> str:
     Same three-case handling as the generator: plain JSON, fenced JSON, and JSON
     embedded in prose (outermost brace match).
     """
-    cleaned = text.strip()
-    if not cleaned:
-        raise MergeResponseParseError("empty model response")
-    cleaned = _FENCE_RE.sub("", cleaned).strip()
-
-    try:
-        json.loads(cleaned)
-        return cleaned
-    except json.JSONDecodeError:
-        pass
-
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        candidate = cleaned[start : end + 1]
-        try:
-            json.loads(candidate)
-            return candidate
-        except json.JSONDecodeError:
-            pass
-    return cleaned
+    return extract_json(
+        text,
+        error_type=MergeResponseParseError,
+        empty_msg="empty model response",
+        lenient=True,
+    )
 
 
 def _promote_single(block: IdeaBlock, *, confidence: float) -> IdeaBlock:

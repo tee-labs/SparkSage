@@ -33,7 +33,7 @@ import logging
 from dataclasses import dataclass
 
 from sparksage.embed.indexer import BlockEmbedder
-from sparksage.embed.store import SearchHit, VectorStore
+from sparksage.embed.store import SearchHit, VectorStore, dot
 from sparksage.retrieve.fusion import reciprocal_rank_fusion
 from sparksage.retrieve.lexical import LexicalRetriever, NullLexicalRetriever
 from sparksage.retrieve.models import RetrievalFilter, RetrievalResult, RetrievedChunk
@@ -494,11 +494,6 @@ def _replaced(chunk: RetrievedChunk, *, rank: int) -> RetrievedChunk:
     return replace(chunk, rank=rank)
 
 
-def _dot(a: list[float], b: list[float]) -> float:
-    """Pure-Python dot product (vectors are L2-normalized, so cosine)."""
-    return sum(x * y for x, y in zip(a, b, strict=True))
-
-
 def _dedup_chunks_by_embedding(
     chunks: list[RetrievedChunk],
     threshold: float,
@@ -520,7 +515,7 @@ def _dedup_chunks_by_embedding(
         if vec is None:
             kept.append(chunk)
             continue
-        if any(_dot(vec, kv) >= threshold for kv in kept_vecs):
+        if any(dot(vec, kv) >= threshold for kv in kept_vecs):
             continue
         kept.append(chunk)
         kept_vecs.append(list(vec))

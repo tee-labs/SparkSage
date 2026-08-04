@@ -94,10 +94,6 @@ from sparksage.schema.source import SourceRef
 
 _logger = logging.getLogger(__name__)
 
-#: Type alias for the agent progress callback (kept here to avoid importing the
-#: agent package's private name at the module top).
-AgentProgressCallback = Callable[..., None]
-
 
 @dataclass
 class IngestResult:

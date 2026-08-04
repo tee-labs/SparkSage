@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
@@ -46,13 +45,12 @@ from typing import Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from sparksage.generator.client import JSON_RESPONSE_FORMAT, LLMClient
+from sparksage.llmutil import extract_json as _extract_json
 from sparksage.query.schema import CoercionError
 from sparksage.retrieve.models import RetrievalFilter
 from sparksage.schema.enums import Tag
 
 _logger = logging.getLogger(__name__)
-
-_FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*|\s*```\s*$", re.MULTILINE)
 
 
 class SelfQueryError(RuntimeError):
@@ -132,29 +130,7 @@ def extract_json(text: str) -> str:
     surrounding prose (extracted via outermost brace matching). Raises
     :class:`CoercionError` on an empty or unparseable response.
     """
-    cleaned = text.strip()
-    if not cleaned:
-        raise CoercionError("empty model response")
-
-    cleaned = _FENCE_RE.sub("", cleaned).strip()
-
-    try:
-        json.loads(cleaned)
-        return cleaned
-    except json.JSONDecodeError:
-        pass
-
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        candidate = cleaned[start : end + 1]
-        try:
-            json.loads(candidate)
-            return candidate
-        except json.JSONDecodeError:
-            pass
-
-    raise CoercionError("model response was not valid JSON")
+    return _extract_json(text, error_type=CoercionError)
 
 
 def parse_raw_self_query(data: object) -> RawSelfQuery:

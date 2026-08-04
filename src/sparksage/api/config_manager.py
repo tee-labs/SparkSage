@@ -216,7 +216,6 @@ def _apply_updates(text: str, updates: dict[str, str]) -> str:
     pattern = re.compile(
         r"^(?P<indent>\s*)(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=.*$"
     )
-    appended_header = False
     for raw in text.splitlines():
         m = pattern.match(raw)
         if m and m.group("key") in updates:
@@ -232,11 +231,9 @@ def _apply_updates(text: str, updates: dict[str, str]) -> str:
         if out_lines and out_lines[-1].strip() != "":
             out_lines.append("")
         elif not out_lines:
-            appended_header = True
             out_lines.append("# SparkSage configuration (managed by the WEB UI).")
         for key in missing:
             out_lines.append(f"{key}={_format_value(updates[key])}")
-    _ = appended_header
     return "\n".join(out_lines) + ("\n" if out_lines else "")
 
 

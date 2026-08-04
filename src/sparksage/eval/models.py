@@ -49,10 +49,6 @@ class QACaseResult:
 
     Attributes
     ----------
-    query:
-        The evaluated query.
-    generated_text:
-        The answer text the engine surfaced (or the abstention reply).
     abstained:
         Whether the reader abstained.
     correctness:
@@ -62,26 +58,12 @@ class QACaseResult:
         The reader's faithfulness score, when known; else ``None``.
     confidence:
         The effective confidence the reader reported.
-    retrieved_ids:
-        Block ids the engine retrieved (best first), capped at the eval ``k``.
-    relevant_block_ids:
-        The case's ground-truth ids.
-    hit:
-        Whether any relevant block appeared in the retrieved top-``k``.
-    tags:
-        Forwarded from the case.
     """
 
-    query: str
-    generated_text: str = ""
     abstained: bool = False
     correctness: float = 0.0
     faithfulness: float | None = None
     confidence: float = 0.0
-    retrieved_ids: list[str] = field(default_factory=list)
-    relevant_block_ids: set[str] = field(default_factory=set)
-    hit: bool = False
-    tags: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -115,11 +97,6 @@ class QAEvalReport:
     abstention_rate: float = 0.0
     retrieval: RetrievalMetrics = field(default_factory=RetrievalMetrics)
     results: list[QACaseResult] = field(default_factory=list)
-
-    @property
-    def correctness(self) -> float:
-        """Alias for :attr:`mean_correctness` (the headline QA metric)."""
-        return self.mean_correctness
 
 
 __all__ = [
