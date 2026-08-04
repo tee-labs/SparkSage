@@ -87,6 +87,7 @@ from sparksage.query.refiner import QueryRefiner
 from sparksage.reader.orchestrator import Reader
 from sparksage.retrieve.grader import RetrievalGrader
 from sparksage.retrieve.models import RetrievalFilter
+from sparksage.retrieve.reranker import Reranker
 from sparksage.schema.ideablock import IdeaBlock
 from sparksage.schema.source import SourceRef
 
@@ -137,6 +138,12 @@ class QAService:
         blocks + the dense + lexical indexes. Defaults to a fresh ``"default"``
         KB. Additional KBs can be created at runtime via
         :meth:`create_knowledge_base`.
+    reranker:
+        Optional :class:`Reranker` forwarded to every :class:`KnowledgeBase`
+        aggregate's :class:`Retriever`. When ``None`` (default) retrieval runs
+        without re-ranking regardless of ``use_rerank`` -- wire e.g. a
+        :class:`~sparksage.retrieve.backends.CrossEncoderReranker` to make
+        ``use_rerank=True`` actually re-order the candidate pool.
     kb_store:
         Optional :class:`KnowledgeBaseStore` registry for multi-tenant KB
         metadata. Defaults to an :class:`InMemoryKnowledgeBaseStore` so KB CRUD
@@ -187,6 +194,7 @@ class QAService:
         *,
         query_processor: QueryProcessor | None = None,
         kb: KnowledgeBase | None = None,
+        reranker: Reranker | None = None,
         kb_store: KnowledgeBaseStore | None = None,
         feedback_store: FeedbackStore | None = None,
         state_store: KbStateStore | None = None,
@@ -206,6 +214,7 @@ class QAService:
         self._embedder = embedder
         self._reader = reader
         self._query_processor = query_processor
+        self._reranker: Reranker | None = reranker
         self._kb_store: KnowledgeBaseStore = (
             kb_store if kb_store is not None else InMemoryKnowledgeBaseStore()
         )
@@ -256,6 +265,7 @@ class QAService:
                     info=KnowledgeBaseInfo(name="default"),
                     embedder=embedder,
                     document_store=self._service.document_store,
+                    reranker=self._reranker,
                     state_store=self._state_store,
                 )
                 self._register_kb(default_kb)
@@ -352,6 +362,7 @@ class QAService:
                 info=info,
                 embedder=self._embedder,
                 document_store=self._service.document_store,
+                reranker=self._reranker,
                 state_store=self._state_store,
             )
             self._kbs[kb.kb_id] = kb
@@ -468,6 +479,7 @@ class QAService:
             info=info,
             embedder=self._embedder,
             document_store=self._service.document_store,
+            reranker=self._reranker,
             state_store=self._state_store,
         )
         self._register_kb(kb)

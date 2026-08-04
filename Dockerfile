@@ -56,6 +56,14 @@
 #   SPARKSAGE_FEEDBACK_STORE  SQLite file for feedback (overrides data dir)
 #   SPARKSAGE_AUTO_TAG_EXTRACTOR  Auto-tag algorithm: rake|tfidf|textrank
 #   SPARKSAGE_TAGS_ZH         Use jieba for CJK segmentation when truthy
+#   SPARKSAGE_RERANKER        Wire a cross-encoder reranker into every KB
+#                             (default off; on + use_rerank=true re-orders the
+#                             candidate pool. The [rerank] extra is preinstalled)
+#   SPARKSAGE_RERANKER_MODEL  Cross-encoder checkpoint (default
+#                             cross-encoder/ms-marco-MiniLM-L-6-v2; use
+#                             BAAI/bge-reranker-v2-m3 for CJK / multilingual)
+#   SPARKSAGE_RERANKER_DEVICE Torch device: cpu | cuda | ...
+#   SPARKSAGE_RERANKER_MAX_LENGTH  Per-pair max tokens (default: provider)
 
 ARG PYTHON_VERSION=3.11
 # Full QA pipeline. Override with --build-arg SPARKSAGE_EXTRAS=... for a slim or
