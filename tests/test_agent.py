@@ -314,7 +314,7 @@ class TestAgenticQAEngine:
                 _action(ActionType.SYNTHESIZE),
             ]
         )
-        engine = AgenticQAEngine(ctrl, retriever, reader, max_iterations=5)
+        engine = AgenticQAEngine(ctrl, retriever, reader, max_iterations=5, max_stale_steps=0)
         result = engine.ask("compare alpha beta and gamma")
         assert result.iterations == 2
         assert len(result.steps) == 3  # seed + 2 controller retrievals

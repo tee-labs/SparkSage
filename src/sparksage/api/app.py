@@ -106,6 +106,13 @@ ENV_AGENT_REFLECTION = "SPARKSAGE_AGENT_REFLECTION"
 ENV_AGENT_STEP_MIN_RELEVANCE = "SPARKSAGE_AGENT_STEP_MIN_RELEVANCE"
 #: Cap on per-step refine + re-retrieve rounds inside the agent loop.
 ENV_AGENT_STEP_MAX_REFINE = "SPARKSAGE_AGENT_STEP_MAX_REFINE"
+#: Whether the agentic loop auto-wires the HyDE query expander. ``off`` disables
+#: so each per-step retrieval is a single search (no LLM expansion call) -- the
+#: biggest latency lever when the corpus already covers the query vocabulary.
+ENV_AGENT_EXPANDER = "SPARKSAGE_AGENT_EXPANDER"
+#: Max consecutive controller-decided steps that add zero new evidence before
+#: the loop terminates early (the stall detector). ``0`` disables it.
+ENV_AGENT_MAX_STALE_STEPS = "SPARKSAGE_AGENT_MAX_STALE_STEPS"
 
 # Durable persistence (one directory for every SQLite file). When set, every
 # default service wires durable backends so a Docker restart loses nothing:
@@ -143,6 +150,12 @@ DEFAULT_AGENT_REFLECTION = True
 DEFAULT_AGENT_STEP_MIN_RELEVANCE = 0.5
 #: Default cap on per-step refine + re-retrieve rounds inside the agent loop.
 DEFAULT_AGENT_STEP_MAX_REFINE = 1
+#: Whether the agent loop auto-wires the HyDE query expander (default on, but
+#: disabling is the biggest latency lever for short-query / well-covered corpora).
+DEFAULT_AGENT_EXPANDER = True
+#: Default stall-detector cap: after this many consecutive steps add zero new
+#: evidence the loop terminates early instead of thrashing a barren corpus.
+DEFAULT_AGENT_MAX_STALE_STEPS = 2
 #: Default file names for each durable store when only ``SPARKSAGE_DATA_DIR``
 #: is set (each is a SQLite database; the document store table is separate).
 DEFAULT_DOC_DB_NAME = "sparksage.docs.db"
@@ -451,6 +464,15 @@ def build_qa_service():
     ``SPARKSAGE_EMBEDDING_BASE_URL`` Embedding base URL (falls back to LLM base URL)
     ``SPARKSAGE_EMBEDDING_MODEL``    Embedding model (default ``text-embedding-3-small``)
     ``SPARKSAGE_AGENT_MAX_ITERATIONS``  Cap on agent-mode retrievals (default ``4``)
+    ``SPARKSAGE_AGENT_REFLECTION``   Auto-wire grader + refiner (default ``on``)
+    ``SPARKSAGE_AGENT_EXPANDER``     Auto-wire HyDE expander (default ``on``; ``off``
+                                      is the biggest latency lever -- saves ~10-15s
+                                      per agent step)
+    ``SPARKSAGE_AGENT_STEP_MIN_RELEVANCE``  Per-step relevance floor (default ``0.5``)
+    ``SPARKSAGE_AGENT_STEP_MAX_REFINE``     Per-step refine rounds (default ``1``)
+    ``SPARKSAGE_AGENT_MAX_STALE_STEPS``     Stall detector: consecutive steps adding
+                                      zero new evidence before early termination
+                                      (default ``2``; ``0`` disables)
     ``SPARKSAGE_DATA_DIR``           Unified data dir for durable SQLite stores
                                       (documents + KB metadata + KB state + feedback).
                                       Set this once and a restart loses nothing.
@@ -549,14 +571,18 @@ def build_qa_service():
 
         agent_controller = LLMAgentController(llm_client, model=model)
         # Per-step reflection components: the grader + refiner drive the
-        # CRAG / Self-RAG ``ISREL`` gate (low-relevance -> refine -> re-retrieve),
-        # the HyDE expander lands short queries in the trusted-answer semantic
-        # space. All three are auto-wired so the agent loop is not an "island"
-        # divorced from the right-half components -- the biggest quality lever
-        # after chunking strategy. Disable with SPARKSAGE_AGENT_REFLECTION=off.
+        # CRAG / Self-RAG ``ISREL`` gate (low-relevance -> refine -> re-retrieve).
+        # All are auto-wired so the agent loop is not an "island" divorced from
+        # the right-half components -- the biggest quality lever after chunking
+        # strategy. Disable with SPARKSAGE_AGENT_REFLECTION=off.
         if _env_bool(ENV_AGENT_REFLECTION, DEFAULT_AGENT_REFLECTION):
             agent_grader = LLMRetrievalGrader(llm_client, model=model)
             agent_refiner = LLMQueryRefiner(llm_client, model=model)
+        # The HyDE expander lands short queries in the trusted-answer semantic
+        # space, but each per-step expansion is an extra LLM call. Disable with
+        # SPARKSAGE_AGENT_EXPANDER=off when latency matters more than recall
+        # (the biggest single-call latency lever -- saves ~10-15s per step).
+        if _env_bool(ENV_AGENT_EXPANDER, DEFAULT_AGENT_EXPANDER):
             agent_expander = HyDEExpander(llm_client, model=model)
     else:
         reader = Reader(generator=_DummyAnswerGenerator())
@@ -579,6 +605,9 @@ def build_qa_service():
         ),
         agent_step_max_refine=_env_int(
             ENV_AGENT_STEP_MAX_REFINE, DEFAULT_AGENT_STEP_MAX_REFINE
+        ),
+        agent_max_stale_steps=_env_int(
+            ENV_AGENT_MAX_STALE_STEPS, DEFAULT_AGENT_MAX_STALE_STEPS
         ),
         kb_store=kb_store,
         state_store=state_store,

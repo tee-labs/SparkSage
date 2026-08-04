@@ -199,6 +199,7 @@ class QAService:
         agent_step_min_relevance: float | None = None,
         agent_step_max_refine: int | None = None,
         agent_expander_n_variants: int | None = None,
+        agent_max_stale_steps: int | None = None,
         ingest_jobs: IngestJobManager | None = None,
     ) -> None:
         self._service = service
@@ -227,6 +228,7 @@ class QAService:
         self._agent_step_min_relevance = agent_step_min_relevance
         self._agent_step_max_refine = agent_step_max_refine
         self._agent_expander_n_variants = agent_expander_n_variants
+        self._agent_max_stale_steps = agent_max_stale_steps
 
         # Async ingest job registry. A long ingest (minutes on a large doc)
         # must not hold open an HTTP connection; ``submit_ingest`` returns a
@@ -415,6 +417,8 @@ class QAService:
                 kwargs["step_max_refine"] = self._agent_step_max_refine
             if self._agent_expander_n_variants is not None:
                 kwargs["expander_n_variants"] = self._agent_expander_n_variants
+            if self._agent_max_stale_steps is not None:
+                kwargs["max_stale_steps"] = self._agent_max_stale_steps
             self._agent_engines[kb_id] = AgenticQAEngine(
                 controller=self._agent_controller,
                 retriever=self._kbs[kb_id].retriever,
