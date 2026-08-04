@@ -19,6 +19,7 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from sparksage.generator.client import JSON_RESPONSE_FORMAT, LLMClient
@@ -41,8 +42,19 @@ _FENCE_RE = re.compile(r"^\s*```(?:json|JSON)?\s*|\s*```\s*$", re.MULTILINE)
 #: and each segment is sent as its own generation request. This keeps the LLM's
 #: JSON output small enough that it never gets truncated mid-stream by the
 #: provider's output-token cap -- the cause of the ``Unprocessable Entity``
-#: ingest failures on large uploads. Tune via ``max_input_chars=``.
-DEFAULT_MAX_INPUT_CHARS = 8000
+#: ingest failures on large uploads. Modern long-context models (128k+) handle
+#: this budget comfortably (Chinese 12000 chars ~= 6-8k tokens), so it is tuned
+#: to minimize segmentation rather than to fit small-context legacy models.
+#: Tune via ``max_input_chars=``.
+DEFAULT_MAX_INPUT_CHARS = 12000
+
+#: Default number of segments generated concurrently. ``1`` keeps the legacy
+#: serial behaviour (deterministic, ordered response consumption for the
+#: stateful :class:`FakeLLMClient` in tests). Production wiring raises this via
+#: ``SPARKSAGE_GENERATE_MAX_WORKERS`` so a multi-segment large document is
+#: chunked into parallel LLM calls instead of a single serial queue -- the
+#: single biggest latency win on big uploads.
+DEFAULT_SEGMENT_WORKERS = 1
 
 #: Separator hierarchy for :func:`_split_text_segments` (most semantic first).
 #: The empty string is the final "split on characters" fallback so the size
@@ -91,6 +103,93 @@ def _extract_json(text: str) -> str:
             pass
 
     return cleaned
+
+
+def _repair_json(text: str) -> str:
+    """Best-effort repair of truncated / loosely-formatted JSON.
+
+    Removes trailing commas before closing brackets (a common artefact of a
+    model emitting a dangling comma before its output was cut) and auto-closes
+    any unclosed objects/arrays. String state is tracked so braces inside
+    string literals are not counted. Used to recover from provider output-token
+    truncation so a near-complete response is not wasted.
+    """
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+    stack: list[str] = []
+    in_str = False
+    escape = False
+    for ch in text:
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                stack.append("}")
+            elif ch == "[":
+                stack.append("]")
+            elif ch in "}]":
+                if stack and stack[-1] == ch:
+                    stack.pop()
+    return text + "".join(reversed(stack))
+
+
+def _salvage_blocks_json(text: str) -> str | None:
+    """Recover complete blocks from a truncated ``{"blocks": [...]}`` response.
+
+    When a provider's output-token cap cuts the response mid-block, the whole
+    segment would otherwise be dropped (``segment i/N failed, skipping``). This
+    scans the ``blocks`` array and keeps only the top-level ``{...}`` objects
+    that fully closed before the cut, returning a well-formed
+    ``{"blocks": [...]}`` payload. Returns ``None`` if the response is not
+    blocks-shaped or no complete block survived.
+    """
+    key = '"blocks"'
+    idx = text.find(key)
+    if idx == -1:
+        return None
+    arr_start = text.find("[", idx)
+    if arr_start == -1:
+        return None
+    blocks_text: list[str] = []
+    depth = 0
+    obj_start = -1
+    in_str = False
+    escape = False
+    i = arr_start + 1
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                if depth == 0:
+                    obj_start = i
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0 and obj_start != -1:
+                    blocks_text.append(text[obj_start : i + 1])
+                    obj_start = -1
+            elif ch == "]" and depth == 0:
+                break
+        i += 1
+    if not blocks_text:
+        return None
+    return '{"blocks": [' + ",".join(blocks_text) + "]}"
 
 
 def _split_text_segments(text: str, max_chars: int) -> list[str]:
@@ -192,6 +291,15 @@ class IdeaBlockGenerator:
         is never truncated by the provider's output-token cap. ``0`` or negative
         disables splitting (one request regardless of size -- the legacy
         behaviour, prone to truncation on large uploads).
+    max_workers:
+        Number of segments generated concurrently. ``1`` (default) keeps the
+        legacy serial behaviour so the stateful :class:`FakeLLMClient` used in
+        tests consumes its scripted responses in order. Set higher (e.g. via
+        ``SPARKSAGE_GENERATE_MAX_WORKERS`` in production wiring) so a multi-
+        segment large document fans out into parallel LLM calls instead of a
+        single serial queue -- the single biggest latency win on big uploads.
+        Concurrency is only used when there is more than one segment; a single
+        segment always runs inline.
     """
 
     def __init__(
@@ -204,6 +312,7 @@ class IdeaBlockGenerator:
         strict: bool = False,
         use_json_mode: bool = True,
         max_input_chars: int = DEFAULT_MAX_INPUT_CHARS,
+        max_workers: int = DEFAULT_SEGMENT_WORKERS,
     ) -> None:
         self._client = client
         self._model = model
@@ -212,6 +321,7 @@ class IdeaBlockGenerator:
         self._strict = strict
         self._use_json_mode = use_json_mode
         self._max_input_chars = int(max_input_chars)
+        self._max_workers = max(1, int(max_workers))
 
     def generate(
         self,
@@ -261,39 +371,40 @@ class IdeaBlockGenerator:
 
         _logger.debug(
             "generating blocks: text_len=%d segments=%d max_blocks=%s lang=%s "
-            "json_mode=%s",
+            "json_mode=%s max_workers=%d",
             len(str(text)),
             len(segments),
             max_blocks,
             lang,
             self._use_json_mode,
+            self._max_workers,
         )
 
         all_blocks: list[IdeaBlock] = []
         stats = GenerationStats()
-        for i, segment in enumerate(segments):
-            try:
-                seg_blocks, seg_stats = self._generate_one_segment(
-                    segment,
-                    source=source,
-                    language=lang,
-                    max_blocks=per_segment_max,
-                )
-            except (ResponseParseError, EmptyResponseError, GenerationError) as exc:
+        segment_results = self._run_segments(
+            segments,
+            source=source,
+            language=lang,
+            per_segment_max=per_segment_max,
+        )
+        for i, result in enumerate(segment_results):
+            if isinstance(result, BaseException):
                 # A single-segment run (or strict mode) surfaces the error to
                 # preserve the generation contract. A multi-segment run in
                 # non-strict mode is resilient: one bad segment is logged and
                 # recorded rather than wasting the whole large-doc batch.
                 if single or self._strict:
-                    raise
+                    raise result
                 _logger.warning(
                     "segment %d/%d failed, skipping: %s",
                     i + 1,
                     len(segments),
-                    exc,
+                    result,
                 )
-                stats.errors.append(f"segment {i + 1}/{len(segments)}: {exc}")
+                stats.errors.append(f"segment {i + 1}/{len(segments)}: {result}")
                 continue
+            seg_blocks, seg_stats = result
             all_blocks.extend(seg_blocks)
             stats.raw_block_count += seg_stats.raw_block_count
             stats.emitted += seg_stats.emitted
@@ -319,6 +430,71 @@ class IdeaBlockGenerator:
     # ------------------------------------------------------------------ #
     # internals
     # ------------------------------------------------------------------ #
+    def _run_segments(
+        self,
+        segments: list[str],
+        *,
+        source: SourceRef | None,
+        language: str,
+        per_segment_max: int | None,
+    ) -> list:
+        """Run one LLM generation per segment, returning results in order.
+
+        Each element is either a ``(blocks, stats)`` tuple or the
+        :class:`Exception` that segment raised (a
+        :class:`ResponseParseError` / :class:`EmptyResponseError` /
+        :class:`GenerationError`); the caller applies the strict / resilient
+        policy uniformly. Single-segment or serial runs (``max_workers <= 1``)
+        execute inline so the stateful :class:`FakeLLMClient` used in tests
+        consumes its scripted responses in deterministic order. A multi-segment
+        run with ``max_workers > 1`` fans the segments out across a thread pool
+        -- the segments are independent HTTP requests, so running them
+        concurrently collapses an N-segment serial queue into roughly one round
+        (the single biggest latency win on large uploads). Results are gathered
+        in submission order so emitted blocks stay ordered.
+        """
+        n = len(segments)
+        parallel = n > 1 and self._max_workers > 1
+        if not parallel:
+            results = []
+            for segment in segments:
+                try:
+                    results.append(
+                        self._generate_one_segment(
+                            segment,
+                            source=source,
+                            language=language,
+                            max_blocks=per_segment_max,
+                        )
+                    )
+                except (ResponseParseError, EmptyResponseError, GenerationError) as exc:
+                    results.append(exc)
+            return results
+        workers = min(self._max_workers, n)
+        results: list = [None] * n
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_to_idx = {
+                pool.submit(
+                    self._generate_one_segment,
+                    segment,
+                    source=source,
+                    language=language,
+                    max_blocks=per_segment_max,
+                ): idx
+                for idx, segment in enumerate(segments)
+            }
+            for future in future_to_idx:
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except (
+                    ResponseParseError,
+                    EmptyResponseError,
+                    GenerationError,
+                ) as exc:
+                    results[idx] = exc
+        return results
+
     def _generate_one_segment(
         self,
         text: str,
@@ -361,15 +537,52 @@ class IdeaBlockGenerator:
         try:
             data = json.loads(payload)
         except json.JSONDecodeError as exc:
-            raise ResponseParseError(
-                f"model response was not valid JSON: {exc.msg} "
-                f"(response_len={len(response_text)}; a large/short response "
-                "may have been truncated by the provider's output-token cap)"
-            ) from exc
+            data = self._recover_json(response_text, payload, exc)
         try:
             return parse_raw_result(data)
         except CoercionError as exc:
             raise ResponseParseError(str(exc)) from exc
+
+    def _recover_json(
+        self,
+        response_text: str,
+        payload: str,
+        exc: json.JSONDecodeError,
+    ) -> dict:
+        """Recover parseable JSON from a truncated provider response.
+
+        Two complementary paths address provider output-token truncation (the
+        cause of the ``Expecting property name enclosed in double quotes``
+        mid-key failures): first repair dangling commas / unclosed braces and
+        retry; if that still fails, salvage the complete blocks before the cut
+        so a near-complete segment is indexed rather than dropped entirely.
+        Raises :class:`ResponseParseError` if neither path yields valid JSON.
+        """
+        repaired = _repair_json(payload)
+        if repaired != payload:
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
+        salvaged = _salvage_blocks_json(response_text)
+        if salvaged is not None:
+            try:
+                data = json.loads(salvaged)
+            except json.JSONDecodeError:
+                data = None
+            if data is not None:
+                _logger.info(
+                    "recovered %d complete blocks from truncated response "
+                    "(response_len=%d)",
+                    len(data.get("blocks", [])) if isinstance(data, dict) else 0,
+                    len(response_text),
+                )
+                return data
+        raise ResponseParseError(
+            f"model response was not valid JSON: {exc.msg} "
+            f"(response_len={len(response_text)}; a large/short response "
+            "may have been truncated by the provider's output-token cap)"
+        ) from exc
 
     def _coerce_all(
         self,

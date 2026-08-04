@@ -14,6 +14,25 @@ from typing import Any, Protocol, runtime_checkable
 #: Request JSON-mode structured output from providers that support it.
 JSON_RESPONSE_FORMAT: dict[str, str] = {"type": "json_object"}
 
+#: Default per-request timeout in seconds. ``None`` (no ceiling) lets a hung
+#: provider connection block forever; a finite default bounds a stuck stream so
+#: the caller fails fast instead of hanging the whole ingest. Overridable via
+#: the client ``timeout=`` kwarg or ``SPARKSAGE_LLM_TIMEOUT``.
+DEFAULT_TIMEOUT: float = 120.0
+
+#: Default output-token cap forwarded to the provider when the caller does not
+#: pass one explicitly. Some OpenAI-compatible endpoints (e.g. BigModel/GLM,
+#: vLLM, Ollama) default to a low ``max_output_tokens`` (2k-4k), which silently
+#: truncates long JSON generations mid-key and yields an unparseable response
+#: (the ``Expecting property name enclosed in double quotes`` ingest failures).
+#: A generous default keeps the full response intact; set explicitly via the
+#: client ``max_tokens=`` kwarg or ``SPARKSAGE_MAX_TOKENS`` to fit a given model.
+DEFAULT_MAX_TOKENS: int | None = None
+
+#: Sentinel distinguishing "argument not supplied" (use the client default)
+#: from ``max_tokens=None`` (explicitly disable the cap for one call).
+_UNSET: Any = object()
+
 
 @runtime_checkable
 class LLMClient(Protocol):
@@ -52,6 +71,14 @@ class OpenAICompatibleClient:
 
     The ``openai`` package is an *optional* dependency -- install it with
     ``pip install 'sparksage[llm]'``.
+
+    ``max_tokens`` (constructor or per-call ``complete(..., max_tokens=...)``)
+    forwards an explicit output-token cap to the provider. Without it, some
+    OpenAI-compatible endpoints default to a small ``max_output_tokens`` and
+    silently truncate long JSON mid-key, producing unparseable responses; set
+    it (or ``SPARKSAGE_MAX_TOKENS`` in the API wiring) so the full generation
+    is returned. ``timeout`` defaults to :data:`DEFAULT_TIMEOUT` so a stuck
+    connection fails fast instead of hanging.
     """
 
     def __init__(
@@ -59,8 +86,9 @@ class OpenAICompatibleClient:
         base_url: str | None = None,
         api_key: str | None = None,
         model: str = "gpt-4o-mini",
-        timeout: float | None = None,
+        timeout: float | None = DEFAULT_TIMEOUT,
         stream: bool = True,
+        max_tokens: int | None = DEFAULT_MAX_TOKENS,
         **client_kwargs: Any,
     ) -> None:
         try:
@@ -75,6 +103,7 @@ class OpenAICompatibleClient:
         )
         self._model = model
         self._stream = stream
+        self._max_tokens = max_tokens
 
     def complete(
         self,
@@ -83,9 +112,12 @@ class OpenAICompatibleClient:
         model: str | None = None,
         temperature: float = 0.2,
         response_format: dict[str, str] | None = None,
+        max_tokens: int | None = _UNSET,
         **kwargs: Any,
     ) -> str:
         stream = bool(kwargs.pop("stream", self._stream))
+        if max_tokens is _UNSET:
+            max_tokens = self._max_tokens
         request: dict[str, Any] = {
             "model": model or self._model,
             "messages": messages,
@@ -94,6 +126,8 @@ class OpenAICompatibleClient:
         }
         if response_format is not None:
             request["response_format"] = response_format
+        if max_tokens is not None:
+            request["max_tokens"] = max_tokens
         request.update(kwargs)
         response = self._client.chat.completions.create(**request)
         if stream:

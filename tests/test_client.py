@@ -120,11 +120,83 @@ class TestStreaming:
         client.complete(_MSG, response_format=JSON_RESPONSE_FORMAT)
         assert create.calls[-1]["response_format"] == {"type": "json_object"}
 
+    def test_max_tokens_constructor_forwarded(self, monkeypatch):
+        create, _ = _install_fake_openapi_with_stream(monkeypatch)
+        from sparksage.generator.client import OpenAICompatibleClient
+
+        client = OpenAICompatibleClient(api_key="k", max_tokens=2048)
+        client.complete(_MSG)
+        assert create.calls[-1]["max_tokens"] == 2048
+
+    def test_max_tokens_omitted_when_not_set(self, monkeypatch):
+        create, _ = _install_fake_openapi_with_stream(monkeypatch)
+        from sparksage.generator.client import OpenAICompatibleClient
+
+        client = OpenAICompatibleClient(api_key="k")
+        client.complete(_MSG)
+        assert "max_tokens" not in create.calls[-1]
+
+    def test_per_call_max_tokens_override(self, monkeypatch):
+        create, _ = _install_fake_openapi_with_stream(monkeypatch)
+        from sparksage.generator.client import OpenAICompatibleClient
+
+        client = OpenAICompatibleClient(api_key="k", max_tokens=2048)
+        client.complete(_MSG, max_tokens=512)
+        assert create.calls[-1]["max_tokens"] == 512
+
+    def test_per_call_max_tokens_none_disables(self, monkeypatch):
+        create, _ = _install_fake_openapi_with_stream(monkeypatch)
+        from sparksage.generator.client import OpenAICompatibleClient
+
+        client = OpenAICompatibleClient(api_key="k", max_tokens=2048)
+        client.complete(_MSG, max_tokens=None)
+        assert "max_tokens" not in create.calls[-1]
+
+    def test_default_timeout_is_finite(self, monkeypatch):
+        from sparksage.generator.client import DEFAULT_TIMEOUT, OpenAICompatibleClient
+
+        assert DEFAULT_TIMEOUT is not None
+        captured = _capture_init_kwargs(monkeypatch)
+        OpenAICompatibleClient(api_key="k")
+        # The finite default propagates so a stuck connection fails fast.
+        assert captured["timeout"] == DEFAULT_TIMEOUT
+
+    def test_timeout_forwarded_to_sdk(self, monkeypatch):
+        captured = _capture_init_kwargs(monkeypatch)
+        from sparksage.generator.client import OpenAICompatibleClient
+
+        OpenAICompatibleClient(api_key="k", timeout=42.0)
+        assert captured["timeout"] == 42.0
+
+    def test_timeout_disabled(self, monkeypatch):
+        captured = _capture_init_kwargs(monkeypatch)
+        from sparksage.generator.client import OpenAICompatibleClient
+
+        OpenAICompatibleClient(api_key="k", timeout=None)
+        assert captured["timeout"] is None
+
 
 def _install_fake_openapi_with_stream(monkeypatch):
     return _install_fake_openai(
         monkeypatch, stream_chunks=[_chunk("ok")], nonstream_message="ok"
     )
+
+
+def _capture_init_kwargs(monkeypatch) -> dict[str, Any]:
+    """Install a fake ``openai`` module that captures the OpenAI() init kwargs."""
+    captured: dict[str, Any] = {}
+
+    class _OpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(create=_FakeCreate([], "x"))
+            )
+
+    module = types.ModuleType("openai")
+    module.OpenAI = _OpenAI
+    monkeypatch.setitem(sys.modules, "openai", module)
+    return captured
 
 
 class TestWiring:

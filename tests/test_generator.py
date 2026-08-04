@@ -8,6 +8,9 @@ JSON-extraction, enum-mapping and strict-coercion logic.
 from __future__ import annotations
 
 import json
+import re
+import threading
+import time
 
 import pytest
 
@@ -22,7 +25,10 @@ from sparksage.generator import (
 )
 from sparksage.generator.generator import (
     DEFAULT_MAX_INPUT_CHARS,
+    DEFAULT_SEGMENT_WORKERS,
     _extract_json,
+    _repair_json,
+    _salvage_blocks_json,
     _split_text_segments,
 )
 from sparksage.generator.prompts import build_messages, system_prompt
@@ -484,3 +490,193 @@ class TestSegmentation:
         gen = IdeaBlockGenerator(FakeLLMClient(responses=[good]), max_input_chars=1000)
         blocks = gen.generate(big, max_blocks=3)
         assert len(blocks) == 3
+
+
+class TestJsonRepairHelpers:
+    """The truncation self-healing path: repair dangling commas / unclosed
+    braces and salvage the complete blocks before the cut so a provider
+    output-token cap no longer drops a whole segment."""
+
+    def test_repair_removes_trailing_comma_in_object(self):
+        assert json.loads(_repair_json('{"a": 1,}')) == {"a": 1}
+
+    def test_repair_removes_trailing_comma_in_array(self):
+        assert json.loads(_repair_json('{"blocks": [1, 2,]}')) == {"blocks": [1, 2]}
+
+    def test_repair_closes_unclosed_object(self):
+        assert json.loads(_repair_json('{"a": 1')) == {"a": 1}
+
+    def test_repair_closes_unclosed_nested_structures(self):
+        assert json.loads(_repair_json('{"a": [1, 2')) == {"a": [1, 2]}
+
+    def test_repair_ignores_braces_inside_string_literals(self):
+        out = _repair_json('{"a": "x{y"')
+        assert json.loads(out) == {"a": "x{y"}
+
+    def test_repair_handles_escaped_quotes_in_strings(self):
+        out = _repair_json('{"a": "x\\"y"')
+        assert json.loads(out) == {"a": 'x"y'}
+
+    def test_repair_already_valid_is_unchanged(self):
+        assert _repair_json('{"a": 1}') == '{"a": 1}'
+
+    def test_salvage_recovers_complete_blocks_before_cut(self):
+        text = (
+            "prefix {\"blocks\": ["
+            '{"name": "a", "critical_question": "q?", "trusted_answer": "x."}, '
+            '{"name": "b", "critical_question": "r?", "trusted_answer": "y."}, '
+            '{"name": "cut", "critical_question": "zz'
+        )
+        data = json.loads(_salvage_blocks_json(text))
+        assert [b["name"] for b in data["blocks"]] == ["a", "b"]
+
+    def test_salvage_returns_none_without_blocks_key(self):
+        assert _salvage_blocks_json('{"foo": [1') is None
+
+    def test_salvage_returns_none_when_no_complete_block(self):
+        assert _salvage_blocks_json('{"blocks": [{"name": "x"') is None
+
+
+class TestTruncationRecovery:
+    """End-to-end: a truncated model response recovers partial blocks instead
+    of raising ResponseParseError (the ``segment i/N failed`` skip)."""
+
+    def test_truncated_response_recovers_complete_blocks(self):
+        truncated = (
+            '{"blocks": ['
+            '{"name": "ok", "critical_question": "q?", "trusted_answer": "a."}, '
+            '{"name": "cut", "critical_question": "why'
+        )
+        gen = IdeaBlockGenerator(FakeLLMClient(responses=[truncated]))
+        blocks = gen.generate(SAMPLE_TEXT)
+        assert len(blocks) == 1
+        assert blocks[0].name == "ok"
+
+    def test_trailing_comma_repaired(self):
+        bad = (
+            '{"blocks": [{"name": "n", "critical_question": "q?", '
+            '"trusted_answer": "a.",}]}'
+        )
+        gen = IdeaBlockGenerator(FakeLLMClient(responses=[bad]))
+        assert len(gen.generate(SAMPLE_TEXT)) == 1
+
+    def test_unparseable_truncation_still_raises(self):
+        # Garbage with no recoverable structure still surfaces the parse error.
+        gen = IdeaBlockGenerator(FakeLLMClient(responses=["not json {{{ "]))
+        with pytest.raises(ResponseParseError):
+            gen.generate(SAMPLE_TEXT)
+
+
+class _ConcurrentProbeClient:
+    """LLMClient that records how many calls overlap in time.
+
+    Returns a one-block JSON per call. Used to prove that segments are fanned
+    out concurrently rather than run as a serial queue.
+    """
+
+    def __init__(self, delay: float = 0.1) -> None:
+        self._delay = delay
+        self._active = 0
+        self._max_active = 0
+        self._lock = threading.Lock()
+        self.calls = 0
+
+    def complete(self, messages, *, model=None, temperature=0.2,
+                 response_format=None, **kwargs):
+        with self._lock:
+            self.calls += 1
+            self._active += 1
+            self._max_active = max(self._max_active, self._active)
+        time.sleep(self._delay)
+        with self._lock:
+            self._active -= 1
+        return json.dumps(
+            {"blocks": [{"name": "n", "critical_question": "q?", "trusted_answer": "a."}]}
+        )
+
+
+class TestConcurrentSegments:
+    """Multi-segment generation fans out across a thread pool when
+    ``max_workers > 1``, collapsing an N-segment serial queue into ~one round."""
+
+    def _big_text(self):
+        return ("\n\n".join(["heading."] + ["a topic about routing. "] * 80)) * 6
+
+    def test_default_segment_workers_is_one(self):
+        assert DEFAULT_SEGMENT_WORKERS == 1
+
+    def test_serial_by_default_never_overlaps(self):
+        probe = _ConcurrentProbeClient(delay=0.05)
+        gen = IdeaBlockGenerator(probe, max_input_chars=1000)
+        gen.generate_with_stats(self._big_text())
+        assert probe.calls > 1
+        assert probe._max_active == 1
+
+    def test_segments_run_concurrently_with_max_workers(self):
+        probe = _ConcurrentProbeClient(delay=0.15)
+        gen = IdeaBlockGenerator(probe, max_input_chars=1000, max_workers=4)
+        blocks, stats = gen.generate_with_stats(self._big_text())
+        assert probe.calls > 1
+        assert probe._max_active > 1
+        assert stats.emitted == len(blocks)
+        assert stats.errors == []
+
+    def test_concurrent_results_preserve_segment_order(self):
+        # Build text whose segments each carry a unique ordered marker so the
+        # gathered block order can be checked against submission order.
+        sections = []
+        for i in range(8):
+            sections.append(f"SECTION-{i:02d}. " + ("routing detail. " * 43))
+        big = "\n\n".join(sections)
+
+        class _EchoSectionClient:
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, messages, *, model=None, temperature=0.2,
+                         response_format=None, **kwargs):
+                self.calls += 1
+                m = re.search(r"SECTION-(\d+)", messages[-1]["content"])
+                tag = m.group(1) if m else "??"
+                return json.dumps(
+                    {"blocks": [
+                        {"name": f"s{tag}", "critical_question": "q?",
+                         "trusted_answer": "a."}
+                    ]}
+                )
+
+        client = _EchoSectionClient()
+        gen = IdeaBlockGenerator(client, max_input_chars=1000, max_workers=4)
+        blocks = gen.generate(big)
+        names = [b.name for b in blocks]
+        # Results are gathered in submission order, so the section markers
+        # ascend even though completions arrived in nondeterministic order.
+        assert names == sorted(names, key=lambda n: int(n[1:]))
+        assert client.calls == len(blocks) == 8
+
+    def test_concurrent_resilient_to_one_bad_segment(self):
+        # One specific segment deterministically returns a truncated response;
+        # the others succeed. Resilience must hold under concurrency: the bad
+        # segment is recorded, not raised, and the good ones are indexed.
+        sections = []
+        for i in range(8):
+            sections.append(f"SECTION-{i:02d}. " + ("routing detail. " * 43))
+        big = "\n\n".join(sections)
+        good = json.dumps(
+            {"blocks": [{"name": "n", "critical_question": "q?", "trusted_answer": "a."}]}
+        )
+
+        class _FlakyBySectionClient:
+            def complete(self, messages, *, model=None, temperature=0.2,
+                         response_format=None, **kwargs):
+                m = re.search(r"SECTION-(\d+)", messages[-1]["content"])
+                if m and m.group(1) == "03":
+                    return '{"blocks": [{"name": "x", "critical_question": "q?'
+                return good
+
+        gen = IdeaBlockGenerator(
+            _FlakyBySectionClient(), max_input_chars=1000, max_workers=4
+        )
+        blocks, stats = gen.generate_with_stats(big)
+        assert len(blocks) == 7  # 8 segments minus the one bad segment
+        assert stats.errors

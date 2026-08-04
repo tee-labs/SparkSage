@@ -69,6 +69,19 @@ ENV_MODEL = "SPARKSAGE_MODEL"
 ENV_STREAM = "SPARKSAGE_STREAM"
 ENV_OPENAI_API_KEY = "OPENAI_API_KEY"
 ENV_OPENAI_BASE_URL = "OPENAI_BASE_URL"
+#: Output-token cap forwarded to the provider. Some OpenAI-compatible endpoints
+#: (BigModel/GLM, vLLM, Ollama) default to a low ``max_output_tokens`` that
+#: truncates long JSON mid-key; setting this keeps the full generation intact.
+ENV_MAX_TOKENS = "SPARKSAGE_MAX_TOKENS"
+#: Per-request LLM timeout in seconds (``off`` disables so a stuck connection
+#: can hang forever -- not recommended).
+ENV_LLM_TIMEOUT = "SPARKSAGE_LLM_TIMEOUT"
+#: Per-segment character budget for large inputs (tunes how aggressively a big
+#: document is split into separate LLM calls).
+ENV_MAX_INPUT_CHARS = "SPARKSAGE_MAX_INPUT_CHARS"
+#: Number of segments generated concurrently -- the biggest latency win on
+#: large multi-segment uploads (fan-out instead of a serial queue).
+ENV_GENERATE_MAX_WORKERS = "SPARKSAGE_GENERATE_MAX_WORKERS"
 
 # Document management
 ENV_DOC_STORE = "SPARKSAGE_DOC_STORE"
@@ -103,6 +116,19 @@ ENV_DATA_DIR = "SPARKSAGE_DATA_DIR"
 DEFAULT_MODEL = "gpt-4o-mini"
 #: Streaming is on by default -- it is more robust for long generations.
 DEFAULT_STREAM = True
+#: Default per-segment character budget for the generator (see
+#: :data:`sparksage.generator.generator.DEFAULT_MAX_INPUT_CHARS`).
+DEFAULT_MAX_INPUT_CHARS = 12000
+#: Default number of segments generated concurrently. The generator stays
+#: serial by default for deterministic offline tests; production wiring raises
+#: this so a multi-segment large upload fans out into parallel LLM calls.
+DEFAULT_GENERATE_MAX_WORKERS = 4
+#: Default LLM output-token cap forwarded to the provider (``None`` lets the
+#: provider choose; set ``SPARKSAGE_MAX_TOKENS`` when the provider's default
+#: truncates long generations).
+DEFAULT_MAX_TOKENS: int | None = None
+#: Default LLM per-request timeout in seconds (bounds a stuck connection).
+DEFAULT_LLM_TIMEOUT: float | None = 120.0
 #: Default SQLite table name for the durable document store.
 DEFAULT_DOC_STORE_TABLE = "documents"
 #: Default keyword-extraction algorithm used for auto-tagging.
@@ -161,6 +187,27 @@ def _env_int(name: str, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return value if value >= 0 else default
+
+
+def _env_int_optional(name: str, default: int | None) -> int | None:
+    """Parse an environment variable as an optional positive int.
+
+    ``off`` / ``none`` (case-insensitive) resolve to ``None`` so an int knob
+    can be explicitly disabled (e.g. ``SPARKSAGE_MAX_TOKENS=off`` to leave the
+    output-token cap to the provider). Unset / unparsable values fall back to
+    ``default``.
+    """
+    raw = _env(name)
+    if raw is None:
+        return default
+    val = raw.strip().lower()
+    if val in ("off", "none", "disabled"):
+        return None
+    try:
+        value = int(raw.strip())
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
 
 
 def _env_float(name: str, default: float | None) -> float | None:
@@ -227,6 +274,16 @@ def build_default_service() -> SparkSageService:
                                        (default ``rake``)
     ``SPARKSAGE_TAGS_ZH``         Use ``jieba`` for CJK segmentation when ``true``
                                    (requires ``pip install 'sparksage[tags-zh]'``)
+    ``SPARKSAGE_MAX_TOKENS``      Output-token cap forwarded to the provider
+                                   (``off`` leaves it to the provider). Some
+                                   OpenAI-compatible endpoints default to a low
+                                   cap that truncates long JSON mid-key.
+    ``SPARKSAGE_LLM_TIMEOUT``     Per-request LLM timeout in seconds (default
+                                   ``120``; ``off`` disables).
+    ``SPARKSAGE_MAX_INPUT_CHARS`` Per-segment character budget for big inputs.
+    ``SPARKSAGE_GENERATE_MAX_WORKERS``  Segments generated concurrently (default
+                                   ``4``) -- the biggest latency win on big
+                                   multi-segment uploads.
     ============================  =========================================
     """
     load_dotenv()
@@ -242,10 +299,22 @@ def build_default_service() -> SparkSageService:
         model = _env(ENV_MODEL) or DEFAULT_MODEL
         language = _env("SPARKSAGE_LANGUAGE") or "zh"
         stream = _env_bool(ENV_STREAM, DEFAULT_STREAM)
+        timeout = _env_float(ENV_LLM_TIMEOUT, DEFAULT_LLM_TIMEOUT)
+        max_tokens = _env_int_optional(ENV_MAX_TOKENS, DEFAULT_MAX_TOKENS)
         client = OpenAICompatibleClient(
-            base_url=base_url, api_key=api_key, model=model, stream=stream
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            stream=stream,
+            timeout=timeout,
+            max_tokens=max_tokens,
         )
-        generator = IdeaBlockGenerator(client, language=language)
+        generator = IdeaBlockGenerator(
+            client,
+            language=language,
+            max_input_chars=_env_int(ENV_MAX_INPUT_CHARS, DEFAULT_MAX_INPUT_CHARS),
+            max_workers=_env_int(ENV_GENERATE_MAX_WORKERS, DEFAULT_GENERATE_MAX_WORKERS),
+        )
         # Reuse the same client for high-quality LLM summaries (degrades to the
         # extractive summarizer on any failure, so ingest never loses a summary).
         summarizer = LLMSummarizer(
@@ -417,14 +486,30 @@ def build_qa_service():
     model = _env(ENV_MODEL) or DEFAULT_MODEL
     stream = _env_bool(ENV_STREAM, DEFAULT_STREAM)
     language = _env("SPARKSAGE_LANGUAGE") or "en"
+    timeout = _env_float(ENV_LLM_TIMEOUT, DEFAULT_LLM_TIMEOUT)
+    max_tokens = _env_int_optional(ENV_MAX_TOKENS, DEFAULT_MAX_TOKENS)
+    max_input_chars = _env_int(ENV_MAX_INPUT_CHARS, DEFAULT_MAX_INPUT_CHARS)
+    generate_max_workers = _env_int(
+        ENV_GENERATE_MAX_WORKERS, DEFAULT_GENERATE_MAX_WORKERS
+    )
 
     llm_client: OpenAICompatibleClient | None = None
     generator: IdeaBlockGenerator | None = None
     if api_key:
         llm_client = OpenAICompatibleClient(
-            base_url=base_url, api_key=api_key, model=model, stream=stream
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            stream=stream,
+            timeout=timeout,
+            max_tokens=max_tokens,
         )
-        generator = IdeaBlockGenerator(llm_client, language=language)
+        generator = IdeaBlockGenerator(
+            llm_client,
+            language=language,
+            max_input_chars=max_input_chars,
+            max_workers=generate_max_workers,
+        )
 
     spark_service = SparkSageService(
         converter=MarkdownConverter(backend=MarkItDownBackend()),
