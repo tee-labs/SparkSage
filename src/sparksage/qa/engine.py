@@ -344,6 +344,7 @@ class QAEngine:
         use_lexical: bool | None = None,
         use_rerank: bool | None = None,
         use_cache: bool = True,
+        on_progress: Callable[[str], None] | None = None,
     ) -> QAResult:
         """Answer ``query`` end-to-end.
 
@@ -363,6 +364,12 @@ class QAEngine:
         use_cache:
             When ``True`` (default) and a cache is wired, a cache hit returns
             immediately and a miss stores the new result.
+        on_progress:
+            Optional coarse phase callback. The engine invokes it with one of
+            ``"understanding"`` / ``"retrieving"`` / ``"generating"`` /
+            ``"done"`` at each stage boundary so a caller can surface visible
+            progress (the single-shot pipeline is otherwise one blocking call).
+            Not invoked on a cache hit (the answer returns immediately).
         """
         query = str(query)
         _logger.debug("qa ask start: query=%r cached_enabled=%s", query[:80], use_cache)
@@ -374,6 +381,8 @@ class QAEngine:
 
         query_result: QueryResult | None = None
         if self._query_processor is not None:
+            if on_progress is not None:
+                on_progress("understanding")
             t0 = time.perf_counter()
             query_result = self._query_processor.process(query, context)
             elapsed_qp = time.perf_counter() - t0
@@ -395,6 +404,8 @@ class QAEngine:
                 )
                 result = QAResult(query=query, query_result=query_result)
                 self._maybe_store(query, result, use_cache)
+                if on_progress is not None:
+                    on_progress("done")
                 return result
 
         scoped_filter = self._apply_intent_routing(filter, query_result)
@@ -415,6 +426,8 @@ class QAEngine:
                 search_query[:80],
                 len(sub_queries) if sub_queries else 0,
             )
+        if on_progress is not None:
+            on_progress("retrieving")
         t0 = time.perf_counter()
         retrieval = self._retrieve(
             search_query,
@@ -452,6 +465,8 @@ class QAEngine:
                 relevance.score if relevance else 0.0,
             )
 
+        if on_progress is not None:
+            on_progress("generating")
         t0 = time.perf_counter()
         answer = self._reader.answer(query, retrieval.chunks)
         elapsed_ans = time.perf_counter() - t0
@@ -472,6 +487,8 @@ class QAEngine:
             iterations=iterations,
         )
         self._maybe_store(query, result, use_cache)
+        if on_progress is not None:
+            on_progress("done")
         return result
 
     # ------------------------------------------------------------------ #

@@ -751,17 +751,42 @@ class TestAgentStreamingRoute:
             assert "phase" in first_progress
             assert "percent" in first_progress
 
-    def test_stream_default_mode_is_noop(self):
-        # stream=true with mode=default is ignored (single-shot is too fast)
+    def test_stream_default_mode_emits_phase_progress(self):
+        # stream=true with mode=default now emits coarse phase progress so the
+        # QA page can show visible feedback during the single-shot wait.
         client = self._client()
         client.post(
             "/api/v1/knowledge_base/ingest",
             files={"file": ("g.md", b"dummy", "text/markdown")},
         )
-        resp = client.post(
+        with client.stream(
+            "POST",
             "/api/v1/query",
             json={"query": "How to install?", "mode": "default", "stream": True},
-        )
-        # plain JSON, not SSE
-        assert resp.status_code == 200
-        assert resp.headers["content-type"].startswith("application/json")
+        ) as resp:
+            assert resp.status_code == 200
+            assert "text/event-stream" in resp.headers.get("content-type", "")
+            events: list[str] = []
+            data_lines: list[str] = []
+            for line in resp.iter_lines():
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8", errors="replace")
+                if line.startswith("event:"):
+                    events.append(line.split(":", 1)[1].strip())
+                elif line.startswith("data:"):
+                    data_lines.append(line.split(":", 1)[1].strip())
+            assert "done" in events
+            assert "result" in events
+            assert "progress" in events
+            assert events.index("progress") < events.index("result")
+            result_payload = json.loads(data_lines[events.index("result")])
+            assert result_payload["mode"] == "default"
+            # the default-mode progress payload carries one of the coarse phases
+            first_progress = json.loads(data_lines[events.index("progress")])
+            assert first_progress["phase"] in {
+                "understanding",
+                "retrieving",
+                "generating",
+                "done",
+            }
+            assert "percent" in first_progress
