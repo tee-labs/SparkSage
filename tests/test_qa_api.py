@@ -1191,6 +1191,23 @@ class TestKnowledgeBaseRoute:
         assert resp.status_code == 404
 
 
+class TestDocumentManagementDeleteCascade:
+    def test_doc_management_delete_clears_qa_index(self, qa_client):
+        body = _ingest(qa_client)
+        doc_id = body["doc_id"]
+        assert qa_client.get("/api/v1/knowledge_base").json()["block_count"] > 0
+        # delete via the document-management route (not the KB route)
+        resp = qa_client.delete(f"/api/v1/documents/{doc_id}")
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] is True
+        # the KB index must drop the orphaned blocks -> no longer searchable
+        assert qa_client.get("/api/v1/knowledge_base").json()["block_count"] == 0
+
+    def test_doc_management_delete_404(self, qa_client):
+        resp = qa_client.delete("/api/v1/documents/missing")
+        assert resp.status_code == 404
+
+
 class TestFeedbackRoute:
     def test_record_feedback(self, qa_client):
         resp = qa_client.post(

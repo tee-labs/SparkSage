@@ -1141,7 +1141,10 @@ def create_app(
     async def delete_document(
         doc_id: Annotated[str, Path(description="The document id.")],
     ) -> dict[str, bool]:
-        deleted = svc.delete_document(doc_id)
+        if qa_service is not None:
+            deleted = qa_service.delete_document(doc_id)
+        else:
+            deleted = svc.delete_document(doc_id)
         if not deleted:
             raise HTTPException(status_code=404, detail=f"document not found: {doc_id}")
         return {"deleted": True}
