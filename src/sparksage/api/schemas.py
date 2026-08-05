@@ -462,11 +462,13 @@ class AskRequest(BaseModel):
     stream: bool = Field(
         default=False,
         description=(
-            "When ``True`` (and ``mode='agent'``) the response is an SSE stream "
-            "of ``progress`` events (one per agent phase -- thinking / "
-            "retrieving / synthesizing / done) terminated by a single "
-            "``result`` event carrying the full :class:`AskResponse`. Ignored "
-            "for ``mode='default'`` (single-shot is too fast to stream)."
+            "When ``True`` the response is an SSE stream of ``progress`` "
+            "events terminated by a single ``result`` event carrying the full "
+            ":class:`AskResponse`. In ``mode='agent'`` each phase (thinking / "
+            "retrieving / synthesizing / done) emits a rich progress payload; "
+            "in ``mode='default'`` the single-shot pipeline emits coarse "
+            "phase markers (understanding / retrieving / generating / done) "
+            "so the client can show visible progress during the wait."
         ),
     )
 

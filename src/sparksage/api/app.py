@@ -744,7 +744,7 @@ def _agent_progress_payload(progress: Any) -> dict[str, Any]:
     return payload
 
 
-def _stream_agent_run(
+def _stream_qa_run(
     qa_svc: Any,
     *,
     query: str,
@@ -754,11 +754,14 @@ def _stream_agent_run(
     use_lexical: bool | None,
     use_rerank: bool | None,
     kb_id: str | None,
+    mode: str,
 ) -> Any:
-    """Return a :class:`StreamingResponse` that runs an agent QA in a thread.
+    """Return a :class:`StreamingResponse` that runs a QA ask in a thread.
 
-    Emits ``progress`` SSE events (one per agent phase -- thinking / retrieving
-    / synthesizing / done) and terminates with one ``result`` event carrying
+    Works for both ``mode="agent"`` (rich :class:`AgentProgress` per phase) and
+    ``mode="default"`` (coarse phase dict from the single-shot engine, wrapped
+    by :func:`QAService._wrap_default_progress` to the same wire shape). Emits
+    ``progress`` SSE events and terminates with one ``result`` event carrying
     the full :class:`AskResponse`, then a final ``done`` sentinel. Errors
     surface as an ``error`` event with HTTP 200 (so an EventSource client still
     receives it -- the alternative, raising, would let the in-flight SSE
@@ -776,7 +779,14 @@ def _stream_agent_run(
         out_q: _queue.Queue[Any] = _queue.Queue()
 
         def _on_progress(progress: Any) -> None:
-            out_q.put(("progress", _agent_progress_payload(progress)))
+            # agent mode emits AgentProgress objects; default mode emits a dict
+            # already in the wire shape -- normalize both.
+            payload = (
+                progress
+                if isinstance(progress, dict)
+                else _agent_progress_payload(progress)
+            )
+            out_q.put(("progress", payload))
 
         def _worker() -> None:
             try:
@@ -788,7 +798,7 @@ def _stream_agent_run(
                     use_lexical=use_lexical,
                     use_rerank=use_rerank,
                     kb_id=kb_id,
-                    mode="agent",
+                    mode=mode,
                     on_progress=_on_progress,
                 )
                 payload = _to_ask_response(result).model_dump(mode="json")
@@ -804,7 +814,7 @@ def _stream_agent_run(
                 try:
                     kind, payload = await asyncio.to_thread(out_q.get, timeout=300)
                 except Exception:  # pragma: no cover - timeout / queue shutdown
-                    yield _sse_event("error", {"detail": "agent stream timed out"})
+                    yield _sse_event("error", {"detail": "qa stream timed out"})
                     return
                 if kind == "progress":
                     yield _sse_event("progress", payload)
@@ -1497,8 +1507,8 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
         body: Annotated[AskRequest, Body(description="The question + options.")],
     ):
         flt, context = _build_filter_from_request(body)
-        if body.stream and body.mode == "agent":
-            return _stream_agent_run(
+        if body.stream:
+            return _stream_qa_run(
                 qa_svc,
                 query=body.query,
                 context=context,
@@ -1507,6 +1517,7 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
                 use_lexical=body.use_lexical,
                 use_rerank=body.use_rerank,
                 kb_id=body.kb_id,
+                mode=body.mode,
             )
         try:
             result = await asyncio.to_thread(

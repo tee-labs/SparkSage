@@ -83,7 +83,13 @@ export default function QaPage() {
   const ask = async () => {
     if (!query.trim()) return;
     setLoading(true);
-    if (mode === 'agent') setAgentProgress({ iteration: 0, max_iterations: 0, phase: 'thinking', percent: 0, evidence_count: 0 });
+    setAgentProgress({
+      iteration: 0,
+      max_iterations: 0,
+      phase: mode === 'agent' ? 'thinking' : 'understanding',
+      percent: 0,
+      evidence_count: 0,
+    });
     try {
       const res = await api.ask(
         {
@@ -252,8 +258,8 @@ export default function QaPage() {
       ))}
 
       <Card size="small">
-        {loading && mode === 'agent' && agentProgress && (
-          <AgentProgressView progress={agentProgress} />
+        {loading && agentProgress && (
+          <AgentProgressView progress={agentProgress} mode={mode} />
         )}
         <Input.TextArea
           rows={3}
@@ -499,15 +505,32 @@ const AGENT_PHASE_LABEL: Record<string, string> = {
   done: '完成',
 };
 
-function AgentProgressView({ progress }: { progress: AgentProgressEvent }) {
-  const label = AGENT_PHASE_LABEL[progress.phase] ?? progress.phase;
+const DEFAULT_PHASE_LABEL: Record<string, string> = {
+  understanding: '理解问题（意图识别 + 改写）',
+  retrieving: '检索知识库（混合召回 + 重排）',
+  generating: '生成答案（基于检索证据）',
+  done: '完成',
+};
+
+function AgentProgressView({
+  progress,
+  mode,
+}: {
+  progress: AgentProgressEvent;
+  mode?: string;
+}) {
+  const labels = mode === 'agent' ? AGENT_PHASE_LABEL : DEFAULT_PHASE_LABEL;
+  const label = labels[progress.phase] ?? progress.phase;
   const pct = Math.max(0, Math.min(100, Math.round(progress.percent * 100)));
+  const isAgent = mode === 'agent';
   return (
     <div style={{ marginBottom: 12 }}>
       <Space style={{ marginBottom: 6 }}>
-        <AntTag color="geekblue">Agent 推理中</AntTag>
+        <AntTag color={isAgent ? 'geekblue' : 'blue'}>
+          {isAgent ? 'Agent 推理中' : '问答处理中'}
+        </AntTag>
         <Text strong>{label}</Text>
-        {progress.iteration > 0 && (
+        {isAgent && progress.iteration > 0 && (
           <Text type="secondary">
             第 {progress.iteration}/{progress.max_iterations} 轮 · 证据 {progress.evidence_count}
           </Text>

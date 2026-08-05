@@ -95,6 +95,45 @@ from sparksage.schema.source import SourceRef
 _logger = logging.getLogger(__name__)
 
 
+#: Coarse phase -> progress percent (0..1) for the single-shot QA pipeline.
+#: Lets the SSE route treat default + agent modes identically: the agent emits
+#: its rich :class:`AgentProgress`, the single-shot engine emits a phase string
+#: that this table turns into a matching wire payload.
+_DEFAULT_PHASE_PERCENT: dict[str, float] = {
+    "understanding": 0.1,
+    "retrieving": 0.4,
+    "generating": 0.7,
+    "done": 1.0,
+}
+
+
+def _wrap_default_progress(
+    on_progress: Callable[[Any], None] | None,
+) -> Callable[[str], None] | None:
+    """Wrap the single-shot engine's string-phase callback into the SSE shape.
+
+    The agent emits :class:`~sparksage.agent.AgentProgress` objects directly;
+    the single-shot engine emits a phase string. This wrapper reuses the same
+    wire payload (``{iteration, max_iterations, phase, percent,
+    evidence_count}``) so the streaming route and the frontend render both
+    modes with one code path. Returns ``None`` when no callback is wired so the
+    engine skips the (tiny) emit overhead entirely.
+    """
+
+    def _emit(phase: str) -> None:
+        on_progress(
+            {
+                "iteration": 0,
+                "max_iterations": 0,
+                "phase": phase,
+                "percent": _DEFAULT_PHASE_PERCENT.get(phase, 0.0),
+                "evidence_count": 0,
+            }
+        )
+
+    return _emit if on_progress is not None else None
+
+
 @dataclass
 class IngestResult:
     """Framework-agnostic result of an ingest-and-index request.
@@ -1243,9 +1282,13 @@ class QAService:
         :class:`RetrievalFilter` for tag / entity / language scoping; pass a
         :class:`ConversationContext` for multi-turn anaphora resolution.
 
-        ``on_progress`` and ``is_cancelled`` only affect ``mode="agent"`` (the
-        single-shot mode is synchronous); the SSE streaming route forwards them
-        so a long agent run emits per-phase progress the client can render.
+        ``on_progress`` and ``is_cancelled`` are forwarded to whichever engine
+        runs. In ``mode="agent"`` the agent emits its rich
+        :class:`~sparksage.agent.AgentProgress` objects directly; in
+        ``mode="default"`` the engine emits coarse phase strings
+        (``"understanding"`` / ``"retrieving"`` / ``"generating"`` /
+        ``"done"``), which this service wraps into a uniform payload so the
+        SSE streaming route can treat both modes identically.
         """
         kb = self._resolve_kb(kb_id, filter=filter)
         if mode == "agent":
@@ -1260,6 +1303,7 @@ class QAService:
                 on_progress=on_progress,
                 is_cancelled=is_cancelled,
             )
+        wrapped_progress = _wrap_default_progress(on_progress)
         return self._ask_default(
             kb.kb_id,
             query,
@@ -1269,6 +1313,7 @@ class QAService:
             use_lexical=use_lexical,
             use_rerank=use_rerank,
             use_cache=use_cache,
+            on_progress=wrapped_progress,
         )
 
     def _ask_default(
@@ -1282,6 +1327,7 @@ class QAService:
         use_lexical,
         use_rerank,
         use_cache,
+        on_progress: Callable[[str], None] | None = None,
     ) -> QAResult:
         engine = self._engine_for(kb_id)
         _logger.debug(
@@ -1301,6 +1347,7 @@ class QAService:
             use_lexical=use_lexical,
             use_rerank=use_rerank,
             use_cache=use_cache,
+            on_progress=on_progress,
         )
         elapsed = time.perf_counter() - t0
         n_chunks = len(result.retrieval.chunks) if result.retrieval else 0

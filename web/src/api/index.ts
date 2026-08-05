@@ -184,12 +184,7 @@ export const api = {
       mode?: string;
     },
     options?: { onProgress?: (p: AgentProgressEvent) => void; signal?: AbortSignal },
-  ) => {
-    if (body.mode === 'agent') {
-      return askAgentStream(body, options);
-    }
-    return client.post<AskResponse>('/query', body).then((r) => r.data);
-  },
+  ) => askQaStream(body, options),
 
   // ---- feedback ----
   feedbackStats: () => client.get<FeedbackStats>('/feedback').then((r) => r.data),
@@ -260,7 +255,7 @@ function parseSseBlock(raw: string): { event: string; data: unknown } | null {
   return { event, data };
 }
 
-async function askAgentStream(
+async function askQaStream(
   body: AskRequestBody,
   options?: { onProgress?: (p: AgentProgressEvent) => void; signal?: AbortSignal },
 ): Promise<AskResponse> {
@@ -317,7 +312,7 @@ async function askAgentStream(
         result = evt.data as AskResponse;
       } else if (evt.event === 'error') {
         errorDetail =
-          ((evt.data as { detail?: string } | undefined)?.detail) ?? 'agent 运行出错';
+          ((evt.data as { detail?: string } | undefined)?.detail) ?? '问答运行出错';
       } else if (evt.event === 'done') {
         break;
       }
@@ -331,7 +326,7 @@ async function askAgentStream(
     /* ignore */
   }
   if (errorDetail) throw makeError(0, errorDetail);
-  if (!result) throw makeError(0, 'agent 运行未返回结果');
+  if (!result) throw makeError(0, '问答运行未返回结果');
   return result;
 }
 
