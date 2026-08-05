@@ -1012,6 +1012,20 @@ class QAService:
         kb = self._resolve_kb(kb_id)
         return kb.remove_document(doc_id)
 
+    def delete_document(self, doc_id: str) -> bool:
+        """Delete a document record *and* cascade-remove its indexed blocks.
+
+        Global (across every knowledge base) counterpart of the KB-scoped
+        :meth:`remove_document`: a document deleted from the shared document
+        store must also be dropped from the live index(es) or QA would keep
+        serving orphaned chunks. Returns whether a record was removed.
+        """
+        deleted = self._service.delete_document(doc_id)
+        for kb in list(self._kbs.values()):
+            if doc_id in kb.document_ids():
+                kb.remove_document(doc_id)
+        return deleted
+
     def find_by_external_key(
         self, external_key: str, *, kb_id: str | None = None
     ) -> DocumentRecord | None:
