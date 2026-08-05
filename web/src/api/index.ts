@@ -2,6 +2,9 @@ import axios from 'axios';
 import type {
   AskResponse,
   BlockListResponse,
+  CleaningRule,
+  CleaningRuleListResponse,
+  CleaningTestResponse,
   ConfigResponse,
   ConfigUpdateResponse,
   ConvertResponse,
@@ -200,6 +203,26 @@ export const api = {
     client
       .delete('/query/history', { params: kbId ? { kb_id: kbId } : undefined })
       .then((r) => r.data),
+
+  // ---- cleaning rules ----
+  listCleaningRules: (params: { limit?: number; offset?: number } = {}) =>
+    client
+      .get<CleaningRuleListResponse>('/cleaning', { params })
+      .then((r) => r.data),
+  createCleaningRule: (body: Partial<CleaningRule>) =>
+    client.post<CleaningRule>('/cleaning', body).then((r) => r.data),
+  updateCleaningRule: (ruleId: string, body: Partial<CleaningRule>) =>
+    client.patch<CleaningRule>(`/cleaning/${ruleId}`, body).then((r) => r.data),
+  deleteCleaningRule: (ruleId: string) =>
+    client.delete(`/cleaning/${ruleId}`).then((r) => r.data),
+  testCleaningRule: (body: {
+    code: string;
+    text: string;
+    source?: string | null;
+    timeout?: number;
+    max_input_chars?: number;
+    max_output_chars?: number;
+  }) => client.post<CleaningTestResponse>('/cleaning/test', body).then((r) => r.data),
 };
 
 export interface AgentProgressEvent {

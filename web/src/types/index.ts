@@ -278,3 +278,35 @@ export interface QueryHistoryResponse {
 }
 
 export type FeedbackRating = 'positive' | 'negative' | 'corrected';
+
+// ---- cleaning rules ----
+export interface CleaningRule {
+  rule_id: string;
+  name: string;
+  code: string;
+  source_pattern?: string | null;
+  pattern_kind: string;
+  enabled: boolean;
+  timeout: number;
+  max_input_chars: number;
+  max_output_chars: number;
+  created_at: string;
+  updated_at: string;
+  compiled: boolean;
+  error?: string | null;
+}
+
+export interface CleaningRuleListResponse {
+  items: CleaningRule[];
+  count: number;
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface CleaningTestResponse {
+  ok: boolean;
+  output: string;
+  error?: string | null;
+  elapsed_ms: number;
+}

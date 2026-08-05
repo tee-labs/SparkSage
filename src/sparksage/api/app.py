@@ -17,6 +17,9 @@ Routes cover conversion, generation and document management:
 * ``GET /PATCH /DELETE /api/v1/documents/{doc_id}`` -- single-document CRUD.
 * ``POST /api/v1/documents/{doc_id}/tags`` -- re-extract tags from the body.
 * ``GET /api/v1/tags`` -- distinct tag vocabulary across stored documents.
+* ``POST/GET /api/v1/cleaning`` -- custom cleaning-rule CRUD (script layer).
+* ``GET/PATCH/DELETE /api/v1/cleaning/{rule_id}`` -- single-rule CRUD.
+* ``POST /api/v1/cleaning/test`` -- run a cleaning script against sample text.
 
 Install with::
 
@@ -91,6 +94,10 @@ ENV_TAGS_ZH = "SPARKSAGE_TAGS_ZH"
 #: Cohesion floor for the CJK bigram auto-tag filter (float, ``0``-``1``; ``off``
 #: disables the filter so raw overlapping bigrams are emitted again).
 ENV_AUTO_TAG_MIN_COHESION = "SPARKSAGE_AUTO_TAG_MIN_COHESION"
+
+# Custom cleaning rules
+#: SQLite file for the durable cleaning-rule store (overrides ``SPARKSAGE_DATA_DIR``).
+ENV_CLEANING_STORE = "SPARKSAGE_CLEANING_STORE"
 
 # End-to-end QA
 ENV_EMBEDDING_API_KEY = "SPARKSAGE_EMBEDDING_API_KEY"
@@ -179,6 +186,7 @@ DEFAULT_DOC_DB_NAME = "sparksage.docs.db"
 DEFAULT_KB_DB_NAME = "sparksage.kb.db"
 DEFAULT_KB_STATE_DB_NAME = "sparksage.kb_state.db"
 DEFAULT_FEEDBACK_DB_NAME = "sparksage.feedback.db"
+DEFAULT_CLEANING_DB_NAME = "sparksage.cleaning.db"
 
 _TRUTHY = {"1", "true", "yes", "on"}
 _FALSY = {"0", "false", "no", "off"}
@@ -376,6 +384,7 @@ def build_default_service() -> SparkSageService:
         document_store=doc_store,
         keyword_extractor=keyword_extractor,
         summarizer=summarizer,
+        cleaning_rule_store=_build_cleaning_rule_store(),
     )
 
 
@@ -465,6 +474,25 @@ def _build_feedback_store():
     from sparksage.feedback.backends.sqlite import SqliteFeedbackStore
 
     return SqliteFeedbackStore(path)
+
+
+def _build_cleaning_rule_store():
+    """Resolve a durable :class:`CleaningRuleStore` from env vars.
+
+    ``SPARKSAGE_DATA_DIR`` -> ``{dir}/sparksage.cleaning.db`` by default;
+    ``SPARKSAGE_CLEANING_STORE`` overrides the path. Returns ``None`` when no
+    data dir and no explicit path is set (the service falls back to its lazy
+    in-memory store so rule CRUD still works, just non-durable).
+    """
+    path = _env(ENV_CLEANING_STORE)
+    if path is None:
+        data_dir = _resolve_data_dir()
+        if data_dir is None:
+            return None
+        path = str(data_dir / DEFAULT_CLEANING_DB_NAME)
+    from sparksage.clean.backends.sqlite import SqliteCleaningRuleStore
+
+    return SqliteCleaningRuleStore(path)
 
 
 def build_qa_service():
@@ -570,6 +598,7 @@ def build_qa_service():
             tokenizer=AutoTokenizer(use_jieba=_env_bool(ENV_TAGS_ZH, False)),
             min_cohesion=_auto_tag_min_cohesion(),
         ),
+        cleaning_rule_store=_build_cleaning_rule_store(),
     )
 
     embed_api_key = _env(ENV_EMBEDDING_API_KEY) or api_key
@@ -1187,6 +1216,145 @@ def create_app(
     )
     async def list_tags() -> TagsResponse:
         return TagsResponse(tags=svc.list_document_tags())
+
+    # ------------------------------------------------------------------ #
+    # cleaning-rule management routes (the script cleaning layer UI backing)
+    # ------------------------------------------------------------------ #
+    from sparksage.api.schemas import (
+        CleaningRuleCreateRequest,
+        CleaningRuleListResponse,
+        CleaningRuleOut,
+        CleaningRuleUpdateRequest,
+        CleaningTestRequest,
+        CleaningTestResponse,
+        _to_cleaning_rule_out,
+    )
+    from sparksage.clean.models import CleaningRuleRecord, PatternKind
+
+    def _parse_pattern_kind(raw: str) -> PatternKind:
+        try:
+            return PatternKind(raw)
+        except ValueError:
+            return PatternKind.NONE
+
+    def _build_record_from_create(body: CleaningRuleCreateRequest) -> CleaningRuleRecord:
+        return CleaningRuleRecord(
+            name=body.name,
+            code=body.code,
+            source_pattern=body.source_pattern,
+            pattern_kind=_parse_pattern_kind(body.pattern_kind),
+            enabled=body.enabled,
+            timeout=body.timeout,
+            max_input_chars=body.max_input_chars,
+            max_output_chars=body.max_output_chars,
+        )
+
+    @app.get(
+        "/api/v1/cleaning",
+        response_model=CleaningRuleListResponse,
+        summary="List custom cleaning rules (with compile status)",
+    )
+    async def list_cleaning_rules(
+        limit: Annotated[
+            int, Query(ge=1, le=1000, description="Page size.")
+        ] = 100,
+        offset: Annotated[
+            int, Query(ge=0, description="Offset into the list.")
+        ] = 0,
+    ) -> CleaningRuleListResponse:
+        mgr = svc.cleaning_manager
+        statuses = mgr.list_with_status(limit=limit, offset=offset)
+        items = [_to_cleaning_rule_out(s.record, s.compiled, s.error) for s in statuses]
+        return CleaningRuleListResponse(
+            items=items,
+            count=len(items),
+            total=len(mgr.store),
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.post(
+        "/api/v1/cleaning",
+        response_model=CleaningRuleOut,
+        status_code=201,
+        summary="Create a custom cleaning rule",
+    )
+    async def create_cleaning_rule(
+        body: CleaningRuleCreateRequest,
+    ) -> CleaningRuleOut:
+        mgr = svc.cleaning_manager
+        record = _build_record_from_create(body)
+        stored = mgr.create_rule(record)
+        status = mgr.status_of(stored)
+        return _to_cleaning_rule_out(status.record, status.compiled, status.error)
+
+    @app.get(
+        "/api/v1/cleaning/{rule_id}",
+        response_model=CleaningRuleOut,
+        summary="Get a single cleaning rule",
+    )
+    async def get_cleaning_rule(
+        rule_id: Annotated[str, Path(description="The rule id.")],
+    ) -> CleaningRuleOut:
+        mgr = svc.cleaning_manager
+        record = mgr.get_rule(rule_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"rule not found: {rule_id}")
+        status = mgr.status_of(record)
+        return _to_cleaning_rule_out(status.record, status.compiled, status.error)
+
+    @app.patch(
+        "/api/v1/cleaning/{rule_id}",
+        response_model=CleaningRuleOut,
+        summary="Partially update a cleaning rule",
+    )
+    async def update_cleaning_rule(
+        rule_id: Annotated[str, Path(description="The rule id.")],
+        body: CleaningRuleUpdateRequest,
+    ) -> CleaningRuleOut:
+        mgr = svc.cleaning_manager
+        existing = mgr.get_rule(rule_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail=f"rule not found: {rule_id}")
+        changes = body.model_dump(exclude_unset=True)
+        if "pattern_kind" in changes and changes["pattern_kind"] is not None:
+            changes["pattern_kind"] = _parse_pattern_kind(changes["pattern_kind"])
+        updated = existing.model_copy(update=changes)
+        stored = mgr.update_rule(updated)
+        status = mgr.status_of(stored)
+        return _to_cleaning_rule_out(status.record, status.compiled, status.error)
+
+    @app.delete(
+        "/api/v1/cleaning/{rule_id}",
+        status_code=204,
+        summary="Delete a cleaning rule",
+    )
+    async def delete_cleaning_rule(
+        rule_id: Annotated[str, Path(description="The rule id.")],
+    ) -> None:
+        if not svc.cleaning_manager.delete_rule(rule_id):
+            raise HTTPException(status_code=404, detail=f"rule not found: {rule_id}")
+
+    @app.post(
+        "/api/v1/cleaning/test",
+        response_model=CleaningTestResponse,
+        summary="Test a cleaning script against sample text (not persisted)",
+    )
+    async def test_cleaning_rule(body: CleaningTestRequest) -> CleaningTestResponse:
+        result = svc.cleaning_manager.test_rule(
+            body.code,
+            body.text,
+            source=body.source,
+            timeout=body.timeout,
+            max_input_chars=body.max_input_chars,
+            max_output_chars=body.max_output_chars,
+        )
+        return CleaningTestResponse(
+            ok=result.ok,
+            output=result.output,
+            error=result.error,
+            elapsed_ms=result.elapsed_ms,
+        )
 
     # ------------------------------------------------------------------ #
     # end-to-end QA routes (mounted only when a QAService is provided)
@@ -2054,6 +2222,7 @@ def run(  # pragma: no cover - thin launcher
 
 __all__ = [
     "DEFAULT_AUTO_TAG_EXTRACTOR",
+    "DEFAULT_CLEANING_DB_NAME",
     "DEFAULT_DOC_DB_NAME",
     "DEFAULT_DOC_STORE_TABLE",
     "DEFAULT_EMBEDDING_MODEL",
@@ -2065,6 +2234,7 @@ __all__ = [
     "DEFAULT_RERANKER",
     "ENV_API_KEY",
     "ENV_BASE_URL",
+    "ENV_CLEANING_STORE",
     "ENV_DATA_DIR",
     "ENV_DOC_STORE",
     "ENV_DOC_STORE_TABLE",
