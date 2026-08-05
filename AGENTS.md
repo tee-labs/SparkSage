@@ -63,7 +63,19 @@ PYTHONPATH=src python3 examples/build_chunks.py
   provenance. `source` is both provenance *and* the key for source/filename-aware
   rule routing (`add_for`), since cleaning is strongly business-dependent.
   Built-in rules are normalization only; business logic goes in custom rules
-  registered on a `TextCleaner` instance.
+  registered on a `TextCleaner` instance. The script layer (`clean/script.py`,
+  under the `[clean-script]` extra) is the escape hatch for multi-branch,
+  source-aware rules that declarative rules cannot express: `RestrictedScriptRule`
+  compiles a user-supplied `clean(text, source)` through RestrictedPython
+  (lazily imported, `safe_builtins` + guard functions, dunder/`_`-attr access
+  and `import`/`eval`/`open` blocked) at construction and is a drop-in
+  `CleaningRule`, so `add` / `add_for` work unchanged. The sandboxed `re` name
+  is a thin wrapper forcing a per-call timeout on the `regex` package — the
+  ReDoS fix, since stdlib `re` and bare `regex` hold the GIL through a
+  catastrophic backtrace and freeze the process. Every run is wall-clock timed
+  (`timeout=`) with `max_input_chars` / `max_output_chars` caps, and a failure
+  logs + sets `last_error` and returns the input unchanged (fail-open) so one
+  bad rule cannot break an ingest.
 - The embedding core (`embed/`) depends only on the `EmbeddingClient` Protocol
   — never import `openai` or `numpy` there. `OpenAIEmbeddingClient` is an
   optional dependency (`pip install 'sparksage[embed]'`), imported lazily only

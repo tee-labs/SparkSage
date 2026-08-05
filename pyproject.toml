@@ -66,6 +66,10 @@ pgvector = [
 tags-zh = [
     "jieba>=0.42",
 ]
+clean-script = [
+    "RestrictedPython>=7.0",
+    "regex>=2022.0",
+]
 rerank = [
     "sentence-transformers>=2.2",
 ]
@@ -83,6 +87,8 @@ all = [
     "psycopg[binary]>=3.1",
     "jieba>=0.42",
     "sentence-transformers>=2.2",
+    "RestrictedPython>=7.0",
+    "regex>=2022.0",
 ]
 
 [project.urls]

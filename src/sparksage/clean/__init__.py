@@ -25,6 +25,7 @@ from sparksage.clean.rules import (
     RemoveHtmlCommentsRule,
     StripTrailingWhitespaceRule,
 )
+from sparksage.clean.script import RestrictedScriptRule
 
 __all__ = [
     "DEFAULT_RULES",
@@ -38,6 +39,7 @@ __all__ = [
     "RemoveBomRule",
     "RemoveControlCharsRule",
     "RemoveHtmlCommentsRule",
+    "RestrictedScriptRule",
     "StripTrailingWhitespaceRule",
     "TextCleaner",
 ]
