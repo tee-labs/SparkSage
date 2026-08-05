@@ -75,7 +75,33 @@ PYTHONPATH=src python3 examples/build_chunks.py
   catastrophic backtrace and freeze the process. Every run is wall-clock timed
   (`timeout=`) with `max_input_chars` / `max_output_chars` caps, and a failure
   logs + sets `last_error` and returns the input unchanged (fail-open) so one
-  bad rule cannot break an ingest.
+  bad rule cannot break an ingest. The rule-management + persistence layer
+  (`clean/models.py` + `clean/store.py` + `clean/manager.py` +
+  `clean/backends/sqlite.py`) makes those scripts first-class managed config:
+  `CleaningRuleRecord` (Pydantic v2, `extra="forbid"`, closed `PatternKind`
+  enum) carries the source + routing (`source_pattern` / `pattern_kind`:
+  none|glob|regex) + the safety knobs; the `CleaningRuleStore` Protocol +
+  `InMemoryCleaningRuleStore` + `SqliteCleaningRuleStore` mirror the other
+  durable backends (JSON-as-source-of-truth column, `order_index` preserves
+  application order across restarts, regex-validated table, `RLock`-serialized
+  `check_same_thread=False`). `CleaningRuleManager` is the orchestrator that
+  rebuilds the live `TextCleaner` (base cleaner's bindings cloned verbatim, so
+  caller-added rules are never dropped, then every enabled store rule compiled
+  into a `RestrictedScriptRule` and `add` / `add_for`'d in order) on every CRUD
+  mutation, so a rule saved from the UI applies at the next ingest without a
+  restart; a rule that fails to compile is kept in the store (UI shows the
+  error) but skipped at rebuild time. `test_rule` runs a code snippet over
+  sample text transiently (no store / cleaner mutation). Wired into
+  `SparkSageService.cleaning_manager` and the web layer via `POST/GET
+  /api/v1/cleaning` (CRUD + compile-status), `GET/PATCH/DELETE
+  /api/v1/cleaning/{rule_id}`, and `POST /api/v1/cleaning/test`; durable via
+  `SPARKSAGE_DATA_DIR` (→ `sparksage.cleaning.db`) or `SPARKSAGE_CLEANING_STORE`.
+  The React `CleaningPage` (`/cleaning`) is the multi-rule management UI: a
+  table with enable toggles + compile-status badges, a create/edit modal, and a
+  test panel. The store/manager stay pure-stdlib apart from the lazy
+  `RestrictedScriptRule` import, so CRUD + persistence are unit-testable
+  without the `[clean-script]` extra (only `reload` / `test_rule` need it, and
+  both degrade to a clear error rather than raising).
 - The embedding core (`embed/`) depends only on the `EmbeddingClient` Protocol
   — never import `openai` or `numpy` there. `OpenAIEmbeddingClient` is an
   optional dependency (`pip install 'sparksage[embed]'`), imported lazily only

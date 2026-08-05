@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any
 
 from sparksage.clean.cleaner import TextCleaner
+from sparksage.clean.manager import CleaningRuleManager
+from sparksage.clean.store import CleaningRuleStore
 from sparksage.convert.converter import ConversionResult, MarkdownConverter
 from sparksage.documents.backends.memory import InMemoryDocumentStore
 from sparksage.documents.models import DocumentRecord
@@ -167,9 +169,13 @@ class SparkSageService:
         document_store: DocumentStore | None = None,
         keyword_extractor: KeywordExtractor | None = None,
         summarizer: Summarizer | None = None,
+        cleaning_rule_store: CleaningRuleStore | None = None,
     ) -> None:
         self._converter = converter
-        self._cleaner = cleaner if cleaner is not None else TextCleaner()
+        base_cleaner = cleaner if cleaner is not None else TextCleaner()
+        self._cleaning_manager = CleaningRuleManager(
+            cleaning_rule_store, base_cleaner=base_cleaner
+        )
         self._generator = generator
         self._document_store: DocumentStore | None = document_store
         self._keyword_extractor: KeywordExtractor | None = keyword_extractor
@@ -181,7 +187,12 @@ class SparkSageService:
 
     @property
     def cleaner(self) -> TextCleaner:
-        return self._cleaner
+        return self._cleaning_manager.cleaner
+
+    @property
+    def cleaning_manager(self) -> CleaningRuleManager:
+        """The cleaning-rule manager (store + live cleaner + script rebuild)."""
+        return self._cleaning_manager
 
     @property
     def generator(self) -> IdeaBlockGenerator | None:
@@ -257,7 +268,7 @@ class SparkSageService:
 
         if clean:
             before_len = len(result.markdown)
-            cleaned = self._cleaner.clean_result(result)
+            cleaned = self.cleaner.clean_result(result)
             after_len = len(cleaned.text)
             _logger.debug(
                 "convert done (cleaned): markdown_len=%d title=%s clean_delta=%d (%d -> %d)",
@@ -336,7 +347,7 @@ class SparkSageService:
 
         if clean:
             before_len = len(result.markdown)
-            cleaned = self._cleaner.clean_result(result)
+            cleaned = self.cleaner.clean_result(result)
             text = cleaned.text
             source_ref = cleaned.source_ref
             title = cleaned.title

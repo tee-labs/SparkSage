@@ -13,6 +13,12 @@ The emitted :class:`CleaningResult` chains straight into block generation: feed
 """
 
 from sparksage.clean.cleaner import DEFAULT_RULES, CleaningResult, TextCleaner
+from sparksage.clean.manager import (
+    CleaningRuleManager,
+    CleaningTestResult,
+    RuleStatus,
+)
+from sparksage.clean.models import CleaningRuleRecord, PatternKind
 from sparksage.clean.registry import CleaningRegistry
 from sparksage.clean.rules import (
     CallableRule,
@@ -26,6 +32,7 @@ from sparksage.clean.rules import (
     StripTrailingWhitespaceRule,
 )
 from sparksage.clean.script import RestrictedScriptRule
+from sparksage.clean.store import CleaningRuleStore, InMemoryCleaningRuleStore
 
 __all__ = [
     "DEFAULT_RULES",
@@ -33,13 +40,20 @@ __all__ = [
     "CleaningRegistry",
     "CleaningResult",
     "CleaningRule",
+    "CleaningRuleManager",
+    "CleaningRuleRecord",
+    "CleaningRuleStore",
+    "CleaningTestResult",
     "CollapseBlankLinesRule",
+    "InMemoryCleaningRuleStore",
     "NormalizeLineEndingsRule",
+    "PatternKind",
     "RegexReplaceRule",
     "RemoveBomRule",
     "RemoveControlCharsRule",
     "RemoveHtmlCommentsRule",
     "RestrictedScriptRule",
+    "RuleStatus",
     "StripTrailingWhitespaceRule",
     "TextCleaner",
 ]

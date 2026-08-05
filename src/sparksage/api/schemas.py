@@ -247,6 +247,132 @@ class RetagRequest(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------- #
+# cleaning-rule management (custom script cleaning layer)
+# ---------------------------------------------------------------------------- #
+class CleaningRuleOut(BaseModel):
+    """A stored cleaning rule plus its current compile status.
+
+    The compile-status fields (``compiled`` / ``error``) are computed on the fly
+    by the manager when listing, so the UI can flag a rule whose script fails to
+    compile without having to test it explicitly.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str = Field(description="Stable unique id.")
+    name: str = Field(description="Rule label.")
+    code: str = Field(description="RestrictedPython source defining clean(...).")
+    source_pattern: str | None = Field(
+        default=None, description="Source-routing pattern (None = global)."
+    )
+    pattern_kind: str = Field(description="none | glob | regex.")
+    enabled: bool = Field(description="Whether the rule is applied at ingest.")
+    timeout: float = Field(description="Per-call wall-clock seconds.")
+    max_input_chars: int = Field(description="Skip scripts above this input size.")
+    max_output_chars: int = Field(description="Fail scripts above this output size.")
+    created_at: datetime = Field(description="UTC creation timestamp.")
+    updated_at: datetime = Field(description="UTC last-update timestamp.")
+    compiled: bool = Field(
+        default=True, description="Whether the script compiled successfully."
+    )
+    error: str | None = Field(
+        default=None,
+        description="Compile / dependency error (None when compiled / disabled).",
+    )
+
+
+class CleaningRuleListResponse(PageResponse[CleaningRuleOut]):
+    """Paginated list of stored cleaning rules."""
+
+
+class CleaningRuleCreateRequest(BaseModel):
+    """JSON body for ``POST /api/v1/cleaning``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=128, description="Rule label.")
+    code: str = Field(..., min_length=1, description="RestrictedPython source.")
+    source_pattern: str | None = Field(
+        default=None, description="Source-routing pattern (None = global)."
+    )
+    pattern_kind: str = Field(
+        default="none", description="none | glob | regex."
+    )
+    enabled: bool = Field(default=True, description="Whether the rule is applied.")
+    timeout: float = Field(default=5.0, gt=0, description="Per-call wall-clock seconds.")
+    max_input_chars: int = Field(
+        default=1_000_000, ge=1, description="Skip scripts above this input size."
+    )
+    max_output_chars: int = Field(
+        default=2_000_000, ge=1, description="Fail scripts above this output size."
+    )
+
+
+class CleaningRuleUpdateRequest(BaseModel):
+    """JSON body for ``PATCH /api/v1/cleaning/{rule_id}`` (all fields optional)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    code: str | None = Field(default=None, min_length=1)
+    source_pattern: str | None = Field(default=None)
+    pattern_kind: str | None = Field(default=None)
+    enabled: bool | None = Field(default=None)
+    timeout: float | None = Field(default=None, gt=0)
+    max_input_chars: int | None = Field(default=None, ge=1)
+    max_output_chars: int | None = Field(default=None, ge=1)
+
+
+class CleaningTestRequest(BaseModel):
+    """JSON body for ``POST /api/v1/cleaning/test`` (run code without storing)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(..., min_length=1, description="RestrictedPython source to test.")
+    text: str = Field(..., min_length=1, description="Sample text to clean.")
+    source: str | None = Field(
+        default=None, description="Optional source label (filename / URI)."
+    )
+    timeout: float = Field(default=5.0, gt=0, description="Per-call wall-clock seconds.")
+    max_input_chars: int = Field(default=1_000_000, ge=1)
+    max_output_chars: int = Field(default=2_000_000, ge=1)
+
+
+class CleaningTestResponse(BaseModel):
+    """Response body for ``POST /api/v1/cleaning/test``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool = Field(description="True when the script ran and returned within limits.")
+    output: str = Field(description="The text the script returned.")
+    error: str | None = Field(
+        default=None, description="Compile / runtime / timeout error, if any."
+    )
+    elapsed_ms: float = Field(description="Wall-clock milliseconds the call took.")
+
+
+def _to_cleaning_rule_out(record: object, compiled: bool, error: str | None) -> CleaningRuleOut:
+    """Build a :class:`CleaningRuleOut` from a record + its compile status."""
+    pk = record.pattern_kind
+    pk_val = pk.value if hasattr(pk, "value") else pk
+    return CleaningRuleOut(
+        rule_id=record.rule_id,
+        name=record.name,
+        code=record.code,
+        source_pattern=record.source_pattern,
+        pattern_kind=pk_val,
+        enabled=record.enabled,
+        timeout=record.timeout,
+        max_input_chars=record.max_input_chars,
+        max_output_chars=record.max_output_chars,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+        compiled=compiled,
+        error=error,
+    )
+
+
 def _to_source_info(source: object) -> DocumentSourceInfo:
     return DocumentSourceInfo(
         uri=getattr(source, "uri", None),
