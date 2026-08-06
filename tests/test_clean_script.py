@@ -152,3 +152,23 @@ def test_comprehensions_and_builtins_available():
     )
     rule = RestrictedScriptRule(code)
     assert rule.clean("ab cd longword other") == "longword other"
+
+
+def test_subscript_and_slice_operations():
+    # RestrictedPython rewrites text[i]/text[i:j] into _getitem_(text, key);
+    # the sandbox must provide _getitem_ or any index/slice raises NameError.
+    code = (
+        "def clean(text, source=None):\n"
+        "    start = text.find('keep\\n')\n"
+        "    if start != -1:\n"
+        "        text = text[start + len('keep\\n'):]\n"
+        "    end = text.rfind('drop\\n')\n"
+        "    if end != -1:\n"
+        "        text = text[:end]\n"
+        "    first = text[0] if text else ''\n"
+        "    return first + text[1:]\n"
+    )
+    rule = RestrictedScriptRule(code)
+    out = rule.clean("header\nkeep\nme\ndrop\nhere\n")
+    assert out == "me\n"
+    assert rule.last_error is None
