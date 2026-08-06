@@ -445,6 +445,18 @@ class TestSegmentation:
         gen.generate(SAMPLE_TEXT, max_blocks=3)
         assert "AT MOST 3" in fake.last_messages[1]["content"]
 
+    def test_precomputed_max_blocks_when_omitted(self):
+        # No caller max_blocks -> a cap is derived from the prompt's
+        # "one block per 300-500 chars" rule (floor of 300 chars/block), so the
+        # model is told not to over-split a short segment into many blocks.
+        good = json.dumps(
+            {"blocks": [{"name": "n", "critical_question": "q?", "trusted_answer": "a."}]}
+        )
+        fake = FakeLLMClient(responses=[good])
+        gen = IdeaBlockGenerator(fake)
+        gen.generate("x" * 1300)
+        assert "AT MOST 5" in fake.last_messages[1]["content"]
+
     def test_multisegment_resilient_to_one_bad_segment(self):
         # A truncated/invalid response on one segment must not waste the whole
         # large-doc batch in non-strict mode: good segments still get indexed.
