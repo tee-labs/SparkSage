@@ -2096,6 +2096,31 @@ def _mount_qa_routes(app: Any, qa_svc: Any) -> None:
             items=items, count=len(items), total=total, limit=limit, offset=offset
         )
 
+    @app.post(
+        "/api/v1/knowledge_base/prune_orphaned_blocks",
+        summary=(
+            "Remove blocks whose document no longer exists (drift cleanup)"
+        ),
+    )
+    async def kb_prune_orphaned_blocks(
+        kb_id: Annotated[
+            str | None,
+            Query(
+                description=(
+                    "Target KB (defaults to pruning every registered KB)."
+                )
+            ),
+        ] = None,
+    ) -> dict[str, Any]:
+        try:
+            per_kb = qa_svc.prune_orphaned_blocks(kb_id=kb_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=_detail(exc)) from exc
+        return {
+            "removed": sum(per_kb.values()),
+            "kb": per_kb,
+        }
+
     @app.get(
         "/api/v1/knowledge_base/tags",
         response_model=TagsResponse,

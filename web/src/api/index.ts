@@ -161,6 +161,14 @@ export const api = {
     client
       .get<TagsResponse>('/knowledge_base/tags', { params: kbId ? { kb_id: kbId } : undefined })
       .then((r) => r.data),
+  pruneOrphanedBlocks: (kbId?: string) =>
+    client
+      .post<{ removed: number; kb: Record<string, number> }>(
+        '/knowledge_base/prune_orphaned_blocks',
+        null,
+        { params: kbId ? { kb_id: kbId } : undefined },
+      )
+      .then((r) => r.data),
 
   // ---- knowledge bases (multi-KB management) ----
   listKnowledgeBases: (params: { limit?: number; offset?: number } = {}) =>

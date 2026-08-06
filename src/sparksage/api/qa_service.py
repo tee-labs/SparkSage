@@ -1065,6 +1065,36 @@ class QAService:
                 kb.remove_document(doc_id)
         return deleted
 
+    def prune_orphaned_blocks(
+        self, kb_id: str | None = None
+    ) -> dict[str, int]:
+        """Remove blocks that lost their document reference (drift cleanup).
+
+        The reconciliation counterpart of :meth:`delete_document`: when a
+        document was deleted without the KB cascade (legacy data, a crash, or
+        state restored from a stale state store), its blocks linger in the
+        registry and keep :meth:`list_blocks` / ``block_count`` inflated past
+        the real document count. Runs
+        :meth:`KnowledgeBase.remove_orphaned_blocks` on the target KB -- or on
+        *every* registered KB when ``kb_id`` is omitted -- and returns a
+        ``{kb_id: removed}`` map.
+
+        Raises
+        ------
+        KeyError:
+            If ``kb_id`` does not match a registered knowledge base.
+        """
+        targets = (
+            [self._resolve_kb(kb_id)]
+            if kb_id is not None
+            else list(self._kbs.values())
+        )
+        removed = {kb.kb_id: kb.remove_orphaned_blocks() for kb in targets}
+        total = sum(removed.values())
+        if total:
+            _logger.info("pruned %d orphaned block(s): %s", total, removed)
+        return removed
+
     def find_by_external_key(
         self, external_key: str, *, kb_id: str | None = None
     ) -> DocumentRecord | None:

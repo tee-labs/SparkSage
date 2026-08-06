@@ -200,6 +200,26 @@ class TestBlocksRoutes:
         assert resp.status_code == 200
         assert resp.json()["tags"] == ["PROCESS", "TECHNOLOGY"]
 
+    def test_prune_orphaned_blocks_route(self, http_client):
+        client, svc = http_client
+        doc_id = _ingest(svc)
+        # simulate the legacy drift: delete the document record through the
+        # non-cascading path, leaving the indexed blocks behind
+        svc.service.delete_document(doc_id)
+        assert svc.service.document_store.get(doc_id) is None
+        resp = client.post("/api/v1/knowledge_base/prune_orphaned_blocks")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["removed"] == 2
+        assert svc.knowledge_base.block_count() == 0
+
+    def test_prune_orphaned_blocks_404(self, http_client):
+        client, _ = http_client
+        resp = client.post(
+            "/api/v1/knowledge_base/prune_orphaned_blocks", params={"kb_id": "nope"}
+        )
+        assert resp.status_code == 404
+
 
 class TestDocumentsRoutes:
     def test_documents_multi_tag_any_match_route(self, http_client):

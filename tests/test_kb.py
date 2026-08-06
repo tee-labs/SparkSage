@@ -214,3 +214,45 @@ class TestKnowledgeBase:
         kb.add_blocks([_block("A")])
         result = kb.search("deploy", k=3, filter=RetrievalFilter(kb_id=kb.kb_id))
         assert len(result.chunks) == 1
+
+    def test_orphaned_blocks_none_for_linked_documents(self):
+        kb = _make_kb()
+        rec = new_record(body_markdown="body", source="file://d.md")
+        kb.add_document(rec, blocks=[_block("A")])
+        assert kb.orphaned_blocks() == []
+        assert kb.remove_orphaned_blocks() == 0
+
+    def test_orphaned_block_kept_when_document_present(self):
+        # a block relinked to a doc that still exists in the store must survive
+        kb = _make_kb()
+        rec = new_record(body_markdown="body", source="file://d.md")
+        b = _block("A")
+        kb.add_blocks([b], doc_id=rec.doc_id)
+        kb.document_store.save(rec)
+        assert kb.orphaned_blocks() == []
+
+    def test_remove_orphaned_blocks_cleans_deleted_documents(self):
+        kb = _make_kb()
+        rec = new_record(body_markdown="body", source="file://d.md")
+        b1, b2 = _block("A"), _block("B")
+        kb.add_document(rec, blocks=[b1, b2])
+        # simulate the "document deleted but cascade bypassed" drift: drop the
+        # record from the store directly, leaving the blocks behind
+        kb.document_store.delete(rec.doc_id)
+        kb._doc_ids.discard(rec.doc_id)
+        assert kb.block_count() == 2
+        assert {str(b.id) for b in kb.orphaned_blocks()} == {
+            str(b1.id),
+            str(b2.id),
+        }
+        assert kb.remove_orphaned_blocks() == 2
+        assert kb.block_count() == 0
+        assert len(kb.store) == 0
+        assert len(kb.lexical) == 0
+
+    def test_remove_orphaned_blocks_unlinked(self):
+        kb = _make_kb()
+        kb.add_blocks([_block("A")])  # added without any doc link
+        assert len(kb.orphaned_blocks()) == 1
+        assert kb.remove_orphaned_blocks() == 1
+        assert kb.block_count() == 0
