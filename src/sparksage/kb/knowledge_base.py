@@ -373,13 +373,19 @@ class KnowledgeBase:
 
         The reconciliation escape hatch for drift: each orphaned block is
         removed via :meth:`remove_block`, so the vector store, lexical index
-        and state store all stay consistent. Returns the number of blocks
-        removed.
+        and state store all stay consistent. Owned :attr:`_doc_ids` whose
+        documents no longer exist in the store are dropped too, so
+        :meth:`document_count` reflects reality (a deleted document's block
+        cleanup must not leave its count inflated). Returns the number of
+        blocks removed.
         """
         removed = 0
         for block in self.orphaned_blocks():
             if self.remove_block(str(block.id)):
                 removed += 1
+        for doc_id in list(self._doc_ids):
+            if self._document_store.get(doc_id) is None:
+                self._doc_ids.discard(doc_id)
         return removed
 
     def reindex(self) -> int:

@@ -212,6 +212,7 @@ class TestBlocksRoutes:
         data = resp.json()
         assert data["removed"] == 2
         assert svc.knowledge_base.block_count() == 0
+        assert svc.knowledge_base.document_count() == 0  # doc id reconciled too
 
     def test_prune_orphaned_blocks_404(self, http_client):
         client, _ = http_client
