@@ -136,6 +136,25 @@ export default function DocumentsPage() {
     });
   };
 
+  const pruneOrphans = () => {
+    Modal.confirm({
+      title: '清理无效 Block',
+      content: '将移除知识库中已无对应文档的 Block（文档已删除但 Block 残留）。确定继续吗？',
+      okText: '清理',
+      okType: 'danger',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const res = await api.pruneOrphanedBlocks();
+          message.success(`已清理 ${res.removed ?? 0} 个无效 Block`);
+          load();
+        } catch (e) {
+          message.error(errText(e));
+        }
+      },
+    });
+  };
+
   const columns = [
     {
       title: '标题',
@@ -203,6 +222,9 @@ export default function DocumentsPage() {
           />
           <Button icon={<ReloadOutlined />} onClick={load}>
             刷新
+          </Button>
+          <Button danger onClick={pruneOrphans}>
+            清理无效 Block
           </Button>
         </Space>
       </Card>

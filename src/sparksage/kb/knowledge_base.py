@@ -350,6 +350,38 @@ class KnowledgeBase:
         )
         return existed
 
+    def orphaned_blocks(self) -> list[IdeaBlock]:
+        """Return the blocks that have no live document reference.
+
+        A block is orphaned when it was never linked to a document, or its
+        linked document no longer exists in the document store (e.g. the
+        document was deleted while the cascade was bypassed -- the legacy
+        "document deleted but its blocks still indexed" drift). These blocks
+        inflate :meth:`block_count` even though :meth:`document_count` has
+        dropped, which is the document-management vs knowledge-base count
+        mismatch.
+        """
+        out: list[IdeaBlock] = []
+        for bid, block in self._registry.items():
+            doc_id = self._block_doc.get(bid)
+            if doc_id is None or self._document_store.get(doc_id) is None:
+                out.append(block)
+        return out
+
+    def remove_orphaned_blocks(self) -> int:
+        """Drop every block that lost its document reference, keeping indexes consistent.
+
+        The reconciliation escape hatch for drift: each orphaned block is
+        removed via :meth:`remove_block`, so the vector store, lexical index
+        and state store all stay consistent. Returns the number of blocks
+        removed.
+        """
+        removed = 0
+        for block in self.orphaned_blocks():
+            if self.remove_block(str(block.id)):
+                removed += 1
+        return removed
+
     def reindex(self) -> int:
         """Rebuild the dense + lexical indexes from the live registry.
 
