@@ -239,7 +239,6 @@ class TestKnowledgeBase:
         # simulate the "document deleted but cascade bypassed" drift: drop the
         # record from the store directly, leaving the blocks behind
         kb.document_store.delete(rec.doc_id)
-        kb._doc_ids.discard(rec.doc_id)
         assert kb.block_count() == 2
         assert {str(b.id) for b in kb.orphaned_blocks()} == {
             str(b1.id),
@@ -247,6 +246,7 @@ class TestKnowledgeBase:
         }
         assert kb.remove_orphaned_blocks() == 2
         assert kb.block_count() == 0
+        assert kb.document_count() == 0  # doc id reconciled, count no longer inflated
         assert len(kb.store) == 0
         assert len(kb.lexical) == 0
 
