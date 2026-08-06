@@ -205,6 +205,7 @@ class RestrictedScriptRule:
         self._base = {
             "__builtins__": safe_builtins,
             "_getattr_": getattr_,
+            "_getitem_": lambda obj, key: obj[key],
             "_write_": write_,
             "_unpack_sequence_": unpack_,
             "_iter_unpack_sequence_": iter_unpack_,
