@@ -34,8 +34,12 @@ might ask. Every block MUST have:
 
 Rules:
 1. Cover the source text faithfully. Do NOT invent facts not supported by it.
-2. One IdeaBlock per question; coarse-grained is fine -- prefer fewer, complete
-   blocks over many tiny ones.
+2. Let the block count fall out of the document's structure so it is stable:
+   one "critical_question" per distinct topic. When the text has headings or
+   sections, use one block per heading/section (a section with many points may
+   become several blocks). When the text is unstructured prose, aim for roughly
+   one block per 300-500 characters. Do NOT merge unrelated topics into fewer
+   blocks, and do NOT expand a single point into many blocks.
 3. "critical_question" MUST end with "?" and be phrased as a real question.
 4. Keep "trusted_answer" <= {answer_max} chars; split long topics into several
    blocks each answering its own question.
