@@ -12,6 +12,8 @@
 #                       /api/v1/query (mounted when SPARKSAGE_ENABLE_QA is set)
 #   * distill        -> the de-dup pipeline (in-process, /api/v1/distill later)
 #   * tags-zh        -> jieba CJK segmentation for keyword extraction
+#   * clean-script   -> sandboxed cleaning-rule scripts (RestrictedPython),
+#                       so /cleaning test + reload work out of the box
 #
 # The QA routes are mounted automatically because SPARKSAGE_ENABLE_QA=1 is set
 # below; unset it (or set SPARKSAGE_ENABLE_QA=0) to run the slim convert +
@@ -68,7 +70,7 @@
 ARG PYTHON_VERSION=3.11
 # Full QA pipeline. Override with --build-arg SPARKSAGE_EXTRAS=... for a slim or
 # extended image (e.g. append chroma / pgvector for production vector stores).
-ARG SPARKSAGE_EXTRAS="api,convert,llm,embed,rerank,distill,tags-zh"
+ARG SPARKSAGE_EXTRAS="api,convert,llm,embed,rerank,distill,tags-zh,clean-script"
 # --------------------------------------------------------------------------- #
 # Frontend build stage: compile the React + Ant Design WEB UI to static assets.
 # The built `web/dist` is served by FastAPI behind a catch-all route, so the
