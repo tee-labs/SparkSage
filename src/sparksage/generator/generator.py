@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -54,6 +55,12 @@ DEFAULT_MAX_INPUT_CHARS = 12000
 #: chunked into parallel LLM calls instead of a single serial queue -- the
 #: single biggest latency win on big uploads.
 DEFAULT_SEGMENT_WORKERS = 1
+
+#: Lower bound of the prompt's "one block per 300-500 characters" split rule.
+#: Used to pre-compute a per-segment ``max_blocks`` cap when the caller did not
+#: pass one, so the model cannot over-split (each extra block means extra output
+#: tokens and a slower generation).
+MIN_CHARS_PER_BLOCK = 300
 
 #: Separator hierarchy for :func:`_split_text_segments` (most semantic first).
 #: The empty string is the final "split on characters" fallback so the size
@@ -486,6 +493,8 @@ class IdeaBlockGenerator:
         max_blocks: int | None,
     ) -> tuple[list[IdeaBlock], GenerationStats]:
         """Run one LLM generation request for a single text segment."""
+        if max_blocks is None:
+            max_blocks = max(1, math.ceil(len(text) / MIN_CHARS_PER_BLOCK))
         messages = build_messages(
             text, source=source, max_blocks=max_blocks, language=language
         )
