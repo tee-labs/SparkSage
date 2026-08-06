@@ -60,7 +60,7 @@ DEFAULT_SEGMENT_WORKERS = 1
 #: Used to pre-compute a per-segment ``max_blocks`` cap when the caller did not
 #: pass one, so the model cannot over-split (each extra block means extra output
 #: tokens and a slower generation).
-MIN_CHARS_PER_BLOCK = 300
+MIN_CHARS_PER_BLOCK = 800
 
 #: Separator hierarchy for :func:`_split_text_segments` (most semantic first).
 #: The empty string is the final "split on characters" fallback so the size
