@@ -289,7 +289,7 @@ class IdeaBlockGenerator:
         client: LLMClient,
         *,
         model: str | None = None,
-        temperature: float = 0.2,
+        temperature: float = 0.0,
         language: str = "en",
         strict: bool = False,
         use_json_mode: bool = True,

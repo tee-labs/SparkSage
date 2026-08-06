@@ -85,6 +85,10 @@ ENV_MAX_INPUT_CHARS = "SPARKSAGE_MAX_INPUT_CHARS"
 #: Number of segments generated concurrently -- the biggest latency win on
 #: large multi-segment uploads (fan-out instead of a serial queue).
 ENV_GENERATE_MAX_WORKERS = "SPARKSAGE_GENERATE_MAX_WORKERS"
+#: Sampling temperature for IdeaBlock generation. ``0`` (default) is the
+#: deterministic value for structured extraction -- the block count stays
+#: stable run-to-run. Raise it only if you want more variety in phrasing.
+ENV_TEMPERATURE = "SPARKSAGE_TEMPERATURE"
 
 # Document management
 ENV_DOC_STORE = "SPARKSAGE_DOC_STORE"
@@ -152,6 +156,9 @@ DEFAULT_MAX_INPUT_CHARS = 12000
 #: serial by default for deterministic offline tests; production wiring raises
 #: this so a multi-segment large upload fans out into parallel LLM calls.
 DEFAULT_GENERATE_MAX_WORKERS = 4
+#: Deterministic sampling temperature for IdeaBlock generation (see
+#: :data:`ENV_TEMPERATURE`).
+DEFAULT_TEMPERATURE = 0.0
 #: Default LLM output-token cap forwarded to the provider (``None`` lets the
 #: provider choose; set ``SPARKSAGE_MAX_TOKENS`` when the provider's default
 #: truncates long generations).
@@ -322,6 +329,9 @@ def build_default_service() -> SparkSageService:
     ``SPARKSAGE_GENERATE_MAX_WORKERS``  Segments generated concurrently (default
                                    ``4``) -- the biggest latency win on big
                                    multi-segment uploads.
+    ``SPARKSAGE_TEMPERATURE``     Sampling temperature for IdeaBlock generation
+                                   (default ``0`` -- deterministic block
+                                   counts for structured extraction).
     ============================  =========================================
     """
     load_dotenv()
@@ -350,6 +360,7 @@ def build_default_service() -> SparkSageService:
         generator = IdeaBlockGenerator(
             client,
             language=language,
+            temperature=_env_float(ENV_TEMPERATURE, DEFAULT_TEMPERATURE),
             max_input_chars=_env_int(ENV_MAX_INPUT_CHARS, DEFAULT_MAX_INPUT_CHARS),
             max_workers=_env_int(ENV_GENERATE_MAX_WORKERS, DEFAULT_GENERATE_MAX_WORKERS),
         )
@@ -584,6 +595,7 @@ def build_qa_service():
         generator = IdeaBlockGenerator(
             llm_client,
             language=language,
+            temperature=_env_float(ENV_TEMPERATURE, DEFAULT_TEMPERATURE),
             max_input_chars=max_input_chars,
             max_workers=generate_max_workers,
         )
