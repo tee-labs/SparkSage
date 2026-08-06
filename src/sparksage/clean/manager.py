@@ -256,8 +256,12 @@ class CleaningRuleManager:
                 max_input_chars=max_input_chars,
                 max_output_chars=max_output_chars,
             )
-        except ValueError as exc:
-            return str(exc)
+        except Exception as exc:
+            # ponytail: broad catch is the fail-open pattern -- construction can
+            # raise ImportError (missing [clean-script] extra: RestrictedPython
+            # or regex) or ValueError (compile/exec); all should surface as a
+            # helpful error string, never a 500 that crashes the test endpoint.
+            return str(exc) or f"{type(exc).__name__}: {exc}"
 
     @classmethod
     def _build_rule(cls, record: CleaningRuleRecord) -> object | str:
