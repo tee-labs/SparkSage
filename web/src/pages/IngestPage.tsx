@@ -42,7 +42,7 @@ interface FileJobState {
   blockCount?: number;
 }
 
-const POLL_INTERVAL_MS = 1000;
+const POLL_INTERVAL_MS = 5000;
 const TERMINAL = new Set(['success', 'failed', 'cancelled']);
 
 function delay(ms: number) {
