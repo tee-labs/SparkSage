@@ -16,6 +16,7 @@ import pytest
 
 from sparksage.convert import (
     DEFAULT_EXTENSIONS,
+    AnyDocBackend,
     ConversionResult,
     ConverterBackend,
     FakeConverterBackend,
@@ -283,6 +284,97 @@ def test_markitdown_default_backend_instantiated_when_no_backend_given(monkeypat
     conv = MarkdownConverter(llm_model="gpt-4o", enable_plugins=False)
     assert created["kwargs"] == {"llm_model": "gpt-4o", "enable_plugins": False}
     assert conv.convert_to_markdown("anything.pdf") == "fake"
+
+
+# ---------------------------------------------------------------------------- #
+# AnyDocBackend optional-dependency behaviour
+# ---------------------------------------------------------------------------- #
+def _fake_anydoc_module():
+    import types
+
+    calls = {"paths": [], "bytes": []}
+    mod = types.ModuleType("anydoc")
+
+    def to_markdown(path):
+        calls["paths"].append(path)
+        return "# from-path"
+
+    def to_markdown_bytes(data):
+        calls["bytes"].append(bytes(data))
+        return "# from-bytes"
+
+    mod.to_markdown = to_markdown  # type: ignore[attr-defined]
+    mod.to_markdown_bytes = to_markdown_bytes  # type: ignore[attr-defined]
+    mod._calls = calls  # type: ignore[attr-defined]
+    return mod
+
+
+def test_anydoc_backend_missing_dependency(monkeypatch):
+    monkeypatch.setitem(sys.modules, "anydoc", None)
+    with pytest.raises(ImportError, match=r"convert-anydoc"):
+        AnyDocBackend()
+
+
+def test_anydoc_backend_converts_bytes_and_path(monkeypatch, tmp_path):
+    mod = _fake_anydoc_module()
+    monkeypatch.setitem(sys.modules, "anydoc", mod)
+    backend = AnyDocBackend()
+
+    p = tmp_path / "report.docx"
+    p.write_bytes(b"PK\x03\x04...")
+    md, title = backend.convert(p)
+    assert md == "# from-path"
+    assert title is None
+    assert mod._calls["paths"] == [str(p)]
+
+    md_bytes, _ = backend.convert(b"PK\x03\x04...")
+    assert md_bytes == "# from-bytes"
+    assert mod._calls["bytes"] == [b"PK\x03\x04..."]
+
+
+# ---------------------------------------------------------------------------- #
+# SPARKSAGE_CONVERTER backend selection (app.py:_build_converter)
+# ---------------------------------------------------------------------------- #
+def _fake_markitdown_module():
+    import types
+
+    class FakeMI:
+        def __init__(self, **kwargs):
+            pass
+
+        def convert(self, source, **kwargs):
+            return type("R", (), {"markdown": "md", "title": None})()
+
+    mod = types.ModuleType("markitdown")
+    mod.MarkItDown = FakeMI  # type: ignore[attr-defined]
+    return mod
+
+
+def test_build_converter_defaults_to_markitdown(monkeypatch):
+    monkeypatch.setitem(sys.modules, "markitdown", _fake_markitdown_module())
+    monkeypatch.delenv("SPARKSAGE_CONVERTER", raising=False)
+    from sparksage.api.app import _build_converter
+
+    assert isinstance(_build_converter().backend, MarkItDownBackend)
+
+
+def test_build_converter_selects_anydoc_via_env(monkeypatch):
+    monkeypatch.setitem(sys.modules, "anydoc", _fake_anydoc_module())
+    monkeypatch.setenv("SPARKSAGE_CONVERTER", "anydoc")
+    from sparksage.api.app import _build_converter
+
+    assert isinstance(_build_converter().backend, AnyDocBackend)
+
+
+def test_build_converter_unknown_falls_back(monkeypatch, caplog):
+    monkeypatch.setitem(sys.modules, "markitdown", _fake_markitdown_module())
+    monkeypatch.setenv("SPARKSAGE_CONVERTER", "nope")
+    from sparksage.api.app import _build_converter
+
+    with caplog.at_level("WARNING"):
+        conv = _build_converter()
+    assert isinstance(conv.backend, MarkItDownBackend)
+    assert any("falling back" in rec.getMessage() for rec in caplog.records)
 
 
 # ---------------------------------------------------------------------------- #

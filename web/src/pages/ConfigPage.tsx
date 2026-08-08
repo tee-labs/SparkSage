@@ -140,6 +140,22 @@ export default function ConfigPage() {
           </Form.Item>
         </Card>
 
+        <Card title="转换器配置" size="small" style={{ marginTop: 12 }} loading={loading}>
+          <Form.Item
+            label="SPARKSAGE_CONVERTER"
+            name="SPARKSAGE_CONVERTER"
+            extra="格式转换引擎：markitdown（默认，格式覆盖最广）或 anydoc（Firecrawl 本地 Rust 转换器，处理 office/PDF 更快更轻）"
+          >
+            <Select
+              options={[
+                { value: 'markitdown', label: 'markitdown' },
+                { value: 'anydoc', label: 'anydoc (Firecrawl)' },
+              ]}
+              allowClear
+            />
+          </Form.Item>
+        </Card>
+
         <Card title="存储配置" size="small" style={{ marginTop: 12 }} loading={loading}>
           <Form.Item
             label="SPARKSAGE_DOC_STORE"

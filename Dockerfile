@@ -46,6 +46,8 @@
 #   SPARKSAGE_BASE_URL        OpenAI-compatible base URL (custom endpoint)
 #   SPARKSAGE_MODEL           Model id (default gpt-4o-mini)
 #   SPARKSAGE_STREAM          Stream the LLM response (default true)
+#   SPARKSAGE_CONVERTER       Format-conversion engine: markitdown (default) |
+#                             anydoc (Firecrawl local Rust; both are preinstalled)
 #   SPARKSAGE_LANGUAGE        BCP-47 code written into every block
 #   SPARKSAGE_EMBEDDING_API_KEY   Embedding key (falls back to the LLM key)
 #   SPARKSAGE_EMBEDDING_BASE_URL  Embedding base URL (falls back to LLM base URL)
@@ -70,7 +72,9 @@
 ARG PYTHON_VERSION=3.11
 # Full QA pipeline. Override with --build-arg SPARKSAGE_EXTRAS=... for a slim or
 # extended image (e.g. append chroma / pgvector for production vector stores).
-ARG SPARKSAGE_EXTRAS="api,convert,llm,embed,rerank,distill,tags-zh,clean-script"
+# Both conversion backends (markitdown + anydoc) ship by default so the
+# SPARKSAGE_CONVERTER knob works out of the box.
+ARG SPARKSAGE_EXTRAS="api,convert,convert-anydoc,llm,embed,rerank,distill,tags-zh,clean-script"
 # --------------------------------------------------------------------------- #
 # Frontend build stage: compile the React + Ant Design WEB UI to static assets.
 # The built `web/dist` is served by FastAPI behind a catch-all route, so the

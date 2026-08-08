@@ -51,7 +51,7 @@ from sparksage.api.pipeline import (
 )
 from sparksage.clean.cleaner import TextCleaner
 from sparksage.config import load_dotenv
-from sparksage.convert.backend import MarkItDownBackend
+from sparksage.convert.backend import AnyDocBackend, MarkItDownBackend
 from sparksage.convert.converter import MarkdownConverter
 from sparksage.documents.backends import SqliteDocumentStore
 from sparksage.documents.backends.memory import InMemoryDocumentStore
@@ -72,6 +72,10 @@ ENV_MODEL = "SPARKSAGE_MODEL"
 ENV_STREAM = "SPARKSAGE_STREAM"
 ENV_OPENAI_API_KEY = "OPENAI_API_KEY"
 ENV_OPENAI_BASE_URL = "OPENAI_BASE_URL"
+#: Format-conversion engine: ``markitdown`` (default) or ``anydoc`` (Firecrawl's
+#: local Rust converter -- faster/lighter for office docs + PDF, needs the
+#: ``[convert-anydoc]`` extra). Unknown values fall back to ``markitdown``.
+ENV_CONVERTER = "SPARKSAGE_CONVERTER"
 #: Output-token cap forwarded to the provider. Some OpenAI-compatible endpoints
 #: (BigModel/GLM, vLLM, Ollama) default to a low ``max_output_tokens`` that
 #: truncates long JSON mid-key; setting this keeps the full generation intact.
@@ -147,6 +151,8 @@ ENV_RERANKER_MAX_LENGTH = "SPARKSAGE_RERANKER_MAX_LENGTH"
 ENV_DATA_DIR = "SPARKSAGE_DATA_DIR"
 
 DEFAULT_MODEL = "gpt-4o-mini"
+#: Default format-conversion engine (see :data:`ENV_CONVERTER`).
+DEFAULT_CONVERTER = "markitdown"
 #: Streaming is on by default -- it is more robust for long generations.
 DEFAULT_STREAM = True
 #: Default per-segment character budget for the generator (see
@@ -279,6 +285,29 @@ def _auto_tag_min_cohesion() -> float | None:
     return _env_float(ENV_AUTO_TAG_MIN_COHESION, DEFAULT_MIN_COHESION)
 
 
+def _build_converter() -> MarkdownConverter:
+    """Resolve a :class:`MarkdownConverter` from ``SPARKSAGE_CONVERTER``.
+
+    ``markitdown`` (default) or ``anydoc`` -- Firecrawl's local Rust converter
+    that normalizes Word / PowerPoint / Excel / OpenDocument / RTF / EPUB / CSV /
+    PDF to clean Markdown with no ML models or cloud calls. Any other value logs
+    a warning and falls back to ``markitdown`` so a typo never breaks startup.
+    The selected backend is constructed eagerly, so a missing optional
+    dependency fails fast at startup with a clear ``ImportError``.
+    """
+    name = (_env(ENV_CONVERTER) or DEFAULT_CONVERTER).strip().lower()
+    if name == "anydoc":
+        return MarkdownConverter(backend=AnyDocBackend())
+    if name != DEFAULT_CONVERTER:
+        _logger.warning(
+            "unknown %s=%r; falling back to %r",
+            ENV_CONVERTER,
+            name,
+            DEFAULT_CONVERTER,
+        )
+    return MarkdownConverter(backend=MarkItDownBackend())
+
+
 def build_default_service() -> SparkSageService:
     """Wire a production :class:`SparkSageService` from configuration.
 
@@ -289,8 +318,10 @@ def build_default_service() -> SparkSageService:
     :mod:`sparksage.config` for the supported ``.env`` syntax and a template at
     ``.env.example`` in the repo root.
 
-    * Converter: a :class:`MarkdownConverter` over :class:`MarkItDownBackend`
-      (requires ``pip install 'sparksage[convert]'``).
+    * Converter: a :class:`MarkdownConverter` over the backend named by
+      ``SPARKSAGE_CONVERTER`` (``markitdown`` by default; ``anydoc`` opts into
+      Firecrawl's local Rust converter, requires ``pip install
+      'sparksage[convert-anydoc]'``).
     * Cleaner: a default :class:`TextCleaner`.
     * Generator: an :class:`IdeaBlockGenerator` over
       :class:`OpenAICompatibleClient` when an API key is present; ``None``
@@ -306,6 +337,8 @@ def build_default_service() -> SparkSageService:
     ``SPARKSAGE_BASE_URL``        Base URL (falls back to ``OPENAI_BASE_URL``)
     ``SPARKSAGE_MODEL``           Model id (default ``gpt-4o-mini``)
     ``SPARKSAGE_STREAM``          Stream the LLM response (default ``true``)
+    ``SPARKSAGE_CONVERTER``       Format-conversion engine: ``markitdown``
+                                   (default) or ``anydoc`` (Firecrawl local Rust)
     ``SPARKSAGE_LANGUAGE``        Output language written into each block
     ``SPARKSAGE_LOG_LEVEL``       ``sparksage`` logger verbosity (default ``WARNING``)
     ``SPARKSAGE_DATA_DIR``        Unified data dir for durable SQLite stores
@@ -336,7 +369,7 @@ def build_default_service() -> SparkSageService:
     """
     load_dotenv()
     configure_logging()
-    converter = MarkdownConverter(backend=MarkItDownBackend())
+    converter = _build_converter()
     cleaner = TextCleaner()
 
     generator: IdeaBlockGenerator | None = None
@@ -601,7 +634,7 @@ def build_qa_service():
         )
 
     spark_service = SparkSageService(
-        converter=MarkdownConverter(backend=MarkItDownBackend()),
+        converter=_build_converter(),
         cleaner=TextCleaner(),
         generator=generator,
         document_store=_build_document_store(),
