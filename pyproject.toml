@@ -40,6 +40,11 @@ embed = [
 convert = [
     "markitdown[all]>=0.1",
 ]
+# Firecrawl anydoc: fast local Rust converter for office docs + PDF (imports as
+# `anydoc`). A drop-in alternative to markitdown; pick via SPARKSAGE_CONVERTER.
+convert-anydoc = [
+    "firecrawl-anydoc>=0.1",
+]
 api = [
     "fastapi>=0.100",
     "uvicorn[standard]>=0.20",
@@ -76,6 +81,7 @@ rerank = [
 all = [
     "openai>=1.0",
     "markitdown[all]>=0.1",
+    "firecrawl-anydoc>=0.1",
     "fastapi>=0.100",
     "uvicorn[standard]>=0.20",
     "python-multipart>=0.0.5",

@@ -1,12 +1,15 @@
 """File-to-Markdown conversion backend abstraction.
 
-The conversion core depends *only* on the :class:`ConverterBackend` protocol, so
+The conversion backend exposes *only* the :class:`ConverterBackend` protocol, so
 it is fully unit-testable with the deterministic :class:`FakeConverterBackend`.
-A concrete :class:`MarkItDownBackend` (backed by Microsoft's ``markitdown``
-library) is provided for production use across dozens of file formats.
+Concrete backends are provided for production use: :class:`MarkItDownBackend`
+(backed by Microsoft's ``markitdown`` library, the default) and
+:class:`AnyDocBackend` (backed by Firecrawl's ``anydoc`` Rust converter, a fast
+local alternative for office documents + PDF).
 
-``markitdown`` is an *optional* dependency -- install it with
-``pip install 'sparksage[convert]'``.
+Both are *optional* dependencies -- install them with
+``pip install 'sparksage[convert]'`` (markitdown) and/or
+``pip install 'sparksage[convert-anydoc]'`` (anydoc).
 """
 
 from __future__ import annotations
@@ -65,6 +68,40 @@ class MarkItDownBackend:
     def convert(self, source: Any, **kwargs: Any) -> tuple[str, str | None]:
         result = self._markitdown.convert(source, **kwargs)
         return result.markdown, getattr(result, "title", None)
+
+
+class AnyDocBackend:
+    """Converter backend backed by Firecrawl ``anydoc`` (Rust, local, fast).
+
+    Handles Word (``.doc`` / ``.docx`` / ``.docm``), PowerPoint, Excel,
+    OpenDocument, RTF, EPUB, CSV and text-based PDFs -- all normalized to clean
+    GitHub-Flavored Markdown. Unlike ``markitdown`` it is fully local (no ML
+    models, no cloud services) and renders through a single shared document
+    model, which makes it a strong alternative for mixed office corpora. See
+    https://github.com/firecrawl/anydoc for the full matrix.
+
+    The ``firecrawl-anydoc`` package is an *optional* dependency -- install it
+    with ``pip install 'sparksage[convert-anydoc]'``. It imports as ``anydoc``.
+    """
+
+    def __init__(self) -> None:
+        try:
+            import anydoc
+        except ImportError as exc:  # pragma: no cover - import guard
+            raise ImportError(
+                "AnyDocBackend requires the 'firecrawl-anydoc' package. "
+                "Install it with: pip install 'sparksage[convert-anydoc]'"
+            ) from exc
+        self._anydoc = anydoc
+
+    def convert(self, source: Any, **kwargs: Any) -> tuple[str, str | None]:
+        if isinstance(source, (bytes, bytearray)):
+            markdown = self._anydoc.to_markdown_bytes(bytes(source))
+        else:
+            # anydoc.to_markdown reads from a file path; formats are detected
+            # from the content (extension for signature-less CSV).
+            markdown = self._anydoc.to_markdown(str(source))
+        return markdown, None
 
 
 @dataclass

@@ -11,6 +11,7 @@ feed ``result.markdown`` as the text and ``result.source_ref`` as provenance to
 """
 
 from sparksage.convert.backend import (
+    AnyDocBackend,
     ConverterBackend,
     FakeConverterBackend,
     MarkItDownBackend,
@@ -28,4 +29,5 @@ __all__ = [
     "FakeConverterBackend",
     "MarkdownConverter",
     "MarkItDownBackend",
+    "AnyDocBackend",
 ]

@@ -49,9 +49,13 @@ PYTHONPATH=src python3 examples/build_chunks.py
   implement the Protocol; raw model output is coerced through the enums before
   building strict `IdeaBlock`s (see `generator/schema.py`).
 - The conversion core (`convert/converter.py`) depends only on the
-  `ConverterBackend` Protocol — never import `markitdown` there. It is an
-  optional dependency (`pip install 'sparksage[convert]'`), imported lazily only
-  inside `MarkItDownBackend`. `MarkdownConverter` returns a `ConversionResult`
+  `ConverterBackend` Protocol — never import `markitdown` or `anydoc` there.
+  Both engines are optional dependencies (`['sparksage[convert]'` for
+  `markitdown`, `'sparksage[convert-anydoc]'` for Firecrawl's `anydoc`), imported
+  lazily only inside `MarkItDownBackend` / `AnyDocBackend`. `SPARKSAGE_CONVERTER`
+  (`markitdown` default | `anydoc`) picks the backend in
+  `app.py:_build_converter`; both ship in the default Docker image.
+  `MarkdownConverter` returns a `ConversionResult`
   whose `.markdown` feeds `IdeaBlockGenerator` and whose `.source_ref` provides
   provenance.
 - The cleaning core (`clean/cleaner.py`) depends only on the `CleaningRule`
