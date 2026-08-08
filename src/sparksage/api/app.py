@@ -50,7 +50,7 @@ from sparksage.api.pipeline import (
     SparkSageService,
 )
 from sparksage.clean.cleaner import TextCleaner
-from sparksage.config import load_dotenv
+from sparksage.config import load_dotenv, resolve_config_path
 from sparksage.convert.backend import AnyDocBackend, MarkItDownBackend
 from sparksage.convert.converter import MarkdownConverter
 from sparksage.documents.backends import SqliteDocumentStore
@@ -312,9 +312,11 @@ def build_default_service() -> SparkSageService:
     """Wire a production :class:`SparkSageService` from configuration.
 
     Configuration is read from environment variables. Values may be supplied
-    directly (container / CI / system env) **or** via a ``.env`` file in the
-    current working directory -- :func:`load_dotenv` is called first, but real
-    environment variables always take priority over the file (12-factor). See
+    directly (container / CI / system env) **or** via a ``.env`` file --
+    :func:`load_dotenv` is called first for the CWD (or existing ``.env``), then
+    again for the resolved config path (:func:`sparksage.config.resolve_config_path`
+    -- existing CWD file, else ``SPARKSAGE_DATA_DIR/.env``); real environment
+    variables always take priority over the file (12-factor). See
     :mod:`sparksage.config` for the supported ``.env`` syntax and a template at
     ``.env.example`` in the repo root.
 
@@ -368,6 +370,7 @@ def build_default_service() -> SparkSageService:
     ============================  =========================================
     """
     load_dotenv()
+    load_dotenv(resolve_config_path())
     configure_logging()
     converter = _build_converter()
     cleaner = TextCleaner()
@@ -593,6 +596,7 @@ def build_qa_service():
     from sparksage.reader.orchestrator import Reader
 
     load_dotenv()
+    load_dotenv(resolve_config_path())
     configure_logging()
 
     api_key = _env(ENV_API_KEY) or _env(ENV_OPENAI_API_KEY)

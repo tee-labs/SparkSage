@@ -16,6 +16,7 @@ from sparksage.config import (
     EnvParseError,
     load_dotenv,
     parse_env_file,
+    resolve_config_path,
 )
 
 
@@ -231,6 +232,44 @@ def test_load_dotenv_propagates_parse_error(tmp_path: Path) -> None:
     f.write_text("BAD LINE\n")
     with pytest.raises(EnvParseError):
         load_dotenv(f)
+
+
+# ---------------------------------------------------------------------------- #
+# resolve_config_path (the Docker .env fix)
+# ---------------------------------------------------------------------------- #
+def test_resolve_config_path_prefers_existing_cwd_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SPARKSAGE_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / DEFAULT_ENV_FILENAME).write_text("X=1\n")
+    assert resolve_config_path().resolve() == (tmp_path / DEFAULT_ENV_FILENAME).resolve()
+
+
+def test_resolve_config_path_uses_data_dir_when_no_cwd_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SPARKSAGE_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.chdir(tmp_path)
+    assert resolve_config_path() == tmp_path / "data" / DEFAULT_ENV_FILENAME
+
+
+def test_resolve_config_path_falls_back_to_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SPARKSAGE_DATA_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert resolve_config_path().resolve() == (tmp_path / DEFAULT_ENV_FILENAME).resolve()
+
+
+def test_load_dotenv_resolved_data_dir_env(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SPARKSAGE_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.chdir(tmp_path)
+    data_env = tmp_path / "data" / DEFAULT_ENV_FILENAME
+    data_env.parent.mkdir()
+    data_env.write_text("SPARKSAGE_TEST_DATA_DIR=from-datadir\n")
+    monkeypatch.delenv("SPARKSAGE_TEST_DATA_DIR", raising=False)
+    assert load_dotenv(resolve_config_path()) == {"SPARKSAGE_TEST_DATA_DIR": "from-datadir"}
 
 
 # ---------------------------------------------------------------------------- #

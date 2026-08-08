@@ -37,7 +37,8 @@
 #
 # Persistence: SPARKSAGE_DATA_DIR defaults to /app/data -- mount a volume there
 # and EVERYTHING (documents, KB metadata, the live block + vector index,
-# feedback) survives a restart, no re-ingest / re-embedding needed:
+# feedback, and the .env written by the WEB UI config page) survives a restart,
+# no re-ingest / re-embedding needed:
 #   docker run --rm -p 8000:8000 -v "$PWD/data:/app/data" sparksage:latest
 #
 # Env vars (SPARKSAGE_* take priority over OPENAI_*):
