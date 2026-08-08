@@ -7,6 +7,13 @@ configuration -- **without adding any third-party dependency**. The parser is
 small, pure stdlib, and intentionally restricted to the well-defined subset of
 ``.env`` syntax (it deliberately does *not* implement shell expansion).
 
+Where the ``.env`` file lives is resolved by :func:`resolve_config_path`:
+
+1. An existing ``.env`` in the CWD wins (backward compatible / bind-mounted).
+2. Otherwise ``SPARKSAGE_DATA_DIR/.env`` -- the writable durable location in
+   the Docker image, where the non-root process cannot write the CWD.
+3. Otherwise the CWD ``.env`` (the historical default).
+
 Priority (highest first), matching the 12-factor convention:
 
 1. Real environment variables already set in the process (container / CI /
@@ -43,10 +50,15 @@ __all__ = [
     "EnvParseError",
     "load_dotenv",
     "parse_env_file",
+    "resolve_config_path",
 ]
 
 #: Default filename searched for in the current working directory.
 DEFAULT_ENV_FILENAME = ".env"
+
+#: Env var naming the durable data dir (points the config file at a writable
+#: location -- the Docker image's CWD is not).
+_ENV_DATA_DIR = "SPARKSAGE_DATA_DIR"
 
 #: A valid environment-variable name: ASCII letter/underscore start, then
 #: letters, digits or underscores. Matches the POSIX ``name`` definition used
@@ -99,6 +111,28 @@ def parse_env_file(path: str | os.PathLike[str]) -> dict[str, str]:
         except EnvParseError as exc:
             raise EnvParseError(f"{p}:{lineno}: {exc}") from None
     return result
+
+
+def resolve_config_path() -> Path:
+    """Resolve the ``.env`` file the service reads and writes.
+
+    Priority:
+
+    1. An existing ``.env`` in the CWD -- backward compatible, and covers a
+       bind-mounted ``/app/.env``.
+    2. ``SPARKSAGE_DATA_DIR/.env`` -- the durable default when a data dir is
+       configured. This is what makes the WEB UI's config save work in the
+       Docker image, where the non-root process owns ``/app/data`` but cannot
+       write the root-owned CWD.
+    3. ``.env`` in the CWD (historical default).
+    """
+    cwd_env = Path(DEFAULT_ENV_FILENAME)
+    if cwd_env.is_file():
+        return cwd_env
+    data_dir = os.environ.get(_ENV_DATA_DIR)
+    if data_dir:
+        return Path(data_dir).expanduser() / DEFAULT_ENV_FILENAME
+    return cwd_env
 
 
 def load_dotenv(

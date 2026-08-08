@@ -29,7 +29,7 @@ import os
 import re
 from pathlib import Path
 
-from sparksage.config import DEFAULT_ENV_FILENAME
+from sparksage.config import resolve_config_path
 
 __all__ = [
     "KNOWN_CONFIG_KEYS",
@@ -150,6 +150,7 @@ def write_config(
     if not cleaned:
         return []
 
+    resolved.parent.mkdir(parents=True, exist_ok=True)
     text = resolved.read_text(encoding="utf-8") if resolved.is_file() else ""
     new_text = _apply_updates(text, cleaned)
     resolved.write_text(new_text, encoding="utf-8")
@@ -164,7 +165,9 @@ def write_config(
 
 
 def _resolve_path(path: str | os.PathLike[str] | None) -> Path:
-    return Path(path) if path is not None else Path(DEFAULT_ENV_FILENAME)
+    if path is not None:
+        return Path(path)
+    return resolve_config_path()
 
 
 def _safe_parse(path: Path) -> dict[str, str]:

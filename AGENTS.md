@@ -263,7 +263,12 @@ PYTHONPATH=src python3 examples/build_chunks.py
 - Configuration (`config.py`) is pure stdlib — never import `python-dotenv` or
   any env-loading library. `load_dotenv()` is called once at the top of
   `build_default_service()`; it reads `.env` from the CWD but **real env vars
-  always win** (`override=False`), matching 12-factor. The parser supports only
+  always win** (`override=False`), matching 12-factor. `resolve_config_path()`
+  points the config file (read by the `/api/v1/config` UI and loaded again at
+  startup) at `.env` in the CWD when one exists, otherwise
+  `SPARKSAGE_DATA_DIR/.env` — the writable durable location in the Docker
+  image (the non-root CWD `/app` is not writable, so the old save always
+  failed with `Permission denied`). The parser supports only
   the well-defined `.env` subset (`KEY=VALUE`, quotes, `export`, `#` comments)
   and deliberately does NOT do shell expansion (`$VAR`/`$(...)`/backticks) or
   multi-line values. `.env` is git-ignored; commit `.env.example` as a template
